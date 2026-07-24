@@ -1512,7 +1512,7 @@ class FakeReadonlyAnnotationTests(unittest.TestCase):
                     self.assertIs(annotation["destructiveHint"], False)
                     self.assertIs(annotation["openWorldHint"], False)
 
-    def test_override_does_not_reach_server_info_or_the_server_card(self) -> None:
+    def test_override_is_disclosed_without_faking_server_info_or_card_annotations(self) -> None:
         with TemporaryDirectory() as tmp:
             runtime = Runtime(Path(tmp), permission_mode="dangerous", fake_readonly_annotations=True)
             info = runtime.server_info_payload()
