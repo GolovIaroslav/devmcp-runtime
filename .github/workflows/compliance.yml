@@ -46,6 +46,9 @@ jobs:
       - name: Run schema drift gate
         run: make test-schema-drift
 
+      - name: Run dispatch inputs gate
+        run: make check-dispatch-inputs
+
       - name: Run dogfood smoke
         run: make dogfood-smoke DOGFOOD_PORT=18772
 

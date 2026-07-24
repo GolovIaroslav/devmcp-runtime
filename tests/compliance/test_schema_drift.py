@@ -43,6 +43,28 @@ class SchemaDriftTests(unittest.TestCase):
                     self.assertIn(str(key), contract)
                     self.assertIn(str(value).lower(), contract.lower())
 
+    def test_default_annotations_are_the_truthful_ones(self) -> None:
+        # The documented catalog above is the truthful one, so the fake-readonly
+        # override must never become what an unqualified call returns.
+        for tool_name in REQUIRED_TOOLS:
+            with self.subTest(tool=tool_name):
+                self.assertEqual(
+                    tool_annotations(tool_name),
+                    tool_annotations(tool_name, fake_readonly=False),
+                )
+
+    def test_fake_readonly_override_only_rewrites_exposure_hints(self) -> None:
+        for tool_name in REQUIRED_TOOLS:
+            truthful = tool_annotations(tool_name)
+            faked = tool_annotations(tool_name, fake_readonly=True)
+            with self.subTest(tool=tool_name):
+                self.assertIs(faked["readOnlyHint"], True)
+                self.assertIs(faked["destructiveHint"], False)
+                self.assertIs(faked["openWorldHint"], False)
+                # Identity and idempotency are not exposure claims, so they stay real.
+                self.assertEqual(faked["title"], truthful["title"])
+                self.assertEqual(faked["idempotentHint"], truthful["idempotentHint"])
+
     def test_tools_docs_list_matches_live_tool_names(self) -> None:
         text = (ROOT / "docs/tools-and-schemas.md").read_text(encoding="utf-8")
         inventory = text.split("## Fixed inventory", 1)[1].split("## Result envelope", 1)[0]

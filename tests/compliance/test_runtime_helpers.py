@@ -1481,5 +1481,111 @@ Maven home: /usr/share/maven
             self.assertEqual(log.get("commits", [])[0].get("subject"), "baseline fixture")
 
 
+class FakeReadonlyAnnotationTests(unittest.TestCase):
+    """The tools/list annotation override exists for clients that gate on
+    annotations, which no server-side permission mode can influence. It is only
+    defensible while the lie stays confined to tools/list, so these tests pin
+    both halves: what it changes, and what it must never change."""
+
+    MUTATING_TOOLS = ("apply_patch", "exec_command", "write_stdin", "kill_session")
+
+    def test_default_runtime_reports_truthful_annotations(self) -> None:
+        with TemporaryDirectory() as tmp:
+            runtime = Runtime(Path(tmp), permission_mode="dangerous")
+            self.assertFalse(runtime.fake_readonly_annotations)
+            annotations = {tool["name"]: tool["annotations"] for tool in runtime.list_tools()["tools"]}
+            for name in self.MUTATING_TOOLS:
+                with self.subTest(tool=name):
+                    self.assertFalse(annotations[name]["readOnlyHint"])
+            self.assertTrue(annotations["exec_command"]["destructiveHint"])
+            self.assertTrue(annotations["exec_command"]["openWorldHint"])
+            self.assertIsNone(runtime.server_info_payload()["annotation_override"])
+
+    def test_override_makes_every_listed_tool_report_read_only(self) -> None:
+        with TemporaryDirectory() as tmp:
+            runtime = Runtime(Path(tmp), permission_mode="dangerous", fake_readonly_annotations=True)
+            annotations = {tool["name"]: tool["annotations"] for tool in runtime.list_tools()["tools"]}
+            self.assertEqual(set(annotations), set(runtime.exposed_tool_names()))
+            for name, annotation in annotations.items():
+                with self.subTest(tool=name):
+                    self.assertIs(annotation["readOnlyHint"], True)
+                    self.assertIs(annotation["destructiveHint"], False)
+                    self.assertIs(annotation["openWorldHint"], False)
+
+    def test_override_is_disclosed_without_faking_server_info_or_card_annotations(self) -> None:
+        with TemporaryDirectory() as tmp:
+            runtime = Runtime(Path(tmp), permission_mode="dangerous", fake_readonly_annotations=True)
+            info = runtime.server_info_payload()
+            self.assertEqual(info["annotation_override"], "fake_readonly")
+
+            card_tools = server_module.server_card_payload(runtime)["tools"]
+            self.assertEqual(card_tools["annotationOverride"], "fake_readonly")
+            for name in self.MUTATING_TOOLS:
+                with self.subTest(tool=name):
+                    self.assertIn(name, card_tools["readOnlyHintFalse"])
+                    self.assertNotIn(name, card_tools["readOnlyHintTrue"])
+
+    def test_override_still_executes_and_mutates(self) -> None:
+        with TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            runtime = Runtime(workspace, permission_mode="dangerous", fake_readonly_annotations=True)
+            result = runtime.exec_command({"cmd": "echo ran > ran.txt", "timeout_ms": 30000, "yield_time_ms": 30000})
+            self.assertEqual(result.get("status"), "exited", result)
+            self.assertTrue((workspace / "ran.txt").exists(), "read-only annotation must not stop execution")
+
+    def test_override_is_reported_by_check_exec_environment(self) -> None:
+        with TemporaryDirectory() as tmp:
+            runtime = Runtime(Path(tmp), permission_mode="dangerous", fake_readonly_annotations=True)
+            warnings = runtime.check_exec_environment({})["warnings"]
+            self.assertTrue(
+                any("faked as read-only" in warning for warning in warnings),
+                warnings,
+            )
+
+    def test_override_requires_dangerous_permission_mode(self) -> None:
+        with TemporaryDirectory() as tmp:
+            for mode in ("safe", "trusted"):
+                with self.subTest(permission_mode=mode):
+                    with self.assertRaises(ToolFailure):
+                        Runtime(Path(tmp), permission_mode=mode, fake_readonly_annotations=True)
+
+    def test_policy_from_args_requires_dangerous_permission_mode(self) -> None:
+        parser = server_module.build_parser()
+        args = parser.parse_args(["--dangerously-fake-readonly-annotations", "--permission-mode", "trusted"])
+        with self.assertRaises(ValueError):
+            server_module.runtime_policy_from_args(args)
+
+        args = parser.parse_args(["--dangerously-fake-readonly-annotations", "--permission-mode", "dangerous"])
+        self.assertTrue(server_module.runtime_policy_from_args(args).fake_readonly_annotations)
+
+    def test_policy_from_args_reads_the_environment_switch(self) -> None:
+        parser = server_module.build_parser()
+        args = parser.parse_args(["--permission-mode", "dangerous"])
+        with patch.dict(
+            os.environ,
+            {"CODING_TOOLS_MCP_DANGEROUSLY_FAKE_READONLY_ANNOTATIONS": "1"},
+            clear=False,
+        ):
+            self.assertTrue(server_module.runtime_policy_from_args(args).fake_readonly_annotations)
+        self.assertFalse(server_module.runtime_policy_from_args(args).fake_readonly_annotations)
+
+    def test_override_over_http_requires_authentication(self) -> None:
+        # A tunnel forwards to a loopback bind, so the bind host cannot tell a
+        # private sandbox from a public one. Authentication is the real gate.
+        parser = server_module.build_parser()
+        with TemporaryDirectory() as tmp:
+            argv = [
+                "--workspace",
+                tmp,
+                "--permission-mode",
+                "dangerous",
+                "--dangerously-fake-readonly-annotations",
+            ]
+            args = parser.parse_args(argv)
+            with patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("CODING_TOOLS_MCP_AUTH_TOKEN", None)
+                self.assertEqual(server_module.run_http(args), 2)
+
+
 def file_path(name: str):
     return Path(name)
