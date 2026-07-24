@@ -20,6 +20,7 @@ It is not a prompt wrapper. It does not expose external agent accounts, memory, 
 - [Embedding in your app or agent](docs/embedding.md)
 - [Remote MCP](docs/remote-mcp.md)
 - [Cloudflare sandbox control worker](cloudflare/sandbox-control/README.md)
+- [npm launcher](npm/coding-tools-mcp/README.md)
 - [Tools and schemas](docs/tools-and-schemas.md)
 - [Permission modes](docs/permission-modes.md)
 - [Exec command recipes](docs/exec-command-recipes.md)
@@ -74,6 +75,23 @@ Use stdio for MCP clients:
 ```bash
 uvx coding-tools-mcp --stdio --workspace /path/to/repo
 ```
+
+If your toolchain is Node-based, launch the same server through npm:
+
+```bash
+npx coding-tools-mcp --stdio --workspace /path/to/repo
+```
+
+The npm package is a launcher only. The server itself stays the Python package
+on PyPI, which the launcher starts through `uvx` or `pipx run`, so `uv` or
+`pipx` must be on `PATH`. The launcher runs the latest PyPI release; pin a
+server version with `CODING_TOOLS_MCP_VERSION`:
+
+```bash
+CODING_TOOLS_MCP_VERSION=0.2.0 npx coding-tools-mcp --stdio --workspace /path/to/repo
+```
+
+The launcher's own npm version is independent of the server version it starts.
 
 If you are working from this checkout instead of a published package:
 
@@ -172,6 +190,20 @@ Cursor:
   "mcpServers": {
     "coding-tools": {
       "command": "uvx",
+      "args": ["coding-tools-mcp", "--stdio", "--workspace", "/path/to/repo"]
+    }
+  }
+}
+```
+
+Clients that prefer a Node entry point can swap `uvx` for `npx` in any of the
+examples above, keeping the same arguments:
+
+```json
+{
+  "mcpServers": {
+    "coding-tools": {
+      "command": "npx",
       "args": ["coding-tools-mcp", "--stdio", "--workspace", "/path/to/repo"]
     }
   }
