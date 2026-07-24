@@ -25,7 +25,7 @@
   `start-sandbox.yml`'s declared `workflow_dispatch` inputs and cross-checks
   `workflow_call`. It gates the deploy and runs in `make ci`.
 
-## 0.2.0 - 2026-07-11
+## 0.2.0 - 2026-07-24
 
 ### Changed
 
@@ -66,6 +66,39 @@
 - Reproducible dogfood efficiency metrics and a five-run 0.1.7/0.2.0 comparison;
   serialized tool-result bytes fell 37.279% with unchanged completion and call
   counts on the deterministic workload.
+- Desktop client MVP, shipped in the same distribution as the server and
+  exposed as the `coding-tools-mcp-desktop` entry point behind the optional
+  `[desktop]` extra: per-workspace profiles, local server start/stop, FRP and
+  Cloudflare tunnel modes (quick URL or named fixed domain), OAuth and bearer
+  credential setup with clipboard helpers, and concurrent health checks across
+  local and public `.well-known/mcp.json` plus OAuth authorization-server and
+  protected-resource metadata.
+- Desktop profile storage under `~/.coding-tools-mcp-desktop` that keeps
+  secrets in a separate file from profiles, writes both through `fsync` and
+  atomic replacement with `0600` files and `0700` directories, validates
+  profile IDs before deriving state paths, and drops unknown keys so records
+  written by other releases keep loading.
+- Desktop English and Simplified Chinese catalogs that follow the system
+  language on first launch and switch at runtime, a
+  `scripts/check_desktop_i18n.py` coverage and placeholder gate wired into
+  `make lint`, and `make desktop-i18n-update`, `-release`, and `-check`.
+- npm launcher package for `npx coding-tools-mcp`. It starts the PyPI server
+  through `uvx` or `pipx run`, forwards arguments and stdio, mirrors fatal
+  signals instead of remapping them to exit codes, and prints actionable
+  install steps when neither runner is on `PATH`. Its own version is
+  independent of the server version, which `CODING_TOOLS_MCP_VERSION` pins.
+- Cloudflare sandbox control Worker in `cloudflare/sandbox-control`: an
+  authenticated control plane that dispatches
+  `.github/workflows/start-sandbox.yml` through `POST /start` and through an
+  MCP JSON-RPC endpoint at `/mcp` exposing `start_coding_tools_sandbox` and
+  `get_coding_tools_sandbox_status`. It answers `initialize`, `ping`,
+  `resources/list`, and `prompts/list`, acknowledges notifications with `202`,
+  and reports GitHub dispatch failures with the ref and workflow that failed.
+  The Worker never runs code and never proxies MCP traffic.
+- `start-sandbox` workflow inputs for `tunnel_type`, `tunnel_hostname`,
+  `auth_token`, and `hide_auth_token`, so a sandbox can publish one reusable
+  Cloudflare named hostname with a secret-managed bearer token kept out of
+  workflow logs and run summaries.
 
 ### Removed
 
@@ -74,6 +107,11 @@
 - Duplicate image base64/data URLs and the `view_image.output` selector. Image
   bytes now appear once in one MCP image block.
 - JSON-RPC batch handling and the unimplemented logging capability declaration.
+
+### Fixed
+
+- Lowercase the owner segment when composing the GHCR sandbox image tag, so
+  builds from mixed-case repository owners resolve to a valid image reference.
 
 ### Security
 
