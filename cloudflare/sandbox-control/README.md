@@ -31,6 +31,26 @@ npx wrangler secret put GITHUB_TOKEN --config cloudflare/sandbox-control/wrangle
 npx wrangler deploy --config cloudflare/sandbox-control/wrangler.toml
 ```
 
+## Deploying From CI
+
+The `deploy-sandbox-control` workflow deploys this Worker on every push to `main`
+that touches `cloudflare/sandbox-control/**` or `.github/workflows/start-sandbox.yml`.
+It needs two repository secrets, `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`.
+
+Deploy from CI rather than by hand. The Worker builds the `workflow_dispatch` body
+that `start-sandbox.yml` has to declare, so the two are one contract: a change that
+lands in the workflow but never reaches the deployed Worker makes GitHub reject the
+dispatch with `422 Unexpected inputs provided`, before any run is created. CI
+deploying both halves together is what keeps them from drifting.
+`make check-dispatch-inputs` compares the two locally and also gates the deploy.
+
+`wrangler deploy` replaces the Worker's plain-text variables with the `[vars]` table
+in `wrangler.toml`, so that file is the source of truth once CI deploys — values
+edited in the Cloudflare dashboard are overwritten. `TUNNEL_HOSTNAME` may instead be
+supplied as the repository variable `SANDBOX_TUNNEL_HOSTNAME`, which is useful when
+the real hostname should not be committed. The workflow refuses to deploy while that
+value is still the `mcp.example.com` placeholder. Worker secrets are unaffected.
+
 ## Start A Sandbox
 
 Use the token stored in the Worker `CONTROL_TOKEN` secret:

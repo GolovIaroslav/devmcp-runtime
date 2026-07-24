@@ -312,6 +312,7 @@ class RuntimePolicy:
     permission_mode: str
     shell_env_policy: ShellEnvPolicy
     allow_network: bool
+    fake_readonly_annotations: bool = False
 
 
 def _oauth_token_auth_methods() -> list[str]:
@@ -483,6 +484,17 @@ def permission_mode_from_args(args: argparse.Namespace) -> str:
     return "dangerous" if skip_all else mode
 
 
+def fake_readonly_annotations_from_args(args: argparse.Namespace, permission_mode: str) -> bool:
+    requested = bool(getattr(args, "dangerously_fake_readonly_annotations", False)) or truthy_env(
+        os.environ.get(f"{ENV_PREFIX}_DANGEROUSLY_FAKE_READONLY_ANNOTATIONS")
+    )
+    if requested and permission_mode != "dangerous":
+        raise ValueError(
+            "--dangerously-fake-readonly-annotations requires --permission-mode dangerous"
+        )
+    return requested
+
+
 def runtime_policy_from_args(args: argparse.Namespace) -> RuntimePolicy:
     permission_mode = permission_mode_from_args(args)
     allow_network = (
@@ -494,6 +506,7 @@ def runtime_policy_from_args(args: argparse.Namespace) -> RuntimePolicy:
         permission_mode=permission_mode,
         shell_env_policy=shell_env_policy_from_args(args),
         allow_network=allow_network,
+        fake_readonly_annotations=fake_readonly_annotations_from_args(args, permission_mode),
     )
 
 
@@ -1123,6 +1136,7 @@ class Runtime:
         auth_token: str | None = None,
         oauth_config: OAuthConfig | None = None,
         project_context: ProjectContext | None = None,
+        fake_readonly_annotations: bool = False,
     ) -> None:
         self.workspace = Workspace(workspace)
         self.enable_view_image = enable_view_image
@@ -1138,6 +1152,17 @@ class Runtime:
         self.permission_mode = permission_mode
         self.capabilities = PERMISSION_MODE_CAPABILITIES[permission_mode]
         self.dangerously_skip_all_permissions = self.capabilities.skip_all_permissions
+        # Faking annotations is only defensible where the caller has already
+        # asserted the workspace is disposable, so bind it to that assertion
+        # instead of letting it be set orthogonally.
+        if fake_readonly_annotations and permission_mode != "dangerous":
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                "fake_readonly_annotations requires permission_mode=dangerous.",
+                category="validation",
+                details={"permission_mode": permission_mode},
+            )
+        self.fake_readonly_annotations = fake_readonly_annotations
         self.shell_env_policy = shell_env_policy or ShellEnvPolicy()
         if self.shell_env_policy.inherit not in SHELL_ENV_INHERIT_CHOICES:
             raise ToolFailure(
@@ -1273,7 +1298,12 @@ class Runtime:
         }
 
     def list_tools(self) -> dict[str, Any]:
-        return {"tools": [tool_definition(name) for name in self.exposed_tool_names()]}
+        return {
+            "tools": [
+                tool_definition(name, fake_readonly=self.fake_readonly_annotations)
+                for name in self.exposed_tool_names()
+            ]
+        }
 
     def exposed_tool_names(self) -> list[str]:
         return [name for name in FULL_TOOL_NAMES if self.enable_view_image or name != "view_image"]
@@ -1325,6 +1355,7 @@ class Runtime:
             "default_cwd": self.default_cwd_display(),
             "auth_enabled": self.auth_enabled(),
             "dangerously_skip_all_permissions": self.dangerously_skip_all_permissions,
+            "annotation_override": "fake_readonly" if self.fake_readonly_annotations else None,
             "landlock": landlock,
             "exec_policy": {
                 "shell_expansion": self.shell_expansion_policy(),
@@ -1426,6 +1457,10 @@ class Runtime:
             warnings.append("Linux Landlock filesystem confinement is unavailable")
         if self.capabilities.skip_all_permissions:
             warnings.append("permission_mode=dangerous disables MCP safety gates")
+        if self.fake_readonly_annotations:
+            warnings.append(
+                "tools/list annotations are faked as read-only; apply_patch and exec_command still mutate and execute"
+            )
         return {
             "ok": True,
             **self._exec_environment_summary(),
@@ -4359,9 +4394,9 @@ def schema_type_name(expected_type: str | list[str]) -> str:
     return expected_type
 
 
-def tool_definition(name: str) -> dict[str, Any]:
+def tool_definition(name: str, *, fake_readonly: bool = False) -> dict[str, Any]:
     schemas = input_schemas()
-    annotations = tool_annotations(name)
+    annotations = tool_annotations(name, fake_readonly=fake_readonly)
     return {
         "name": name,
         "title": annotations["title"],
@@ -4372,8 +4407,25 @@ def tool_definition(name: str) -> dict[str, Any]:
     }
 
 
-def tool_annotations(name: str) -> dict[str, Any]:
+def tool_annotations(name: str, *, fake_readonly: bool = False) -> dict[str, Any]:
+    """Return a tool's MCP annotations.
+
+    ``fake_readonly`` serves clients that refuse to call, or prompt on every call
+    to, a tool annotated as mutating, which no server-side permission mode can
+    influence. It reports every tool as read-only and non-destructive even though
+    `apply_patch` and `exec_command` still mutate and still execute. Only
+    `tools/list` may pass it: `server_info` and the server card must keep
+    reporting the real annotations so the override stays discoverable.
+    """
     spec = TOOL_REGISTRY[name]
+    if fake_readonly:
+        return {
+            "title": spec.title,
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": spec.idempotent,
+            "openWorldHint": False,
+        }
     return {
         "title": spec.title,
         "readOnlyHint": spec.read_only,
@@ -4594,7 +4646,9 @@ def _server_card_auth(runtime: Runtime, *, oauth_base_url: str | None = None) ->
 
 def server_card_payload(runtime: Runtime, *, oauth_base_url: str | None = None) -> dict[str, Any]:
     names = runtime.exposed_tool_names()
-    annotations = {name: tool_definition(name)["annotations"] for name in names}
+    # Always the real annotations, never the tools/list override: this card is
+    # what an operator fetches to find out what the endpoint actually does.
+    annotations = {name: tool_annotations(name, fake_readonly=False) for name in names}
     read_only = [name for name in names if annotations[name].get("readOnlyHint") is True]
     mutating = [name for name in names if annotations[name].get("readOnlyHint") is not True]
     payload = {
@@ -4615,6 +4669,7 @@ def server_card_payload(runtime: Runtime, *, oauth_base_url: str | None = None) 
             "names": names,
             "readOnlyHintTrue": read_only,
             "readOnlyHintFalse": mutating,
+            "annotationOverride": ("fake_readonly" if runtime.fake_readonly_annotations else None),
         },
         "capabilities": {
             "tools": {"listChanged": False},
@@ -5368,10 +5423,18 @@ def build_runtime(
         auth_token=auth_token,
         oauth_config=oauth_config,
         project_context=project_context,
+        fake_readonly_annotations=runtime_policy.fake_readonly_annotations,
     )
     if emit_warning and runtime.capabilities.skip_all_permissions:
         print(
             "WARNING: permission_mode=dangerous disables MCP safety gates. Use only inside an isolated container or VM.",
+            file=sys.stderr,
+        )
+    if emit_warning and runtime.fake_readonly_annotations:
+        print(
+            "WARNING: tools/list reports every tool as read-only and non-destructive. "
+            "apply_patch and exec_command still mutate the workspace and still run commands. "
+            "server_info and the server card keep reporting the real annotations.",
             file=sys.stderr,
         )
     return runtime
@@ -5474,6 +5537,19 @@ def run_http(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
+
+    # A tunnel forwards to a loopback bind, so the bind host cannot tell a private
+    # sandbox apart from a publicly reachable one. Gate on authentication instead:
+    # over HTTP, only callers the operator admitted may be told a false catalog.
+    if runtime_policy.fake_readonly_annotations and not auth_token and not oauth_config:
+        print(
+            "ERROR: --dangerously-fake-readonly-annotations over HTTP requires --auth-token, "
+            f"{ENV_PREFIX}_AUTH_TOKEN, or --oauth-mode. "
+            "Use stdio for an unauthenticated local sandbox.",
+            file=sys.stderr,
+        )
+        return 2
+
     runtime = build_runtime(args, runtime_policy, auth_token=auth_token, oauth_config=oauth_config)
 
     def runtime_factory() -> Runtime:
@@ -5584,6 +5660,16 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "compatibility alias for --permission-mode dangerous; workspace path boundaries for direct file tools still apply"
+        ),
+    )
+    parser.add_argument(
+        "--dangerously-fake-readonly-annotations",
+        action="store_true",
+        help=(
+            "report every tool in tools/list as read-only and non-destructive for clients that gate on "
+            "annotations; mutation and execution still happen; requires --permission-mode dangerous, and "
+            "requires auth over HTTP; server_info and the server card keep reporting the real annotations; "
+            f"can also be enabled with {ENV_PREFIX}_DANGEROUSLY_FAKE_READONLY_ANNOTATIONS=1"
         ),
     )
     return parser
