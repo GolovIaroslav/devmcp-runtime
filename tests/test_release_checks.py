@@ -4,8 +4,9 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from urllib.parse import parse_qs, urlparse
 
-from scripts.check_final_audit import select_successful_run
+from scripts.check_final_audit import select_successful_run, workflow_runs_url
 from scripts.check_release_versions import validate_release
 
 
@@ -57,6 +58,20 @@ class ReleaseMetadataTests(unittest.TestCase):
 
 
 class FinalAuditTests(unittest.TestCase):
+    def test_workflow_runs_url_filters_by_release_sha(self) -> None:
+        url = workflow_runs_url(
+            "https://api.github.com", "xyTom/coding-tools-mcp", "final-audit.yml", "abc123"
+        )
+        parsed = urlparse(url)
+        self.assertEqual(
+            parsed.path,
+            "/repos/xyTom/coding-tools-mcp/actions/workflows/final-audit.yml/runs",
+        )
+        self.assertEqual(
+            parse_qs(parsed.query),
+            {"status": ["success"], "head_sha": ["abc123"], "per_page": ["100"]},
+        )
+
     def test_selects_latest_successful_run_for_release_sha(self) -> None:
         runs = [
             {"id": 1, "head_sha": "abc", "status": "completed", "conclusion": "success"},

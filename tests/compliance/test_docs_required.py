@@ -115,6 +115,8 @@ class RequiredDocsTests(unittest.TestCase):
         for needle in (
             "scripts/check_release_versions.py",
             "scripts/check_final_audit.py",
+            'expected_ref="refs/tags/$RELEASE_TAG"',
+            'fetch-depth: 0',
             "Verify wheel contents and installation",
             "pypa/gh-action-pypi-publish",
         ):
@@ -125,6 +127,8 @@ class RequiredDocsTests(unittest.TestCase):
         for needle in (
             "workflow_dispatch",
             "scripts/check_final_audit.py",
+            'expected_ref="refs/tags/$RELEASE_TAG"',
+            'fetch-depth: 0',
             "npm@11.18.0",
             "npm publish",
         ):
@@ -132,7 +136,13 @@ class RequiredDocsTests(unittest.TestCase):
                 self.assertIn(needle, publish_npm)
 
         final_audit = (ROOT / ".github/workflows/final-audit.yml").read_text(encoding="utf-8")
-        for needle in ("git rev-list", "scripts/check_release_versions.py", "Validate referenced runs"):
+        for needle in (
+            "actions/setup-python@v6.2.0",
+            'expected_ref="refs/tags/$RELEASE_TAG"',
+            "git rev-list",
+            "scripts/check_release_versions.py",
+            "Validate referenced runs",
+        ):
             with self.subTest(workflow="final-audit", needle=needle):
                 self.assertIn(needle, final_audit)
 

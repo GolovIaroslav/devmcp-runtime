@@ -7,7 +7,7 @@ import argparse
 import json
 import os
 from urllib.error import HTTPError
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
 
@@ -24,35 +24,35 @@ def select_successful_run(workflow_runs: list[dict[str, object]], sha: str) -> d
     return max(matches, key=lambda run: int(run.get("id", 0)))
 
 
-def fetch_runs(api_url: str, repo: str, workflow: str, token: str) -> list[dict[str, object]]:
+def workflow_runs_url(api_url: str, repo: str, workflow: str, sha: str) -> str:
     owner, name = repo.split("/", 1)
     base = (
         f"{api_url.rstrip('/')}/repos/{quote(owner, safe='')}/{quote(name, safe='')}"
         f"/actions/workflows/{quote(workflow, safe='')}/runs"
     )
-    runs: list[dict[str, object]] = []
-    for page in range(1, 11):
-        request = Request(
-            f"{base}?status=success&per_page=100&page={page}",
-            headers={
-                "Accept": "application/vnd.github+json",
-                "Authorization": f"Bearer {token}",
-                "X-GitHub-Api-Version": "2022-11-28",
-                "User-Agent": "coding-tools-mcp-release-audit",
-            },
-        )
-        try:
-            with urlopen(request, timeout=30) as response:
-                payload = json.load(response)
-        except HTTPError as error:
-            detail = error.read().decode("utf-8", errors="replace")
-            raise SystemExit(f"GitHub Actions API failed with {error.code}: {detail}") from error
-        page_runs = payload.get("workflow_runs", [])
-        if not isinstance(page_runs, list):
-            raise SystemExit("GitHub Actions API returned an invalid workflow_runs payload")
-        runs.extend(page_runs)
-        if len(page_runs) < 100:
-            break
+    query = urlencode({"status": "success", "head_sha": sha, "per_page": 100})
+    return f"{base}?{query}"
+
+
+def fetch_runs(api_url: str, repo: str, workflow: str, sha: str, token: str) -> list[dict[str, object]]:
+    request = Request(
+        workflow_runs_url(api_url, repo, workflow, sha),
+        headers={
+            "Accept": "application/vnd.github+json",
+            "Authorization": f"Bearer {token}",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "User-Agent": "coding-tools-mcp-release-audit",
+        },
+    )
+    try:
+        with urlopen(request, timeout=30) as response:
+            payload = json.load(response)
+    except HTTPError as error:
+        detail = error.read().decode("utf-8", errors="replace")
+        raise SystemExit(f"GitHub Actions API failed with {error.code}: {detail}") from error
+    runs = payload.get("workflow_runs", [])
+    if not isinstance(runs, list):
+        raise SystemExit("GitHub Actions API returned an invalid workflow_runs payload")
     return runs
 
 
@@ -67,7 +67,9 @@ def main() -> int:
     if not token:
         raise SystemExit("GITHUB_TOKEN is required to verify final-audit evidence")
     api_url = os.environ.get("GITHUB_API_URL", "https://api.github.com")
-    run = select_successful_run(fetch_runs(api_url, args.repo, args.workflow, token), args.sha)
+    run = select_successful_run(
+        fetch_runs(api_url, args.repo, args.workflow, args.sha, token), args.sha
+    )
     if run is None:
         raise SystemExit(
             f"no successful {args.workflow} run was found for release commit {args.sha}"

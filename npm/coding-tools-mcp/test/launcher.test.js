@@ -16,11 +16,13 @@ async function writeExecutable(directory, name, body) {
   return target;
 }
 
-function runLauncher(binDirectory, args = [], extraEnv = {}) {
+function runLauncher(binDirectory, args = [], extraEnv = {}, ambientEnv = process.env) {
+  const env = { ...ambientEnv };
+  delete env.CODING_TOOLS_MCP_VERSION;
   return spawnSync(process.execPath, [launcher, ...args], {
     encoding: "utf8",
     env: {
-      ...process.env,
+      ...env,
       ...extraEnv,
       PATH: binDirectory,
     },
@@ -51,7 +53,12 @@ test("pipx is used when uvx is unavailable", async () => {
   const output = path.join(directory, "args.txt");
   await writeExecutable(directory, "pipx", 'printf "%s\\n" "$@" > "$RESULT_FILE"');
 
-  const result = runLauncher(directory, ["--help"], { RESULT_FILE: output });
+  const result = runLauncher(
+    directory,
+    ["--help"],
+    { RESULT_FILE: output },
+    { ...process.env, CODING_TOOLS_MCP_VERSION: "9.9.9" },
+  );
 
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual((await readFile(output, "utf8")).trim().split("\n"), [

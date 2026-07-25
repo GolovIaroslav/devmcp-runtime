@@ -1,4 +1,6 @@
 PYTHON ?= python3
+PROJECT_VERSION := $(shell $(PYTHON) -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
+RELEASE_TAG ?= v$(PROJECT_VERSION)
 COMPLIANCE_RUNNER := PYTHONDONTWRITEBYTECODE=1 $(PYTHON) -m tests.compliance.runner
 PYTHON_SOURCES := coding_tools_mcp apps/desktop-client/mcp_desktop_client tests benchmarks
 MYPY_TARGETS := coding_tools_mcp benchmarks/mcp_http.py benchmarks/runtime_latency.py benchmarks/swebench/run_smoke.py benchmarks/swebench/generate_reference_predictions.py benchmarks/real_workloads.py
@@ -34,7 +36,7 @@ check-npm-launcher:
 	cd npm/coding-tools-mcp && npm pack --dry-run --json >/dev/null
 
 check-release:
-	$(PYTHON) scripts/check_release_versions.py --tag v0.2.0
+	$(PYTHON) scripts/check_release_versions.py --tag "$(RELEASE_TAG)"
 
 typecheck:
 	$(PYTHON) -m mypy $(MYPY_FLAGS) $(MYPY_TARGETS)
