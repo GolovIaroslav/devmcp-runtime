@@ -11,6 +11,7 @@ on:
         default: "v0.2.0"
 
 permissions:
+  actions: read
   contents: read
 
 jobs:
@@ -37,6 +38,14 @@ jobs:
 
       - name: Validate release metadata
         run: python scripts/check_release_versions.py --tag "$RELEASE_TAG"
+
+      - name: Require final audit for release commit
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python scripts/check_final_audit.py \
+            --repo "$GITHUB_REPOSITORY" \
+            --sha "$(git rev-parse HEAD)"
 
       - name: Build source and wheel distributions
         run: python -m build

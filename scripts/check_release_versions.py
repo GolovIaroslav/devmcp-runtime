@@ -13,38 +13,44 @@ import tomllib
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--tag", required=True, help="Release tag, for example v0.2.0")
-    args = parser.parse_args()
-
-    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+def validate_release(root: Path, tag: str) -> tuple[str, str]:
+    pyproject = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
     project_version = pyproject["project"]["version"]
 
-    package_init = (ROOT / "coding_tools_mcp" / "__init__.py").read_text(encoding="utf-8")
+    package_init = (root / "coding_tools_mcp" / "__init__.py").read_text(encoding="utf-8")
     match = re.search(r'^__version__\s*=\s*["\']([^"\']+)["\']', package_init, re.MULTILINE)
     if not match:
         raise SystemExit("coding_tools_mcp.__version__ was not found")
     module_version = match.group(1)
 
     expected_tag = f"v{project_version}"
-    if args.tag != expected_tag:
-        raise SystemExit(f"release tag {args.tag!r} does not match {expected_tag!r}")
+    if tag != expected_tag:
+        raise SystemExit(f"release tag {tag!r} does not match {expected_tag!r}")
     if module_version != project_version:
         raise SystemExit(
             f"pyproject version {project_version!r} does not match module version {module_version!r}"
         )
 
-    changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    changelog = (root / "CHANGELOG.md").read_text(encoding="utf-8")
     if not re.search(rf"^## {re.escape(project_version)} - \d{{4}}-\d{{2}}-\d{{2}}$", changelog, re.MULTILINE):
         raise SystemExit(f"CHANGELOG.md has no dated {project_version} release heading")
     if re.search(r"^## Unreleased\s*$", changelog, re.MULTILINE):
         raise SystemExit("CHANGELOG.md still contains an Unreleased section")
 
-    npm_package = json.loads((ROOT / "npm" / "coding-tools-mcp" / "package.json").read_text(encoding="utf-8"))
+    npm_package = json.loads((root / "npm" / "coding-tools-mcp" / "package.json").read_text(encoding="utf-8"))
     npm_version = npm_package["version"]
     if re.search(r"(?:^|[-.])(alpha|beta|rc|dev|next)(?:[-.]|$)", npm_version, re.IGNORECASE):
         raise SystemExit(f"npm launcher version {npm_version!r} is not stable")
+
+    return project_version, npm_version
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--tag", required=True, help="Release tag, for example v0.2.0")
+    args = parser.parse_args()
+
+    project_version, npm_version = validate_release(ROOT, args.tag)
 
     print(
         f"Release metadata OK: Python {project_version} ({args.tag}), "

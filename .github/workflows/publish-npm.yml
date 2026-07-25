@@ -1,8 +1,6 @@
 name: publish-npm
 
 on:
-  release:
-    types: [published]
   workflow_dispatch:
     inputs:
       release_tag:
@@ -11,6 +9,7 @@ on:
         default: "v0.2.0"
 
 permissions:
+  actions: read
   contents: read
 
 jobs:
@@ -18,7 +17,7 @@ jobs:
     name: Test and pack npm launcher
     runs-on: ubuntu-latest
     env:
-      RELEASE_TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.release_tag }}
+      RELEASE_TAG: ${{ inputs.release_tag }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v6.0.2
@@ -31,13 +30,22 @@ jobs:
           python-version: "3.11"
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: "24"
           registry-url: "https://registry.npmjs.org"
+          package-manager-cache: false
 
       - name: Validate release metadata
         run: python scripts/check_release_versions.py --tag "$RELEASE_TAG"
+
+      - name: Require final audit for release commit
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python scripts/check_final_audit.py \
+            --repo "$GITHUB_REPOSITORY" \
+            --sha "$(git rev-parse HEAD)"
 
       - name: Test launcher
         run: make check-npm-launcher
@@ -72,13 +80,14 @@ jobs:
           path: dist
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: "24"
           registry-url: "https://registry.npmjs.org"
+          package-manager-cache: false
 
-      - name: Install current npm CLI
-        run: npm install --global npm@latest
+      - name: Install OIDC-capable npm CLI
+        run: npm install --global npm@11.18.0
 
       - name: Publish launcher with provenance
         run: npm publish dist/*.tgz --access public --provenance
