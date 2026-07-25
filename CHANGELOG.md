@@ -1,30 +1,5 @@
 # Changelog
 
-## Unreleased
-
-### Added
-
-- `--dangerously-fake-readonly-annotations` and
-  `CODING_TOOLS_MCP_DANGEROUSLY_FAKE_READONLY_ANNOTATIONS`, which report every tool
-  in `tools/list` as read-only and non-destructive. This restores the one capability
-  lost with the `compat-readonly-all` profile in 0.2.0: a client that gates on
-  annotations is unreachable from server-side permission modes, so `dangerous` mode
-  cannot quiet it. Unlike the old profile the catalog is untouched and the claim is
-  fenced in — it requires `dangerous` permission mode, requires authentication over
-  HTTP because a tunnel forwards to a loopback bind, and is confined to `tools/list`.
-  `server_info.annotation_override`, the server card's `tools.annotationOverride`,
-  and `check_exec_environment` all report it, and both `server_info` and the server
-  card keep publishing the real per-tool annotations.
-- A `deploy-sandbox-control` workflow that deploys the Cloudflare control-plane
-  Worker on every push touching `cloudflare/sandbox-control/**` or
-  `start-sandbox.yml`. Nothing deployed the Worker before, so its half of the
-  `workflow_dispatch` contract could sit unshipped indefinitely while the workflow
-  half moved on, which GitHub rejects with `422 Unexpected inputs provided` before
-  creating a run.
-- `make check-dispatch-inputs`, which compares the Worker's dispatch body against
-  `start-sandbox.yml`'s declared `workflow_dispatch` inputs and cross-checks
-  `workflow_call`. It gates the deploy and runs in `make ci`.
-
 ## 0.2.0 - 2026-07-24
 
 ### Changed
@@ -99,6 +74,26 @@
   `auth_token`, and `hide_auth_token`, so a sandbox can publish one reusable
   Cloudflare named hostname with a secret-managed bearer token kept out of
   workflow logs and run summaries.
+- `--dangerously-fake-readonly-annotations` and
+  `CODING_TOOLS_MCP_DANGEROUSLY_FAKE_READONLY_ANNOTATIONS`, which report every tool
+  in `tools/list` as read-only and non-destructive. This restores the one capability
+  lost when the `compat-readonly-all` profile was removed: a client that gates on
+  annotations is unreachable from server-side permission modes, so `dangerous` mode
+  cannot quiet it. Unlike the old profile the catalog is untouched and the claim is
+  fenced in — it requires `dangerous` permission mode, requires authentication over
+  HTTP because a tunnel forwards to a loopback bind, and is confined to `tools/list`.
+  `server_info.annotation_override`, the server card's `tools.annotationOverride`,
+  and `check_exec_environment` all report it, and both `server_info` and the server
+  card keep publishing the real per-tool annotations.
+- A `deploy-sandbox-control` workflow that deploys the Cloudflare control-plane
+  Worker on every push touching `cloudflare/sandbox-control/**` or
+  `start-sandbox.yml`. Nothing deployed the Worker before, so its half of the
+  `workflow_dispatch` contract could sit unshipped indefinitely while the workflow
+  half moved on, which GitHub rejects with `422 Unexpected inputs provided` before
+  creating a run.
+- `make check-dispatch-inputs`, which compares the Worker's dispatch body against
+  `start-sandbox.yml`'s declared `workflow_dispatch` inputs and cross-checks
+  `workflow_call`. It gates the deploy and runs in `make ci`.
 
 ### Removed
 

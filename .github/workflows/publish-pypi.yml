@@ -4,6 +4,11 @@ on:
   release:
     types: [published]
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Existing release tag to publish"
+        required: true
+        default: "v0.2.0"
 
 permissions:
   contents: read
@@ -12,9 +17,13 @@ jobs:
   build:
     name: Build distribution
     runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.release_tag }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v6.0.2
+        with:
+          ref: ${{ env.RELEASE_TAG }}
 
       - name: Set up Python
         uses: actions/setup-python@v6.2.0
@@ -26,11 +35,53 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install build twine
 
+      - name: Validate release metadata
+        run: python scripts/check_release_versions.py --tag "$RELEASE_TAG"
+
       - name: Build source and wheel distributions
         run: python -m build
 
       - name: Check distribution metadata
         run: python -m twine check dist/*
+
+      - name: Verify wheel contents and installation
+        run: |
+          python - <<'PY'
+          import glob
+          import zipfile
+
+          wheel = glob.glob("dist/*.whl")
+          if len(wheel) != 1:
+              raise SystemExit(f"expected one wheel, found {wheel}")
+          required = {
+              "coding_tools_mcp/__init__.py",
+              "mcp_desktop_client/app.py",
+              "mcp_desktop_client/locales/app_zh_CN.qm",
+              "mcp_desktop_client/locales/app_zh_CN.ts",
+          }
+          with zipfile.ZipFile(wheel[0]) as archive:
+              names = set(archive.namelist())
+              missing = sorted(required - names)
+              if missing:
+                  raise SystemExit(f"wheel is missing: {missing}")
+              entry_points = archive.read(
+                  next(name for name in names if name.endswith("entry_points.txt"))
+              ).decode()
+              for command in ("coding-tools-mcp", "coding-tools-mcp-desktop"):
+                  if command not in entry_points:
+                      raise SystemExit(f"wheel entry point is missing: {command}")
+          PY
+          python -m venv .package-verify
+          .package-verify/bin/python -m pip install dist/*.whl
+          .package-verify/bin/coding-tools-mcp --help >/dev/null
+          .package-verify/bin/python - <<'PY'
+          import coding_tools_mcp
+          import tomllib
+
+          with open("pyproject.toml", "rb") as handle:
+              expected = tomllib.load(handle)["project"]["version"]
+          assert coding_tools_mcp.__version__ == expected
+          PY
 
       - name: Upload distribution artifacts
         uses: actions/upload-artifact@v7.0.1
