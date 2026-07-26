@@ -158,13 +158,7 @@ async function startSandbox(input, env) {
   const endpoint = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions/workflows/${encodeURIComponent(workflowId)}/dispatches`;
   const response = await fetch(endpoint, {
     method: "POST",
-    headers: {
-      Accept: "application/vnd.github+json",
-      Authorization: `Bearer ${githubToken}`,
-      "Content-Type": "application/json",
-      "User-Agent": "coding-tools-sandbox-control-worker",
-      "X-GitHub-Api-Version": "2026-03-10",
-    },
+    headers: { ...githubHeaders(githubToken), "Content-Type": "application/json" },
     body: JSON.stringify({ ref, inputs }),
   });
 
@@ -205,6 +199,9 @@ async function getSandboxStatus(input, env) {
   const perPage = runId ? 1 : cleanPerPage(input.per_page ?? 5);
   const checkEndpoint = cleanOptionalBoolean(input.check_endpoint ?? false, "check_endpoint");
   const tunnelHostname = cleanOptionalHostname(input.tunnel_hostname ?? env.TUNNEL_HOSTNAME ?? "");
+  // Start the tunnel probe now so it runs concurrently with the GitHub API
+  // calls below; probeMcpEndpoint never rejects.
+  const endpointProbePromise = checkEndpoint ? probeMcpEndpoint(tunnelHostname, env) : null;
 
   let latestRun = null;
   let recentRuns = [];
@@ -222,7 +219,7 @@ async function getSandboxStatus(input, env) {
   }
 
   const run = summarizeWorkflowRun(latestRun);
-  const endpointProbe = checkEndpoint ? await probeMcpEndpoint(tunnelHostname, env) : null;
+  const endpointProbe = endpointProbePromise ? await endpointProbePromise : null;
   const mcpUrl = tunnelHostname ? `https://${tunnelHostname}/mcp` : null;
 
   return {
@@ -241,15 +238,19 @@ async function getSandboxStatus(input, env) {
   };
 }
 
+function githubHeaders(githubToken) {
+  return {
+    Accept: "application/vnd.github+json",
+    Authorization: `Bearer ${githubToken}`,
+    "User-Agent": "coding-tools-sandbox-control-worker",
+    "X-GitHub-Api-Version": "2026-03-10",
+  };
+}
+
 async function fetchGitHubJson(endpoint, githubToken, errorCode) {
   const response = await fetch(endpoint, {
     method: "GET",
-    headers: {
-      Accept: "application/vnd.github+json",
-      Authorization: `Bearer ${githubToken}`,
-      "User-Agent": "coding-tools-sandbox-control-worker",
-      "X-GitHub-Api-Version": "2026-03-10",
-    },
+    headers: githubHeaders(githubToken),
   });
   const text = await response.text();
   if (!response.ok) {
@@ -451,12 +452,9 @@ function cleanEnum(value, allowed, name) {
 }
 
 function cleanHostname(value, tunnelType) {
-  const hostname = String(value ?? "").replace(/^https?:\/\//, "").split("/")[0].trim();
   if (tunnelType !== "named") return "";
+  const hostname = cleanOptionalHostname(value);
   if (!hostname) throw new HttpError(400, "missing_tunnel_hostname", "tunnel_hostname is required when tunnel_type=named.");
-  if (!/^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$/.test(hostname)) {
-    throw new HttpError(400, "invalid_tunnel_hostname", "tunnel_hostname must be a valid hostname, for example mcp.example.com.");
-  }
   return hostname;
 }
 

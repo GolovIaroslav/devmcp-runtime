@@ -2,29 +2,6 @@
 <!DOCTYPE TS>
 <TS version="2.1" language="zh_CN" sourcelanguage="en_US">
 <context>
-    <name>Health</name>
-    <message>
-        <location filename="../health.py" line="+59"/>
-        <source>Local discovery</source>
-        <translation>本地发现端点</translation>
-    </message>
-    <message>
-        <location line="+1"/>
-        <source>Public discovery</source>
-        <translation>公网发现端点</translation>
-    </message>
-    <message>
-        <location line="+1"/>
-        <source>OAuth authorization metadata</source>
-        <translation>OAuth 授权元数据</translation>
-    </message>
-    <message>
-        <location line="+1"/>
-        <source>OAuth protected-resource metadata</source>
-        <translation>OAuth 受保护资源元数据</translation>
-    </message>
-</context>
-<context>
     <name>LanguageManager</name>
     <message>
         <location filename="../language_manager.py" line="+66"/>

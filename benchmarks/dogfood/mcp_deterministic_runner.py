@@ -26,7 +26,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from benchmarks.mcp_http import McpHttpClient, McpHttpError  # noqa: E402 - repo path is bootstrapped above
+from benchmarks.mcp_http import McpHttpClient, McpHttpError, connect_with_retry  # noqa: E402 - repo path is bootstrapped above
 from benchmarks.runtime_latency import percentile  # noqa: E402 - repo path is bootstrapped above
 
 
@@ -420,17 +420,7 @@ def start_server(command: str | None, workspace: Path, endpoint: str) -> subproc
 
 
 def connect(endpoint: str, startup_timeout: float) -> tuple[McpHttpClient | None, dict[str, Any] | None, str | None]:
-    deadline = time.monotonic() + startup_timeout
-    last_error: str | None = None
-    while time.monotonic() <= deadline:
-        client = McpHttpClient(endpoint, timeout=10)
-        try:
-            initialize_result = client.initialize()
-            return client, initialize_result, None
-        except McpHttpError as exc:
-            last_error = str(exc)
-            time.sleep(0.25)
-    return None, None, last_error or "startup timeout elapsed"
+    return connect_with_retry(endpoint, startup_timeout, poll_interval=0.25)
 
 
 def result_text(result: dict[str, Any]) -> str:

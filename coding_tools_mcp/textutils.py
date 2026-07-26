@@ -116,11 +116,12 @@ def truncate_text_tail(text: str, *, max_lines: int = DEFAULT_MAX_LINES, max_byt
             truncated_by = "bytes"
             if not output:
                 partial = truncate_string_to_bytes_from_end(line, max_bytes)
-                output.insert(0, partial)
+                output.append(partial)
                 last_line_partial = True
             break
-        output.insert(0, line)
+        output.append(line)
         output_bytes += line_bytes
+    output.reverse()
     content = "\n".join(output)
     return TextTruncation(
         content,

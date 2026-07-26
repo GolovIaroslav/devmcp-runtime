@@ -417,7 +417,12 @@ def find_subsequence_all(lines: list[str], needle: list[str]) -> list[int]:
     if not needle:
         return [0]
     limit = len(lines) - len(needle) + 1
-    return [index for index in range(max(0, limit)) if lines[index : index + len(needle)] == needle]
+    first = needle[0]
+    return [
+        index
+        for index in range(max(0, limit))
+        if lines[index] == first and lines[index : index + len(needle)] == needle
+    ]
 
 
 def strip_bom(text: str) -> tuple[str, str]:

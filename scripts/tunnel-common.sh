@@ -229,3 +229,20 @@ EOF
       ;;
   esac
 }
+
+# Shared preamble for the provider scripts: resolves the standard env
+# defaults, starts the MCP server, and prints the connection config. The
+# caller then runs its provider-specific tunnel command using $PORT.
+tunnel_setup() {
+  local tool="$1" label="$2" host_placeholder="$3" workspace_arg="${4:-}"
+  WORKSPACE="${workspace_arg:-${CODING_TOOLS_MCP_WORKSPACE:-$PWD}}"
+  PORT="${CODING_TOOLS_MCP_PORT:-8765}"
+  SERVER_BIN="${CODING_TOOLS_MCP_SERVER_BIN:-coding-tools-mcp}"
+  AUTH_MODE="${CODING_TOOLS_MCP_AUTH_MODE:-bearer}"
+
+  resolve_auth_credentials
+
+  ensure_tunnel_command "$tool"
+  start_coding_tools_mcp "$WORKSPACE" "$PORT" "$AUTH_MODE" "$TOKEN" "$SERVER_BIN"
+  print_tunnel_config "$label" "$host_placeholder" "$PORT" "$AUTH_MODE" "$TOKEN"
+}

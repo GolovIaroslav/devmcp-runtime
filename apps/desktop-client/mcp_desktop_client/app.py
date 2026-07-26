@@ -29,7 +29,7 @@ from PySide6.QtWidgets import (
 
 from .i18n import tr
 from .language_manager import LanguageManager
-from .models import WorkspaceProfile, build_profile
+from .models import MCP_ENDPOINT_PATH, WorkspaceProfile, build_profile
 from .runtime import RuntimeManager
 from .storage import load_profiles, log_dir_for_profile, save_profiles
 from .theme import STYLESHEET
@@ -790,14 +790,18 @@ class MainWindow(QMainWindow):
             "\n\n".join(output) if output else tr("MainWindow", "No logs are available yet.")
         )
 
-    def _render_status(self, status) -> None:
+    def _state_text(self, state: str) -> str:
         state_map = {
             "running": tr("MainWindow", "Running"),
             "stopped": tr("MainWindow", "Stopped"),
             "starting": tr("MainWindow", "Starting"),
+            "stopping": tr("MainWindow", "Stopping"),
             "error": tr("MainWindow", "Error"),
         }
-        state_text = state_map.get(status.state, status.state)
+        return state_map.get(state, state)
+
+    def _render_status(self, status) -> None:
+        state_text = self._state_text(status.state)
         details = [f"{state_text}  PID={status.pid or '-'}", status.local_message]
         if status.public_message:
             details.append(tr("MainWindow", "Public: {message}").format(message=status.public_message))
@@ -957,18 +961,11 @@ class MainWindow(QMainWindow):
         base_url = self._draft_public_url().rstrip("/")
         if not base_url:
             return "-"
-        return f"{base_url}/mcp"
+        return f"{base_url}{MCP_ENDPOINT_PATH}"
 
     def _workspace_summary(self, profile: WorkspaceProfile) -> str:
         state = self._workspace_state(profile)
         endpoint = self._profile_endpoint_summary(profile)
-        state_map = {
-            "running": tr("MainWindow", "Running"),
-            "stopped": tr("MainWindow", "Stopped"),
-            "starting": tr("MainWindow", "Starting"),
-            "error": tr("MainWindow", "Error"),
-            "stopping": tr("MainWindow", "Stopping"),
-        }
         return "\n".join(
             [
                 profile.name,
@@ -983,7 +980,7 @@ class MainWindow(QMainWindow):
                 tr(
                     "MainWindow",
                     "Status: {status}  URL: {endpoint}",
-                ).format(status=state_map.get(state, state), endpoint=endpoint or "-"),
+                ).format(status=self._state_text(state), endpoint=endpoint or "-"),
             ]
         )
 
@@ -1068,7 +1065,7 @@ class MainWindow(QMainWindow):
         if profile.tunnel.type == "frp":
             return profile.endpoint
         if profile.tunnel.type == "cloudflare" and profile.tunnel.cloudflare_mode == "named" and profile.tunnel.public_url.strip():
-            return f"{profile.tunnel.public_url.rstrip('/')}/mcp"
+            return f"{profile.tunnel.public_url.rstrip('/')}{MCP_ENDPOINT_PATH}"
         return "-"
 
     def _workspace_state(self, profile: WorkspaceProfile) -> str:

@@ -343,11 +343,14 @@ class RuntimeHelperTests(unittest.TestCase):
             def poll(self) -> None:
                 return None
 
+            def wait(self, timeout: float | None = None) -> None:
+                raise subprocess.TimeoutExpired(cmd="still-running", timeout=timeout or 0)
+
         with TemporaryDirectory() as tmp:
             runtime = Runtime(Path(tmp))
             session = runtime._make_session(StillRunningProcess())  # type: ignore[arg-type]
             runtime.sessions[session.session_id] = session
-            with patch.object(runtime, "_terminate_process_group", return_value=None):
+            with patch.object(server_module, "terminate_process_group", return_value=None):
                 result = runtime.kill_session({"session_id": session.session_id, "wait_ms": 0, "kill_wait_ms": 0})
 
         self.assertFalse(result.get("killed"), result)
@@ -581,7 +584,7 @@ class RuntimeHelperTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             runtime = Runtime(
                 Path(tmp),
-                dangerously_skip_all_permissions=True,
+                permission_mode="dangerous",
                 shell_env_policy=ShellEnvPolicy(inherit="all"),
             )
             host_env = {
@@ -708,7 +711,7 @@ class RuntimeHelperTests(unittest.TestCase):
                 default_runtime._check_command_policy("curl https://example.com", {})
             self.assertEqual(cm.exception.code, "PERMISSION_REQUIRED")
 
-            dangerous_runtime = Runtime(workspace, dangerously_skip_all_permissions=True)
+            dangerous_runtime = Runtime(workspace, permission_mode="dangerous")
             dangerous_runtime._check_command_policy("curl https://example.com", {})
             grant = dangerous_runtime.request_permissions(
                 {
@@ -1236,8 +1239,15 @@ Maven home: /usr/share/maven
                     {"cmd": "sleep 0.02", "timeout_ms": 2000, "yield_time_ms": 0, "max_output_bytes": 64}
                 )
                 session_ids.append(str(result["session_id"]))
-            time.sleep(0.2)
-            runtime._prune_sessions()
+            # Poll instead of a fixed sleep: the short-lived processes finish
+            # on their own schedule, and eviction only requires that a prune
+            # after exit moves them out of active storage.
+            eviction_deadline = time.time() + 5
+            while time.time() < eviction_deadline:
+                runtime._prune_sessions()
+                if not runtime.sessions:
+                    break
+                time.sleep(0.05)
             self.assertEqual(runtime.sessions, {})
             self.assertLessEqual(len(runtime.output_sessions), 20)
             self.assertTrue(set(runtime.output_sessions).issubset(set(session_ids)))
@@ -1572,18 +1582,27 @@ class FakeReadonlyAnnotationTests(unittest.TestCase):
     def test_override_over_http_requires_authentication(self) -> None:
         # A tunnel forwards to a loopback bind, so the bind host cannot tell a
         # private sandbox from a public one. Authentication is the real gate.
-        parser = server_module.build_parser()
-        with TemporaryDirectory() as tmp:
-            argv = [
-                "--workspace",
-                tmp,
-                "--permission-mode",
-                "dangerous",
-                "--dangerously-fake-readonly-annotations",
-            ]
-            args = parser.parse_args(argv)
-            with patch.dict(os.environ, {}, clear=False):
-                os.environ.pop("CODING_TOOLS_MCP_AUTH_TOKEN", None)
+        # Ambient CODING_TOOLS_MCP_* vars (e.g. from the devcontainer) feed the
+        # parser defaults and would auto-enable auth, turning the expected
+        # refusal into a live server that hangs the suite — scrub them first.
+        with patch.dict(os.environ, {}, clear=False):
+            for name in (
+                "CODING_TOOLS_MCP_AUTH_TOKEN",
+                "CODING_TOOLS_MCP_HOST",
+                "CODING_TOOLS_MCP_PORT",
+                "CODING_TOOLS_MCP_GENERATE_AUTH_TOKEN",
+            ):
+                os.environ.pop(name, None)
+            parser = server_module.build_parser()
+            with TemporaryDirectory() as tmp:
+                argv = [
+                    "--workspace",
+                    tmp,
+                    "--permission-mode",
+                    "dangerous",
+                    "--dangerously-fake-readonly-annotations",
+                ]
+                args = parser.parse_args(argv)
                 self.assertEqual(server_module.run_http(args), 2)
 
 

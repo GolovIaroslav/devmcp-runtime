@@ -9,8 +9,18 @@ PROTOCOL_VERSION = "2025-11-25"
 SUPPORTED_PROTOCOL_VERSIONS = (PROTOCOL_VERSION, "2025-06-18")
 
 
+def jsonrpc_error(
+    request_id: str | int | None, code: int, message: str, data: Any = None
+) -> dict[str, Any]:
+    """Build a JSON-RPC error response envelope."""
+    error: dict[str, Any] = {"code": code, "message": message}
+    if data is not None:
+        error["data"] = data
+    return {"jsonrpc": "2.0", "id": request_id, "error": error}
+
+
 def invalid_request_response() -> dict[str, Any]:
-    return {"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "Invalid Request"}}
+    return jsonrpc_error(None, -32600, "Invalid Request")
 
 
 def response_id(request: dict[str, Any]) -> str | int | None:
@@ -114,7 +124,4 @@ def dispatch_rpc(runtime: Any, request: dict[str, Any]) -> dict[str, Any] | None
             return None
         return {"jsonrpc": "2.0", "id": request_id, "result": result}
     except JsonRpcError as exc:
-        error: dict[str, Any] = {"code": exc.code, "message": exc.message}
-        if exc.data is not None:
-            error["data"] = exc.data
-        return {"jsonrpc": "2.0", "id": response_id(request), "error": error}
+        return jsonrpc_error(response_id(request), exc.code, exc.message, exc.data)

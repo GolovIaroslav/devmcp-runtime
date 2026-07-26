@@ -10,6 +10,9 @@ from uuid import uuid4
 from .i18n import tr
 
 
+MCP_ENDPOINT_PATH = "/mcp"
+
+
 def _new_secret() -> str:
     return uuid4().hex + uuid4().hex
 
@@ -55,11 +58,11 @@ class WorkspaceProfile:
 
     @property
     def endpoint(self) -> str:
-        return f"{self.effective_public_url.rstrip('/')}/mcp"
+        return f"{self.effective_public_url.rstrip('/')}{MCP_ENDPOINT_PATH}"
 
     @property
     def local_endpoint(self) -> str:
-        return f"http://127.0.0.1:{self.runtime.local_port}/mcp"
+        return f"http://127.0.0.1:{self.runtime.local_port}{MCP_ENDPOINT_PATH}"
 
     @property
     def effective_public_url(self) -> str:

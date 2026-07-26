@@ -8,6 +8,7 @@ dogfood path can run before project packaging is complete.
 from __future__ import annotations
 
 import json
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -28,6 +29,32 @@ class JsonRpcReply:
     status: int
     payload: dict[str, Any] | None
     headers: dict[str, str]
+
+
+def connect_with_retry(
+    endpoint: str,
+    timeout_seconds: float,
+    *,
+    poll_interval: float = 0.1,
+    request_timeout: float = 10.0,
+    catch: tuple[type[BaseException], ...] = (McpHttpError,),
+) -> tuple[McpHttpClient | None, dict[str, Any] | None, str | None]:
+    """Poll an MCP endpoint until initialize() succeeds or the deadline passes.
+
+    Returns (client, initialize_result, None) on success and
+    (None, None, error_text) on failure. Shared by the benchmark entry points
+    so the startup retry policy lives in one place.
+    """
+    deadline = time.monotonic() + timeout_seconds
+    last_error: BaseException | None = None
+    while time.monotonic() <= deadline:
+        client = McpHttpClient(endpoint, timeout=request_timeout)
+        try:
+            return client, client.initialize(), None
+        except catch as exc:
+            last_error = exc
+            time.sleep(poll_interval)
+    return None, None, str(last_error) if last_error is not None else "startup timeout elapsed"
 
 
 class McpHttpClient:

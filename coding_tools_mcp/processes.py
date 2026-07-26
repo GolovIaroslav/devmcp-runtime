@@ -9,20 +9,11 @@ from dataclasses import dataclass, field
 from typing import Any, BinaryIO
 
 from .errors import ToolFailure
-from .textutils import DEFAULT_MAX_LINES, truncate_text_tail
+from .textutils import DEFAULT_MAX_LINES, TextTruncation, truncate_text_tail
 
 
 SESSION_BUFFER_BYTES = 524_288
 HARD_KILL_SIGNAL = getattr(signal, "SIGKILL", signal.SIGTERM)
-
-
-@dataclass(frozen=True)
-class OutputTruncation:
-    content: str
-    truncated: bool
-    truncated_by: str | None
-    output_lines: int
-    output_bytes: int
 
 
 def terminate_process_group(
@@ -403,16 +394,9 @@ def _trim_buffer(
     return overflow
 
 
-def truncate_output_bytes_tail(data: bytes, max_bytes: int, max_lines: int = DEFAULT_MAX_LINES) -> OutputTruncation:
-    truncation = truncate_text_tail(
+def truncate_output_bytes_tail(data: bytes, max_bytes: int, max_lines: int = DEFAULT_MAX_LINES) -> TextTruncation:
+    return truncate_text_tail(
         data.decode("utf-8", errors="replace"),
         max_lines=max_lines,
         max_bytes=max_bytes,
-    )
-    return OutputTruncation(
-        truncation.content,
-        truncation.truncated,
-        truncation.truncated_by,
-        truncation.output_lines,
-        truncation.output_bytes,
     )

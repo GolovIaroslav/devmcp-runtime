@@ -4,7 +4,7 @@ import json
 import sys
 from typing import Any, Protocol, TextIO
 
-from .protocol import dispatch_rpc, invalid_request_response
+from .protocol import dispatch_rpc, invalid_request_response, jsonrpc_error
 
 
 class StdioRuntime(Protocol):
@@ -43,11 +43,7 @@ def serve_stdio(
             try:
                 request = json.loads(line)
             except json.JSONDecodeError:
-                response = {
-                    "jsonrpc": "2.0",
-                    "id": None,
-                    "error": {"code": -32700, "message": "Parse error"},
-                }
+                response = jsonrpc_error(None, -32700, "Parse error")
             else:
                 try:
                     response = (
@@ -56,11 +52,7 @@ def serve_stdio(
                         else invalid_request_response()
                     )
                 except Exception as exc:  # noqa: BLE001 - keep the stdio server alive
-                    response = {
-                        "jsonrpc": "2.0",
-                        "id": None,
-                        "error": {"code": -32603, "message": str(exc)},
-                    }
+                    response = jsonrpc_error(None, -32603, str(exc))
             if response is not None:
                 sink.write(
                     json.dumps(response, separators=(",", ":")) + "\n"
