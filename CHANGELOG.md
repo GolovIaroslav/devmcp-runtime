@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+### Changed
+
+- Replaced the manual multi-dispatch release choreography with a single
+  `release.yml` pipeline triggered by pushing a `v<version>` tag. The evidence
+  workflows (`compliance`, `real-workloads`, `swebench-lite`) run as called
+  jobs of the same workflow run as the registry publishes, so the
+  same-release-commit audit property holds by construction with no inputs, run
+  ids, or ref choices; the npm launcher publishes only when its version is not
+  already on the registry; the GitHub Release is created automatically with
+  notes from the CHANGELOG section. The dispatch-only `publish-pypi` and
+  `publish-npm` workflows were removed, the npm tarball is published by local
+  path (the previous form was parsed as a GitHub shorthand and failed), and
+  `final-audit` remains as a manual audit tool outside the release path. PyPI
+  and npm trusted publishing must point at `release.yml`.
+
 ### Added
 
 - Anonymous usage telemetry, on by default, sent to PostHog over HTTPS with

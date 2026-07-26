@@ -112,29 +112,21 @@ class RequiredDocsTests(unittest.TestCase):
             with self.subTest(workflow="docker-smoke", needle=needle):
                 self.assertIn(needle, docker_smoke)
 
-        publish_pypi = (ROOT / ".github/workflows/publish-pypi.yml").read_text(encoding="utf-8")
+        release = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
         for needle in (
+            'tags: ["v*"]',
             "scripts/check_release_versions.py",
-            "scripts/check_final_audit.py",
-            'expected_ref="refs/tags/$RELEASE_TAG"',
-            'fetch-depth: 0',
+            "./.github/workflows/compliance.yml",
+            "./.github/workflows/real-workloads.yml",
+            "./.github/workflows/swebench-lite.yml",
             "Verify wheel contents and installation",
             "pypa/gh-action-pypi-publish",
-        ):
-            with self.subTest(workflow="publish-pypi", needle=needle):
-                self.assertIn(needle, publish_pypi)
-
-        publish_npm = (ROOT / ".github/workflows/publish-npm.yml").read_text(encoding="utf-8")
-        for needle in (
-            "workflow_dispatch",
-            "scripts/check_final_audit.py",
-            'expected_ref="refs/tags/$RELEASE_TAG"',
-            'fetch-depth: 0',
             "npm@11.18.0",
-            "npm publish",
+            "npm publish ./dist/*.tgz --access public --provenance",
+            "gh release create",
         ):
-            with self.subTest(workflow="publish-npm", needle=needle):
-                self.assertIn(needle, publish_npm)
+            with self.subTest(workflow="release", needle=needle):
+                self.assertIn(needle, release)
 
         final_audit = (ROOT / ".github/workflows/final-audit.yml").read_text(encoding="utf-8")
         for needle in (
