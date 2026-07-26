@@ -171,6 +171,10 @@ def start_server(workspace: Path, port: int, raw_dir: Path, name: str) -> subpro
         "127.0.0.1",
         "--port",
         str(port),
+        # The workloads model local development (`node -e`/`python -c` smoke
+        # commands), which safe mode's inline-script gate rejects by design.
+        "--permission-mode",
+        "trusted",
     ]
     raw_dir.mkdir(parents=True, exist_ok=True)
     stdout = (raw_dir / f"{name}-server.stdout.txt").open("wb")
