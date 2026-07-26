@@ -87,7 +87,8 @@ def dispatch_rpc(runtime: Any, request: dict[str, Any]) -> dict[str, Any] | None
                 raise JsonRpcError(-32600, "Server is already initialized")
             validate_initialize_request(request)
             runtime.protocol_version = validate_initialize_params(params)
-            result = runtime.initialize()
+            client_info = params.get("clientInfo")
+            result = runtime.initialize(client_info if isinstance(client_info, dict) else None)
             runtime.initialized = True
         elif method == "notifications/initialized":
             return None
