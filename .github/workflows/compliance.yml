@@ -20,6 +20,11 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+
       - name: Install runtime and CI tools
         run: |
           python -m pip install --upgrade pip
@@ -48,6 +53,9 @@ jobs:
 
       - name: Run dispatch inputs gate
         run: make check-dispatch-inputs
+
+      - name: Run npm launcher gate
+        run: make check-npm-launcher
 
       - name: Run dogfood smoke
         run: make dogfood-smoke DOGFOOD_PORT=18772

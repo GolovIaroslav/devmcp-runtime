@@ -86,6 +86,7 @@ class RequiredDocsTests(unittest.TestCase):
             "make test",
             "make test-protocol",
             "make test-integration",
+            "make check-npm-launcher",
             "make dogfood-smoke",
             "make benchmark-latency",
             "make benchmark-smoke",
@@ -109,6 +110,41 @@ class RequiredDocsTests(unittest.TestCase):
         for needle in ("docker build", "scripts/mcp_smoke.py"):
             with self.subTest(workflow="docker-smoke", needle=needle):
                 self.assertIn(needle, docker_smoke)
+
+        publish_pypi = (ROOT / ".github/workflows/publish-pypi.yml").read_text(encoding="utf-8")
+        for needle in (
+            "scripts/check_release_versions.py",
+            "scripts/check_final_audit.py",
+            'expected_ref="refs/tags/$RELEASE_TAG"',
+            'fetch-depth: 0',
+            "Verify wheel contents and installation",
+            "pypa/gh-action-pypi-publish",
+        ):
+            with self.subTest(workflow="publish-pypi", needle=needle):
+                self.assertIn(needle, publish_pypi)
+
+        publish_npm = (ROOT / ".github/workflows/publish-npm.yml").read_text(encoding="utf-8")
+        for needle in (
+            "workflow_dispatch",
+            "scripts/check_final_audit.py",
+            'expected_ref="refs/tags/$RELEASE_TAG"',
+            'fetch-depth: 0',
+            "npm@11.18.0",
+            "npm publish",
+        ):
+            with self.subTest(workflow="publish-npm", needle=needle):
+                self.assertIn(needle, publish_npm)
+
+        final_audit = (ROOT / ".github/workflows/final-audit.yml").read_text(encoding="utf-8")
+        for needle in (
+            "actions/setup-python@v6.2.0",
+            'expected_ref="refs/tags/$RELEASE_TAG"',
+            "git rev-list",
+            "scripts/check_release_versions.py",
+            "Validate referenced runs",
+        ):
+            with self.subTest(workflow="final-audit", needle=needle):
+                self.assertIn(needle, final_audit)
 
         smoke_script = (ROOT / "scripts/mcp_smoke.py").read_text(encoding="utf-8")
         for needle in ("server_info", "exec_command"):
