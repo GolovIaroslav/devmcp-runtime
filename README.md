@@ -1,5 +1,7 @@
 # Coding Tools MCP
 
+**English** | [简体中文](README.zh-CN.md)
+
 > Give any AI chat or agent a safe pair of hands on your codebase.
 
 [![PyPI](https://img.shields.io/pypi/v/coding-tools-mcp)](https://pypi.org/project/coding-tools-mcp/)
