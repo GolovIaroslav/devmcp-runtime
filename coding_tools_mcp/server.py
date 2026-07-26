@@ -32,6 +32,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, cast
 
 from . import __version__
+from .envutils import ENV_PREFIX, truthy_env
 from .errors import JsonRpcError, ToolFailure
 from .oauth import (
     OAUTH_CODE_TTL_SECONDS,
@@ -70,6 +71,7 @@ from .protocol import (
     validate_rpc_envelope,
 )
 from .project_context import ProjectContext, load_project_context
+from .telemetry import SessionTelemetry
 from .textutils import DEFAULT_MAX_LINES, truncate_text_head
 from .tool_results import make_tool_result
 from .transport_http import HTTPSessionManager
@@ -242,7 +244,6 @@ ENV_FLAG_OPTIONS = {
 }
 NETWORK_LITERAL_COMMANDS = {"echo", "printf", "grep", "egrep", "fgrep", "rg", "cat", "head", "tail", "wc"}
 INLINE_SCRIPT_PERMISSION = "inline_script"
-ENV_PREFIX = "CODING_TOOLS_MCP"
 RUNTIME_ROOT_DIR_NAME = "coding-tools-mcp"
 SPECIAL_DEVICE_PATHS = ("/dev/null", "/dev/zero", "/dev/random", "/dev/urandom")
 DNS_RESOLVER_READ_ROOTS = (
@@ -389,10 +390,6 @@ def parse_shell_env_set(value: str | None) -> dict[str, str]:
     if not isinstance(parsed, dict):
         raise ValueError(f"{ENV_PREFIX}_SHELL_ENV_SET must be a JSON object")
     return {str(key): str(item) for key, item in parsed.items()}
-
-
-def truthy_env(value: str | None) -> bool:
-    return (value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def env_int(name: str, fallback: int) -> int:
@@ -687,10 +684,6 @@ LANDLOCK_ACCESS_FS_MAKE_SYM = 1 << 12
 LANDLOCK_ACCESS_FS_REFER = 1 << 13
 LANDLOCK_ACCESS_FS_TRUNCATE = 1 << 14
 LANDLOCK_ACCESS_FS_IOCTL_DEV = 1 << 15
-
-
-def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def json_response_payload(payload: Any) -> bytes:
@@ -1137,6 +1130,7 @@ class Runtime:
         oauth_config: OAuthConfig | None = None,
         project_context: ProjectContext | None = None,
         fake_readonly_annotations: bool = False,
+        transport: str = "stdio",
     ) -> None:
         self.workspace = Workspace(workspace)
         self.enable_view_image = enable_view_image
@@ -1198,6 +1192,7 @@ class Runtime:
         self.request_sessions_lock = threading.Lock()
         self.request_context = threading.local()
         self.initialized = False
+        self.telemetry = SessionTelemetry(permission_mode=self.permission_mode, transport=transport)
         self._tool_handlers = {name: getattr(self, name) for name in TOOL_REGISTRY}
 
     def _set_runtime_dir(self, runtime_dir: Path) -> None:
@@ -1220,6 +1215,7 @@ class Runtime:
                 terminate_process_group(session.process, signal.SIGTERM)
             session.drain_readers()
         shutil.rmtree(self.runtime_dir, ignore_errors=True)
+        self.telemetry.finish()
 
     def _ensure_runtime_dirs(self) -> None:
         candidates = [self.runtime_dir]
@@ -1285,7 +1281,8 @@ class Runtime:
             return False
         return is_relative_to(resolved, self.runtime_dir)
 
-    def initialize(self) -> dict[str, Any]:
+    def initialize(self, client_info: dict[str, Any] | None = None) -> dict[str, Any]:
+        self.telemetry.record_session_start(client_info, self.protocol_version)
         return {
             "protocolVersion": self.protocol_version,
             "capabilities": {"tools": {"listChanged": False}},
@@ -1487,17 +1484,26 @@ class Runtime:
         }
 
     def emit_tool_trace(self, name: str, args: dict[str, Any], payload: dict[str, Any], started_at: float) -> None:
+        raw_error = payload.get("error")
+        error = raw_error if isinstance(raw_error, dict) else {}
+        duration_ms = int((time.time() - started_at) * 1000)
+        self.telemetry.record_tool_call(
+            name,
+            ok=bool(payload.get("ok")),
+            error_code=error.get("code"),
+            duration_ms=duration_ms,
+            truncated=bool(payload.get("truncated")),
+        )
         if os.environ.get(f"{ENV_PREFIX}_TRACE") != "1":
             return
-        error = payload.get("error") if isinstance(payload.get("error"), dict) else {}
         event = {
             "event": "tool_call",
             "timestamp": datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
             "tool": name,
             "ok": bool(payload.get("ok", False)),
             "status": payload.get("status"),
-            "error_code": error.get("code") if isinstance(error, dict) else None,
-            "duration_ms": int((time.time() - started_at) * 1000),
+            "error_code": error.get("code"),
+            "duration_ms": duration_ms,
             "session_id": payload.get("session_id"),
             "truncated": payload.get("truncated"),
             "args": redact_for_trace(args),
@@ -5412,6 +5418,7 @@ def build_runtime(
     oauth_config: OAuthConfig | None = None,
     emit_warning: bool = True,
     project_context: ProjectContext | None = None,
+    transport: str = "stdio",
 ) -> Runtime:
     workspace = Path(args.workspace or os.environ.get(f"{ENV_PREFIX}_WORKSPACE") or os.getcwd())
     runtime = Runtime(
@@ -5424,6 +5431,7 @@ def build_runtime(
         oauth_config=oauth_config,
         project_context=project_context,
         fake_readonly_annotations=runtime_policy.fake_readonly_annotations,
+        transport=transport,
     )
     if emit_warning and runtime.capabilities.skip_all_permissions:
         print(
@@ -5550,7 +5558,7 @@ def run_http(args: argparse.Namespace) -> int:
         )
         return 2
 
-    runtime = build_runtime(args, runtime_policy, auth_token=auth_token, oauth_config=oauth_config)
+    runtime = build_runtime(args, runtime_policy, auth_token=auth_token, oauth_config=oauth_config, transport="http")
 
     def runtime_factory() -> Runtime:
         return build_runtime(
@@ -5560,6 +5568,7 @@ def run_http(args: argparse.Namespace) -> int:
             oauth_config=oauth_config,
             emit_warning=False,
             project_context=runtime.project_context,
+            transport="http",
         )
 
     server = RuntimeHTTPServer((args.host, args.port), MCPHandler, runtime, runtime_factory)

@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Anonymous usage telemetry, on by default, sent to PostHog over HTTPS with
+  the standard library only. Events are a closed schema of counters, enums,
+  durations, and version/platform strings — session starts, per-tool
+  success/error/latency summaries, and individual tool failures capped at 20
+  per session — and never contain paths, arguments, command lines, or file
+  contents. `CODING_TOOLS_MCP_TELEMETRY=off` or `DO_NOT_TRACK=1` disables it,
+  `CODING_TOOLS_MCP_TELEMETRY=debug` prints events to stderr instead of
+  sending, CI environments are excluded automatically, and the anonymous
+  install id in `~/.coding-tools-mcp/id` can be deleted to reset identity.
+  Tool calls never block on delivery: events queue in memory to a daemon
+  thread and failures are dropped silently. See `docs/telemetry.md`.
+
 ## 0.2.0 - 2026-07-24
 
 ### Changed

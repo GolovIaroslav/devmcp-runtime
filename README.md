@@ -307,6 +307,16 @@ The runtime binds one workspace root per server process. Paths are workspace-rel
 
 `--permission-mode safe` is the default. `--permission-mode trusted` opens local-development gates while keeping secret filtering and destructive-command checks. `--permission-mode dangerous` disables `exec_command` permission gates for operators who accept that risk inside an isolated runner. Do not use dangerous mode for untrusted workspaces or untrusted MCP clients.
 
+## Telemetry
+
+The server sends anonymous usage telemetry (per-tool success/latency counters
+and version/platform dimensions — never paths, arguments, commands, or file
+contents) to help prioritize fixes. Disable it with
+`CODING_TOOLS_MCP_TELEMETRY=off` or `DO_NOT_TRACK=1`; it is automatically off
+in CI. `CODING_TOOLS_MCP_TELEMETRY=debug` prints every event to stderr instead
+of sending. The full event list and guarantees are in
+[docs/telemetry.md](docs/telemetry.md).
+
 ## Compliance
 
 ```bash

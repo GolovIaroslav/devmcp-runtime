@@ -26,6 +26,7 @@ class RequiredDocsTests(unittest.TestCase):
             "docs/dogfood.md",
             "docs/swe-bench.md",
             "docs/limitations.md",
+            "docs/telemetry.md",
             "docs/troubleshooting.md",
             "docs/competitive-analysis.md",
             "docs/runtime-contract-v0.2.md",
