@@ -5,6 +5,7 @@ import os
 import re
 import shlex
 import shutil
+import socket
 import subprocess
 import sys
 import threading
@@ -17,7 +18,7 @@ from urllib.parse import urlparse
 import psutil
 
 from .i18n import tr
-from .models import RuntimeStatus, WorkspaceProfile
+from .models import MCP_ENDPOINT_PATH, RuntimeStatus, WorkspaceProfile
 from .storage import log_dir_for_profile, runtime_state_file_for_profile, write_private_json
 
 TRYCLOUDFLARE_URL_RE = re.compile(r"https://[a-z0-9-]+\.trycloudflare\.com", re.I)
@@ -116,15 +117,9 @@ class RuntimeManager:
                 raise RuntimeError(tr("RuntimeManager", "Only FRP and Cloudflare are currently supported."))
         except Exception as exc:
             self._append_tunnel_error_log(profile, str(exc))
-            self._terminate_process_tree(
-                runtime_pid,
-                expected_create_time=self._process_create_time(runtime_pid),
-            )
+            self._terminate_live_process_tree(runtime_pid)
             if runtime_process.pid != runtime_pid:
-                self._terminate_process_tree(
-                    runtime_process.pid,
-                    expected_create_time=self._process_create_time(runtime_process.pid),
-                )
+                self._terminate_live_process_tree(runtime_process.pid)
             self._clear_runtime_state(profile.id)
             raise
 
@@ -202,9 +197,10 @@ class RuntimeManager:
         )
 
     def status(self, profile: WorkspaceProfile) -> RuntimeStatus:
-        runtime_pid = self._find_runtime_pid(profile)
+        state = self._read_runtime_state(profile.id)
+        runtime_pid = self._find_runtime_pid(profile, state=state)
         if runtime_pid is None:
-            state_runtime = self._find_state_runtime(profile.id)
+            state_runtime = self._find_state_runtime(profile.id, state=state)
             if state_runtime is not None:
                 state_pid, state_port = state_runtime
                 return RuntimeStatus(
@@ -219,15 +215,12 @@ class RuntimeManager:
                         "Stop the previous runtime before saving or starting the new configuration",
                     ),
                 )
-        tunnel_pid = self._find_tunnel_pid(profile)
-        public_url = self.resolved_public_url(profile)
+        tunnel_pid = self._find_tunnel_pid(profile, state=state)
+        public_url = self.resolved_public_url(profile, state=state)
 
         if runtime_pid is None:
             if tunnel_pid is not None:
-                self._terminate_process_tree(
-                    tunnel_pid,
-                    expected_create_time=self._process_create_time(tunnel_pid),
-                )
+                self._terminate_live_process_tree(tunnel_pid)
             self._clear_runtime_state(profile.id)
             return RuntimeStatus(
                 state="stopped",
@@ -267,12 +260,13 @@ class RuntimeManager:
     def summary_state(self, profile: WorkspaceProfile) -> str:
         return self.status(profile).state
 
-    def resolved_public_url(self, profile: WorkspaceProfile) -> str:
+    def resolved_public_url(self, profile: WorkspaceProfile, *, state: dict[str, object] | None = None) -> str:
         if profile.tunnel.type == "frp":
             return profile.effective_public_url
         if profile.tunnel.type == "cloudflare" and profile.tunnel.cloudflare_mode == "named":
             return profile.tunnel.public_url.rstrip("/")
-        state = self._read_runtime_state(profile.id)
+        if state is None:
+            state = self._read_runtime_state(profile.id)
         value = state.get("public_url")
         return str(value).rstrip("/") if isinstance(value, str) and value.strip() else ""
 
@@ -280,7 +274,7 @@ class RuntimeManager:
         public_url = self.resolved_public_url(profile)
         if not public_url:
             return ""
-        return f"{public_url.rstrip('/')}/mcp"
+        return f"{public_url.rstrip('/')}{MCP_ENDPOINT_PATH}"
 
     def _start_runtime_process(self, profile: WorkspaceProfile) -> tuple[subprocess.Popen[str], int]:
         command = self._resolve_command(profile)
@@ -305,11 +299,8 @@ class RuntimeManager:
             "stdout": stdout_handle,
             "stderr": stderr_handle,
             "text": True,
+            **self._detached_popen_kwargs(),
         }
-        if os.name == "nt":
-            popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-        else:
-            popen_kwargs["start_new_session"] = True
         try:
             process = subprocess.Popen(**popen_kwargs)
         finally:
@@ -320,10 +311,7 @@ class RuntimeManager:
             listening=True,
             timeout=self.RUNTIME_START_TIMEOUT_SECONDS,
         ):
-            self._terminate_process_tree(
-                process.pid,
-                expected_create_time=self._process_create_time(process.pid),
-            )
+            self._terminate_live_process_tree(process.pid)
             raise RuntimeError(
                 tr(
                     "RuntimeManager",
@@ -332,10 +320,7 @@ class RuntimeManager:
             )
         runtime_pid = self._find_pid_by_port(profile.runtime.local_port)
         if runtime_pid is None:
-            self._terminate_process_tree(
-                process.pid,
-                expected_create_time=self._process_create_time(process.pid),
-            )
+            self._terminate_live_process_tree(process.pid)
             raise RuntimeError(
                 tr(
                     "RuntimeManager",
@@ -374,11 +359,8 @@ class RuntimeManager:
             "text": True,
             "encoding": "utf-8",
             "errors": "replace",
+            **self._detached_popen_kwargs(),
         }
-        if os.name == "nt":
-            popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-        else:
-            popen_kwargs["start_new_session"] = True
         process = subprocess.Popen(**popen_kwargs)
         public_url_holder: dict[str, str] = {"value": ""}
         ready = threading.Event()
@@ -398,10 +380,7 @@ class RuntimeManager:
                     )
                 )
             if not signalled:
-                self._terminate_process_tree(
-                    process.pid,
-                    expected_create_time=self._process_create_time(process.pid),
-                )
+                self._terminate_live_process_tree(process.pid)
                 thread.join(timeout=2)
                 raise RuntimeError(
                     tr(
@@ -412,10 +391,7 @@ class RuntimeManager:
             return process, profile.tunnel.public_url.rstrip("/")
         if not public_url_holder["value"]:
             if process.poll() is None:
-                self._terminate_process_tree(
-                    process.pid,
-                    expected_create_time=self._process_create_time(process.pid),
-                )
+                self._terminate_live_process_tree(process.pid)
             thread.join(timeout=2)
             raise RuntimeError(
                 tr(
@@ -657,7 +633,14 @@ class RuntimeManager:
         except (json.JSONDecodeError, OSError, TypeError):
             return {}
 
-    def _find_runtime_pid(self, profile: WorkspaceProfile) -> int | None:
+    def _detached_popen_kwargs(self) -> dict[str, Any]:
+        if os.name == "nt":
+            return {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)}
+        return {"start_new_session": True}
+
+    def _find_runtime_pid(
+        self, profile: WorkspaceProfile, *, state: dict[str, object] | None = None
+    ) -> int | None:
         session = self._sessions.get(profile.id)
         if (
             session
@@ -673,7 +656,8 @@ class RuntimeManager:
         port_pid = self._find_pid_by_port(profile.runtime.local_port)
         if port_pid is not None and self._process_matches_profile(port_pid, profile):
             return port_pid
-        state = self._read_runtime_state(profile.id)
+        if state is None:
+            state = self._read_runtime_state(profile.id)
         runtime_pid = state.get("runtime_pid", state.get("pid"))
         runtime_create_time = state.get("runtime_create_time")
         if (
@@ -685,7 +669,9 @@ class RuntimeManager:
             return runtime_pid
         return None
 
-    def _find_tunnel_pid(self, profile: WorkspaceProfile) -> int | None:
+    def _find_tunnel_pid(
+        self, profile: WorkspaceProfile, *, state: dict[str, object] | None = None
+    ) -> int | None:
         session = self._sessions.get(profile.id)
         if (
             session
@@ -694,7 +680,8 @@ class RuntimeManager:
             and self._process_has_create_time(session.tunnel_process.pid, session.tunnel_create_time)
         ):
             return session.tunnel_process.pid
-        state = self._read_runtime_state(profile.id)
+        if state is None:
+            state = self._read_runtime_state(profile.id)
         tunnel_pid = state.get("tunnel_pid")
         tunnel_create_time = state.get("tunnel_create_time")
         if (
@@ -725,8 +712,11 @@ class RuntimeManager:
             return False
         return self._normalized_path(workspace_value) == self._normalized_path(workspace)
 
-    def _find_state_runtime(self, profile_id: str) -> tuple[int, int] | None:
-        state = self._read_runtime_state(profile_id)
+    def _find_state_runtime(
+        self, profile_id: str, *, state: dict[str, object] | None = None
+    ) -> tuple[int, int] | None:
+        if state is None:
+            state = self._read_runtime_state(profile_id)
         pid = state.get("runtime_pid", state.get("pid"))
         create_time = state.get("runtime_create_time")
         port = state.get("port")
@@ -744,8 +734,11 @@ class RuntimeManager:
             return None
         return pid, port
 
-    def _find_state_tunnel_pid(self, profile_id: str) -> int | None:
-        state = self._read_runtime_state(profile_id)
+    def _find_state_tunnel_pid(
+        self, profile_id: str, *, state: dict[str, object] | None = None
+    ) -> int | None:
+        if state is None:
+            state = self._read_runtime_state(profile_id)
         pid = state.get("tunnel_pid")
         create_time = state.get("tunnel_create_time")
         if not (
@@ -754,36 +747,58 @@ class RuntimeManager:
             and self._process_has_create_time(pid, float(create_time))
         ):
             return None
-        command = self._command_for_pid(pid)
-        lowered = [item.lower() for item in command]
-        if not any("cloudflared" in Path(item).name.lower() for item in command):
-            return None
-        if "tunnel" not in lowered:
-            return None
         mode = state.get("tunnel_mode")
-        if mode == "quick":
-            port = state.get("port")
-            if not isinstance(port, int):
-                return None
-            target = f"http://127.0.0.1:{port}".lower()
-            if self._option_value(command, "--url", case_sensitive=False) != target:
-                return None
-        elif mode == "named" and "run" not in lowered:
+        port = state.get("port")
+        if mode == "quick" and not isinstance(port, int):
+            return None
+        command = self._command_for_pid(pid)
+        if not self._command_is_cloudflared_tunnel(
+            command,
+            mode=str(mode),
+            port=port if isinstance(port, int) else None,
+        ):
             return None
         return pid
 
     def _process_matches_tunnel(self, pid: int, profile: WorkspaceProfile) -> bool:
-        command = self._command_for_pid(pid)
+        return self._command_matches_profile_tunnel(self._command_for_pid(pid), profile)
+
+    def _command_matches_profile_tunnel(self, command: list[str], profile: WorkspaceProfile) -> bool:
+        if profile.tunnel.cloudflare_mode == "quick":
+            return self._command_is_cloudflared_tunnel(
+                command, mode="quick", port=profile.runtime.local_port
+            )
+        token = profile.tunnel.cloudflare_token.strip()
+        if not token:
+            return False
+        return self._command_is_cloudflared_tunnel(command, mode="named", token=token)
+
+    def _command_is_cloudflared_tunnel(
+        self,
+        command: list[str],
+        *,
+        mode: str,
+        port: int | None = None,
+        token: str | None = None,
+    ) -> bool:
+        """Single cloudflared-command fingerprint. token=None skips the token
+        check (runtime-state files do not record it); an unrecognized mode only
+        asserts the cloudflared+tunnel shape."""
         if not command or not any("cloudflared" in Path(item).name.lower() for item in command):
             return False
         lowered = [item.lower() for item in command]
         if "tunnel" not in lowered:
             return False
-        if profile.tunnel.cloudflare_mode == "quick":
-            target = f"http://127.0.0.1:{profile.runtime.local_port}".lower()
+        if mode == "quick":
+            if port is None:
+                return False
+            target = f"http://127.0.0.1:{port}".lower()
             return self._option_value(command, "--url", case_sensitive=False) == target
-        token = profile.tunnel.cloudflare_token.strip()
-        return bool(token) and "run" in lowered and self._option_value(command, "--token") == token
+        if mode == "named":
+            if "run" not in lowered:
+                return False
+            return token is None or self._option_value(command, "--token") == token
+        return token is None
 
     def _option_value(
         self,
@@ -842,11 +857,19 @@ class RuntimeManager:
     def _wait_for_port_state(self, port: int, listening: bool, timeout: float) -> bool:
         deadline = time.time() + timeout
         while time.time() < deadline:
-            is_listening = self._find_pid_by_port(port) is not None
-            if is_listening == listening:
+            if self._port_is_listening(port) == listening:
                 return True
             time.sleep(0.2)
         return False
+
+    def _port_is_listening(self, port: int) -> bool:
+        # The runtime always binds 127.0.0.1, so a loopback connect probe is
+        # equivalent to scanning the system connection table and far cheaper.
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+                return True
+        except OSError:
+            return False
 
     def _command_line_for_pid(self, pid: int) -> str:
         return " ".join(self._command_for_pid(pid)).strip()
@@ -859,6 +882,9 @@ class RuntimeManager:
             return process.cmdline()
         except (psutil.AccessDenied, psutil.Error):
             return []
+
+    def _terminate_live_process_tree(self, pid: int) -> None:
+        self._terminate_process_tree(pid, expected_create_time=self._process_create_time(pid))
 
     def _terminate_process_tree(self, pid: int, *, expected_create_time: float | None = None) -> None:
         if expected_create_time is None:
@@ -912,19 +938,17 @@ class RuntimeManager:
             tunnel_pid = self._find_state_tunnel_pid(profile.id)
         if tunnel_pid is None:
             return
-        self._terminate_process_tree(
-            tunnel_pid,
-            expected_create_time=self._process_create_time(tunnel_pid),
-        )
+        self._terminate_live_process_tree(tunnel_pid)
         self._clear_runtime_state(profile.id)
 
     def _find_cloudflare_tunnel_pid(self, profile: WorkspaceProfile) -> int | None:
-        for process in psutil.process_iter(["pid"]):
+        for process in psutil.process_iter(["pid", "cmdline"]):
             try:
                 pid = int(process.info["pid"])
+                command = list(process.info.get("cmdline") or [])
             except (psutil.AccessDenied, psutil.Error):
                 continue
-            if self._process_matches_tunnel(pid, profile):
+            if self._command_matches_profile_tunnel(command, profile):
                 return pid
         return None
 

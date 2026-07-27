@@ -59,7 +59,7 @@ jobs:
         run: make check-npm-launcher
 
       - name: Run dogfood smoke
-        run: make dogfood-smoke DOGFOOD_PORT=18772
+        run: make dogfood-smoke
 
       - name: Run latency benchmark
         run: make benchmark-latency

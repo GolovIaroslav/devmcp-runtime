@@ -34,6 +34,7 @@ from typing import Any, cast
 from . import __version__
 from .envutils import ENV_PREFIX, truthy_env
 from .errors import JsonRpcError, ToolFailure
+from .landlock_exec import libc_syscall
 from .oauth import (
     OAUTH_CODE_TTL_SECONDS,
     OAUTH_MAX_BODY_BYTES,
@@ -66,19 +67,22 @@ from .protocol import (
     PROTOCOL_VERSION,
     SUPPORTED_PROTOCOL_VERSIONS,
     dispatch_rpc,
+    jsonrpc_error,
     protocol_version_is_supported,
     response_id,
     validate_rpc_envelope,
 )
 from .project_context import ProjectContext, load_project_context
 from .telemetry import SessionTelemetry
-from .textutils import DEFAULT_MAX_LINES, truncate_text_head
+from .textutils import DEFAULT_MAX_LINES, TextTruncation, truncate_text_head
 from .tool_results import make_tool_result
 from .transport_http import HTTPSessionManager
 from .transport_stdio import serve_stdio
 
 
 SERVER_NAME = "coding-tools-mcp"
+SERVER_TITLE = "Coding Tools MCP"
+MCP_ENDPOINT_PATH = "/mcp"
 DEFAULT_EXCLUDED_NAMES = {
     ".git",
     ".reference",
@@ -316,8 +320,7 @@ class RuntimePolicy:
     fake_readonly_annotations: bool = False
 
 
-def _oauth_token_auth_methods() -> list[str]:
-    return ["client_secret_basic", "client_secret_post", "none"]
+OAUTH_TOKEN_AUTH_METHODS = ("client_secret_basic", "client_secret_post", "none")
 
 
 def _http_base_for_bind_host(host: str, port: int) -> str:
@@ -328,6 +331,11 @@ def _http_base_for_bind_host(host: str, port: int) -> str:
 
 def _first_header_value(value: str | None) -> str:
     return (value or "").split(",", 1)[0].strip()
+
+
+def _first_form_value(params: dict[str, list[str]], key: str) -> str:
+    values = params.get(key)
+    return values[0] if values else ""
 
 
 def _forwarded_header_param(value: str | None, name: str) -> str:
@@ -525,6 +533,8 @@ class ToolSpec:
     open_world: bool = False
     error_status: str | None = None
     content_builder: Callable[[dict[str, Any]], list[dict[str, Any]]] | None = None
+    gated_by: str | None = None
+    """Name of a Runtime attribute that must be truthy for the tool to be exposed."""
 
 
 def _image_content(payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -657,17 +667,14 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         read_only=True,
         idempotent=True,
         content_builder=_image_content,
+        gated_by="enable_view_image",
     ),
 }
 
-FULL_TOOL_NAMES = tuple(TOOL_REGISTRY)
-
 LANDLOCK_CREATE_RULESET_VERSION = 1
 LANDLOCK_RULE_PATH_BENEATH = 1
-PR_SET_NO_NEW_PRIVS = 38
 SYS_LANDLOCK_CREATE_RULESET = 444
 SYS_LANDLOCK_ADD_RULE = 445
-SYS_LANDLOCK_RESTRICT_SELF = 446
 LANDLOCK_ACCESS_FS_EXECUTE = 1 << 0
 LANDLOCK_ACCESS_FS_WRITE_FILE = 1 << 1
 LANDLOCK_ACCESS_FS_READ_FILE = 1 << 2
@@ -756,6 +763,81 @@ def normalize_rel_display(path: Path, root: Path) -> str:
         return path.as_posix()
     text = rel.as_posix()
     return "." if text == "" else text
+
+
+def matches_any_glob(rel: str, patterns: list[str]) -> bool:
+    return any(fnmatch.fnmatch(rel, pattern) or PurePosixPath(rel).match(pattern) for pattern in patterns)
+
+
+def file_entry(path: Path, rel: str, path_stat: os.stat_result) -> dict[str, Any]:
+    return {
+        "path": rel,
+        "type": "symlink" if path.is_symlink() else "file",
+        "size_bytes": path_stat.st_size,
+        "modified": datetime.fromtimestamp(path_stat.st_mtime, timezone.utc).isoformat().replace("+00:00", "Z"),
+    }
+
+
+def search_match_item(
+    rel: str,
+    line_number: int,
+    column: int,
+    line: str,
+    before: list[str],
+    after: list[str],
+    max_preview_bytes: int,
+) -> dict[str, Any]:
+    preview, line_truncated = truncate_line_chars(line)
+    preview_truncation = truncate_text_head(preview, max_lines=1, max_bytes=max_preview_bytes)
+    item: dict[str, Any] = {
+        "path": rel,
+        "line": line_number,
+        "column": column,
+        "preview": preview_truncation.content,
+        "before": before,
+        "after": after,
+    }
+    if line_truncated or preview_truncation.truncated:
+        item["preview_truncated"] = True
+        item["preview_truncated_by"] = "chars" if line_truncated else preview_truncation.truncated_by
+    return item
+
+
+def truncation_fields(truncation: TextTruncation) -> dict[str, Any]:
+    return {
+        "truncated": truncation.truncated,
+        "truncated_by": truncation.truncated_by,
+        "output_lines": truncation.output_lines,
+        "output_bytes": truncation.output_bytes,
+    }
+
+
+def read_output_action(output_ref: str, *, offset: int = 0, limit: int | None = None) -> dict[str, Any]:
+    return {
+        "tool": "read_output",
+        "arguments": {
+            "output_ref": output_ref,
+            "offset": offset,
+            "limit": EXEC_PREVIEW_BYTES if limit is None else limit,
+        },
+    }
+
+
+_TOOL_PATHS: dict[str, str] = {}
+
+
+def cached_which(*names: str) -> str | None:
+    """shutil.which with a success-only cache: absence keeps re-probing so a
+    tool installed mid-session is still picked up."""
+    cached = _TOOL_PATHS.get(names[0])
+    if cached:
+        return cached
+    for name in names:
+        path = shutil.which(name)
+        if path:
+            _TOOL_PATHS[names[0]] = path
+            return path
+    return None
 
 
 def is_relative_to(path: Path, parent: Path) -> bool:
@@ -1123,7 +1205,6 @@ class Runtime:
         *,
         enable_view_image: bool = True,
         permission_mode: str = "safe",
-        dangerously_skip_all_permissions: bool = False,
         shell_env_policy: ShellEnvPolicy | None = None,
         allow_network: bool = False,
         auth_token: str | None = None,
@@ -1134,8 +1215,12 @@ class Runtime:
     ) -> None:
         self.workspace = Workspace(workspace)
         self.enable_view_image = enable_view_image
-        if dangerously_skip_all_permissions:
-            permission_mode = "dangerous"
+        self._exposed_tool_names = [
+            name
+            for name, spec in TOOL_REGISTRY.items()
+            if spec.gated_by is None or getattr(self, spec.gated_by)
+        ]
+        self._exposed_tool_name_set = frozenset(self._exposed_tool_names)
         if permission_mode not in PERMISSION_MODE_CHOICES:
             raise ToolFailure(
                 "INVALID_ARGUMENT",
@@ -1288,7 +1373,7 @@ class Runtime:
             "capabilities": {"tools": {"listChanged": False}},
             "serverInfo": {
                 "name": SERVER_NAME,
-                "title": "Coding Tools MCP",
+                "title": SERVER_TITLE,
                 "version": __version__,
             },
             "instructions": self.project_context.server_instructions(),
@@ -1303,7 +1388,7 @@ class Runtime:
         }
 
     def exposed_tool_names(self) -> list[str]:
-        return [name for name in FULL_TOOL_NAMES if self.enable_view_image or name != "view_image"]
+        return list(self._exposed_tool_names)
 
     def auth_enabled(self) -> bool:
         return self.auth_token is not None or self.oauth_config is not None
@@ -1345,7 +1430,7 @@ class Runtime:
         landlock["enabled"] = self._landlock_enforced(landlock)
         return {
             "server": SERVER_NAME,
-            "title": "Coding Tools MCP",
+            "title": SERVER_TITLE,
             "version": __version__,
             "protocol_version": self.protocol_version,
             **self._exec_environment_summary(),
@@ -1363,7 +1448,7 @@ class Runtime:
             "shell_env_inherit": self.shell_env_policy.inherit,
             "shell_env_include_only": list(self.shell_env_policy.include_only),
             "shell_env_exclude": list(self.shell_env_policy.exclude),
-            "endpoint_path": "/mcp",
+            "endpoint_path": MCP_ENDPOINT_PATH,
             "project_context": {
                 "root_instruction_files": [item.path for item in self.project_context.root_files],
                 "nested_instruction_files": list(self.project_context.nested_files),
@@ -1382,7 +1467,7 @@ class Runtime:
     ) -> dict[str, Any]:
         started_at = time.time()
         args = arguments or {}
-        handler = self._tool_handlers.get(name) if name in self.exposed_tool_names() else None
+        handler = self._tool_handlers.get(name) if name in self._exposed_tool_name_set else None
         if handler is None:
             raise JsonRpcError(-32602, f"Unknown tool: {name}", {"reason": "unknown_tool"})
         spec = TOOL_REGISTRY[name]
@@ -1680,8 +1765,7 @@ class Runtime:
             candidates = [
                 (path, rel)
                 for path, rel in ((path, normalize_rel_display(path, self.workspace.root)) for path in batch)
-                if any(fnmatch.fnmatch(rel, pattern) or PurePosixPath(rel).match(pattern) for pattern in patterns)
-                and not any(fnmatch.fnmatch(rel, pattern) or PurePosixPath(rel).match(pattern) for pattern in exclude_patterns)
+                if matches_any_glob(rel, patterns) and not matches_any_glob(rel, exclude_patterns)
             ]
             ignored = set() if include_ignored else self.workspace.git_ignored_paths([rel for _, rel in candidates])
             for path, rel in candidates:
@@ -1694,15 +1778,7 @@ class Runtime:
                     git_ignored=ignored,
                 ):
                     continue
-                path_stat = path.lstat()
-                files.append(
-                    {
-                        "path": rel,
-                        "type": "symlink" if path.is_symlink() else "file",
-                        "size_bytes": path_stat.st_size,
-                        "modified": datetime.fromtimestamp(path_stat.st_mtime, timezone.utc).isoformat().replace("+00:00", "Z"),
-                    }
-                )
+                files.append(file_entry(path, rel, path.lstat()))
                 if len(files) >= max_results:
                     truncated = True
                     break
@@ -1727,7 +1803,7 @@ class Runtime:
         max_results: int,
         sort_key: str,
     ) -> dict[str, Any] | None:
-        fd = shutil.which("fd") or shutil.which("fdfind")
+        fd = cached_which("fd", "fdfind")
         if not fd or not resolved.path.is_dir():
             return None
         args_base = [
@@ -1782,7 +1858,7 @@ class Runtime:
                 if path.is_symlink() and not self.workspace.is_safe_existing_path(path):
                     continue
                 rel = normalize_rel_display(path, self.workspace.root)
-                if any(fnmatch.fnmatch(rel, pat) or PurePosixPath(rel).match(pat) for pat in exclude_patterns):
+                if matches_any_glob(rel, exclude_patterns):
                     continue
                 paths[rel] = path
                 if len(paths) >= max_results:
@@ -1803,14 +1879,7 @@ class Runtime:
                 stat = path.lstat()
             except OSError:
                 continue
-            files.append(
-                {
-                    "path": rel,
-                    "type": "symlink" if path.is_symlink() else "file",
-                    "size_bytes": stat.st_size,
-                    "modified": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat().replace("+00:00", "Z"),
-                }
-            )
+            files.append(file_entry(path, rel, stat))
         files.sort(key=lambda item: item["modified"] if sort_key == "modified" else item["path"])
         truncated = len(paths) >= max_results
         return {
@@ -1855,6 +1924,7 @@ class Runtime:
             compiled = re.compile(query, flags) if regex else None
         except re.error as exc:
             raise ToolFailure("INVALID_ARGUMENT", f"Invalid regex: {exc}", category="validation") from exc
+        needle = query if case_sensitive else query.lower()
 
         roots = [resolved.path] if resolved.path.is_file() else walk_files(resolved.path)
         for batch in path_batches(roots, 256):
@@ -1867,9 +1937,9 @@ class Runtime:
                 if path.is_symlink() and not self.workspace.is_safe_existing_path(path):
                     continue
                 rel = normalize_rel_display(path, self.workspace.root)
-                if include_globs and not any(fnmatch.fnmatch(rel, pat) or PurePosixPath(rel).match(pat) for pat in include_globs):
+                if include_globs and not matches_any_glob(rel, include_globs):
                     continue
-                if any(fnmatch.fnmatch(rel, pat) or PurePosixPath(rel).match(pat) for pat in exclude_globs):
+                if matches_any_glob(rel, exclude_globs):
                     continue
                 candidates.append((path, rel))
             ignored = self.workspace.git_ignored_paths([rel for _, rel in candidates])
@@ -1887,30 +1957,22 @@ class Runtime:
                 except UnicodeDecodeError:
                     continue
                 for index, line in enumerate(lines):
-                    found = compiled.search(line) if compiled else find_literal(line, query, case_sensitive)
-                    if not found:
-                        continue
+                    if compiled:
+                        found = compiled.search(line)
+                        if not found:
+                            continue
+                        column = found.start() + 1
+                    else:
+                        literal_index = find_literal(line, needle, case_sensitive)
+                        if literal_index < 0:
+                            continue
+                        column = literal_index + 1
                     total += 1
                     if len(matches) >= max_results:
                         continue
-                    column = found.start() + 1 if hasattr(found, "start") else 1
-                    preview, line_truncated = truncate_line_chars(line)
-                    preview_truncation = truncate_text_head(preview, max_lines=1, max_bytes=max_preview_bytes)
-                    preview = preview_truncation.content
                     before = lines[max(0, index - context_lines) : index]
                     after = lines[index + 1 : index + 1 + context_lines]
-                    item = {
-                        "path": rel,
-                        "line": index + 1,
-                        "column": column,
-                        "preview": preview,
-                        "before": before,
-                        "after": after,
-                    }
-                    if line_truncated or preview_truncation.truncated:
-                        item["preview_truncated"] = True
-                        item["preview_truncated_by"] = "chars" if line_truncated else preview_truncation.truncated_by
-                    matches.append(item)
+                    matches.append(search_match_item(rel, index + 1, column, line, before, after, max_preview_bytes))
         return {
             "query": query,
             "matches": matches,
@@ -1932,7 +1994,7 @@ class Runtime:
         max_results: int,
         max_preview_bytes: int,
     ) -> dict[str, Any] | None:
-        rg = shutil.which("rg")
+        rg = cached_which("rg")
         if not rg:
             return None
         args = [rg, "--json", "--line-number", "--color=never"]
@@ -1999,9 +2061,6 @@ class Runtime:
                 first_submatch = submatches[0] if submatches and isinstance(submatches[0], dict) else {}
                 column = int(first_submatch.get("start", 0)) + 1
                 sanitized = str(line_text).replace("\r\n", "\n").replace("\r", "").rstrip("\n")
-                preview, line_truncated = truncate_line_chars(sanitized)
-                preview_truncation = truncate_text_head(preview, max_lines=1, max_bytes=max_preview_bytes)
-                preview = preview_truncation.content
                 lines: list[str] = []
                 if context_lines > 0:
                     lines = file_cache.get(rel, [])
@@ -2014,18 +2073,7 @@ class Runtime:
                 index = line_number - 1
                 before = lines[max(0, index - context_lines) : index] if lines else []
                 after = lines[index + 1 : index + 1 + context_lines] if lines else []
-                item = {
-                    "path": rel,
-                    "line": line_number,
-                    "column": column,
-                    "preview": preview,
-                    "before": before,
-                    "after": after,
-                }
-                if line_truncated or preview_truncation.truncated:
-                    item["preview_truncated"] = True
-                    item["preview_truncated_by"] = "chars" if line_truncated else preview_truncation.truncated_by
-                matches.append(item)
+                matches.append(search_match_item(rel, line_number, column, sanitized, before, after, max_preview_bytes))
         finally:
             timeout.cancel()
             try:
@@ -2298,7 +2346,7 @@ class Runtime:
             now = time.time()
             if not tty and now >= deadline:
                 session.timed_out = True
-                self._terminate_process_group(process, signal.SIGTERM)
+                terminate_process_group(process, signal.SIGTERM)
                 session.refresh_status()
                 session.drain_readers()
                 return finish()
@@ -2384,6 +2432,15 @@ class Runtime:
         candidate = candidate.strip()
         if not candidate or candidate in {"-", "--"}:
             return
+
+        def escape_failure() -> ToolFailure:
+            return ToolFailure(
+                "PERMISSION_REQUIRED",
+                "Command path escapes the workspace and is blocked.",
+                category="permission",
+                details={"permission": "filesystem_escape", "path": candidate},
+            )
+
         if re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://", candidate):
             return
         normalized = candidate.replace("\\", "/")
@@ -2397,12 +2454,7 @@ class Runtime:
             or re.match(r"^[A-Za-z]:/", normalized)
             or any(part == ".." for part in PurePosixPath(normalized).parts)
         ):
-            raise ToolFailure(
-                "PERMISSION_REQUIRED",
-                "Command path escapes the workspace and is blocked.",
-                category="permission",
-                details={"permission": "filesystem_escape", "path": candidate},
-            )
+            raise escape_failure()
         try:
             self.workspace.resolve_existing(normalized)
         except OSError as exc:
@@ -2420,21 +2472,11 @@ class Runtime:
                     if write_exc.code == "NOT_FOUND":
                         return
                     if write_exc.code in {"PATH_OUTSIDE_WORKSPACE", "ABSOLUTE_PATH_DENIED", "SYMLINK_ESCAPE"}:
-                        raise ToolFailure(
-                            "PERMISSION_REQUIRED",
-                            "Command path escapes the workspace and is blocked.",
-                            category="permission",
-                            details={"permission": "filesystem_escape", "path": candidate},
-                        ) from write_exc
+                        raise escape_failure() from write_exc
                     raise
                 return
             if exc.code in {"PATH_OUTSIDE_WORKSPACE", "ABSOLUTE_PATH_DENIED", "SYMLINK_ESCAPE"}:
-                raise ToolFailure(
-                    "PERMISSION_REQUIRED",
-                    "Command path escapes the workspace and is blocked.",
-                    category="permission",
-                    details={"permission": "filesystem_escape", "path": candidate},
-                ) from exc
+                raise escape_failure() from exc
 
     def _reject_setuid_executable(self, executable: str) -> None:
         if not executable:
@@ -2491,24 +2533,28 @@ class Runtime:
     def _git_env(self) -> dict[str, str]:
         return self._command_env({})
 
-    def _run_git_text(self, cmd: list[str], *, timeout: int | None = None) -> subprocess.CompletedProcess[str]:
+    def _run_git_text(
+        self, cmd: list[str], *, timeout: int | None = None, env: dict[str, str] | None = None
+    ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             cmd,
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             timeout=timeout,
-            env=self._git_env(),
+            env=self._git_env() if env is None else env,
         )
 
-    def _run_git_bytes(self, cmd: list[str], *, timeout: int | None = None) -> subprocess.CompletedProcess[bytes]:
+    def _run_git_bytes(
+        self, cmd: list[str], *, timeout: int | None = None, env: dict[str, str] | None = None
+    ) -> subprocess.CompletedProcess[bytes]:
         return subprocess.run(
             cmd,
             text=False,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             timeout=timeout,
-            env=self._git_env(),
+            env=self._git_env() if env is None else env,
         )
 
     def _git_status_not_repo(self, completed: subprocess.CompletedProcess[str]) -> dict[str, Any]:
@@ -2518,15 +2564,23 @@ class Runtime:
             warnings.append(f"git rev-parse failed: {stderr}")
         return {"is_repo": False, "clean": True, "entries": [], "truncated": False, "warnings": warnings}
 
-    def _is_git_repo(self, path: Path) -> bool:
+    def _is_git_repo(self, path: Path, *, env: dict[str, str] | None = None) -> bool:
         completed = self._run_git_text(
-            [require_git(), "-C", str(path), "rev-parse", "--is-inside-work-tree"]
+            [require_git(), "-C", str(path), "rev-parse", "--is-inside-work-tree"], env=env
         )
         return completed.returncode == 0 and completed.stdout.strip() == "true"
 
-    def _git_rev_parse(self, path: Path, rev: str) -> str:
-        completed = self._run_git_text([require_git(), "-C", str(path), "rev-parse", rev])
+    def _git_rev_parse(self, path: Path, rev: str, *, env: dict[str, str] | None = None) -> str:
+        completed = self._run_git_text([require_git(), "-C", str(path), "rev-parse", rev], env=env)
         return completed.stdout.strip() if completed.returncode == 0 else ""
+
+    def _git_path_filters(self, args: dict[str, Any]) -> list[str]:
+        path_filters: list[str] = []
+        if isinstance(args.get("path"), str):
+            path_filters.append(str(args["path"]))
+        if isinstance(args.get("paths"), list):
+            path_filters.extend(str(item) for item in args["paths"])
+        return [self.git_path_filter(path) for path in path_filters]
 
     def _base_command_env(self) -> dict[str, str]:
         if self.shell_env_policy.inherit == "none":
@@ -2653,17 +2707,7 @@ class Runtime:
             payload["output_refs"] = output_refs
             payload["output_truncated"] = True
             payload["truncated_output_streams"] = truncated_streams
-            read_actions = [
-                {
-                    "tool": "read_output",
-                    "arguments": {
-                        "output_ref": output_refs[stream],
-                        "offset": 0,
-                        "limit": EXEC_PREVIEW_BYTES,
-                    },
-                }
-                for stream in truncated_streams
-            ]
+            read_actions = [read_output_action(output_refs[stream]) for stream in truncated_streams]
             payload["next_actions"] = read_actions
             if terminal:
                 payload["next_action"] = read_actions[0]
@@ -2716,17 +2760,7 @@ class Runtime:
                     if session.retained_stream_bytes(stream)[2] > 0
                 ]
                 compact["truncated_output_streams"] = preview_streams
-                preview_actions = [
-                    {
-                        "tool": "read_output",
-                        "arguments": {
-                            "output_ref": output_refs[stream],
-                            "offset": 0,
-                            "limit": EXEC_PREVIEW_BYTES,
-                        },
-                    }
-                    for stream in preview_streams
-                ]
+                preview_actions = [read_output_action(output_refs[stream]) for stream in preview_streams]
                 compact["next_actions"] = preview_actions
                 if terminal and preview_actions:
                     compact["next_action"] = preview_actions[0]
@@ -2800,14 +2834,9 @@ class Runtime:
             "warnings": warnings,
         }
         if next_offset is not None:
-            result["next_action"] = {
-                "tool": "read_output",
-                "arguments": {
-                    "output_ref": result["stream_output_ref"],
-                    "offset": next_offset,
-                    "limit": limit,
-                },
-            }
+            result["next_action"] = read_output_action(
+                str(result["stream_output_ref"]), offset=next_offset, limit=limit
+            )
         return result
 
     def write_stdin(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -2839,9 +2868,10 @@ class Runtime:
         return self._format_session_output(session, payload, args)
 
     def _wait_for_session_exit(self, session: ExecSession, wait_seconds: float) -> bool:
-        wait_until = time.time() + max(0.0, wait_seconds)
-        while time.time() < wait_until and session.process.poll() is None:
-            time.sleep(0.02)
+        try:
+            session.process.wait(timeout=max(0.0, wait_seconds))
+        except subprocess.TimeoutExpired:
+            pass
         session.refresh_status()
         session.drain_readers()
         return session.process.poll() is not None
@@ -2858,11 +2888,11 @@ class Runtime:
         evict = True
         if session.process.poll() is None:
             session.terminating = True
-            self._terminate_process_group(session.process, signum, force=force)
+            terminate_process_group(session.process, signum, force=force)
             exited = self._wait_for_session_exit(session, int(args.get("wait_ms", 5000)) / 1000.0)
             if not exited and not force:
                 force = True
-                self._terminate_process_group(session.process, HARD_KILL_SIGNAL, force=True)
+                terminate_process_group(session.process, HARD_KILL_SIGNAL, force=True)
                 exited = self._wait_for_session_exit(session, int(args.get("kill_wait_ms", 2000)) / 1000.0)
             if exited:
                 killed = True
@@ -2895,7 +2925,7 @@ class Runtime:
             return
         session.refresh_status()
         if session.process.poll() is None:
-            self._terminate_process_group(session.process, signal.SIGTERM)
+            terminate_process_group(session.process, signal.SIGTERM)
 
     def cancel_request(self, request_id: str | int) -> None:
         with self.request_sessions_lock:
@@ -2911,27 +2941,21 @@ class Runtime:
             raise ToolFailure("SESSION_NOT_FOUND", "Session not found; stdin access denied.", category="not_found")
         return session
 
-    def _terminate_process_group(
-        self,
-        process: subprocess.Popen[bytes],
-        signum: signal.Signals,
-        *,
-        force: bool = False,
-    ) -> None:
-        terminate_process_group(process, signum, force=force)
-
     def git_status(self, args: dict[str, Any]) -> dict[str, Any]:
         resolved = self.resolve_existing(str(args.get("path", ".")))
         max_entries = int(args.get("max_entries", 1000))
         include_untracked = bool(args.get("include_untracked", True))
         git = require_git()
-        root_check = self._run_git_text([git, "-C", str(resolved.path), "rev-parse", "--show-toplevel"])
+        git_env = self._git_env()
+        root_check = self._run_git_text(
+            [git, "-C", str(resolved.path), "rev-parse", "--show-toplevel"], env=git_env
+        )
         if root_check.returncode != 0:
             return self._git_status_not_repo(root_check)
         status_cmd = [git, "-C", str(resolved.path), "status", "--porcelain=v1", "-b"]
         if not include_untracked:
             status_cmd.append("--untracked-files=no")
-        completed = self._run_git_text(status_cmd, timeout=10)
+        completed = self._run_git_text(status_cmd, timeout=10, env=git_env)
         if completed.returncode != 0:
             raise ToolFailure("GIT_ERROR", completed.stderr.strip() or "git status failed", category="runtime")
         lines = completed.stdout.splitlines()
@@ -2963,7 +2987,7 @@ class Runtime:
         return {
             "is_repo": True,
             "branch": branch,
-            "head": self._git_rev_parse(resolved.path, "HEAD"),
+            "head": self._git_rev_parse(resolved.path, "HEAD", env=git_env),
             "upstream": upstream,
             "ahead": ahead,
             "behind": behind,
@@ -2974,23 +2998,19 @@ class Runtime:
 
     def git_diff(self, args: dict[str, Any]) -> dict[str, Any]:
         git = require_git()
+        git_env = self._git_env()
         staged = bool(args.get("staged", False))
         unstaged = bool(args.get("unstaged", True))
         context = int(args.get("context_lines", 3))
         max_bytes = int(args.get("max_bytes", 262144))
-        path_filters: list[str] = []
-        if isinstance(args.get("path"), str):
-            path_filters.append(str(args["path"]))
-        if isinstance(args.get("paths"), list):
-            path_filters.extend(str(item) for item in args["paths"])
-        path_filters = [self.git_path_filter(path) for path in path_filters]
-        if not self._is_git_repo(self.workspace.root):
+        path_filters = self._git_path_filters(args)
+        if not self._is_git_repo(self.workspace.root, env=git_env):
             return self._fallback_diff(path_filters, max_bytes)
         chunks: list[bytes] = []
         if unstaged:
-            chunks.append(self._run_git_diff(git, context, path_filters, cached=False))
+            chunks.append(self._run_git_diff(git, context, path_filters, cached=False, env=git_env))
         if staged:
-            chunks.append(self._run_git_diff(git, context, path_filters, cached=True))
+            chunks.append(self._run_git_diff(git, context, path_filters, cached=True, env=git_env))
         combined = b""
         for chunk in chunks:
             if combined and chunk and not combined.endswith(b"\n"):
@@ -3002,21 +3022,20 @@ class Runtime:
         return {
             "diff": diff_text,
             "files": parse_diff_files(diff_text),
-            "truncated": truncated,
-            "truncated_by": diff_truncation.truncated_by,
-            "output_lines": diff_truncation.output_lines,
-            "output_bytes": diff_truncation.output_bytes,
+            **truncation_fields(diff_truncation),
             "warnings": ["diff truncated"] if truncated else [],
         }
 
-    def _run_git_diff(self, git: str, context: int, path_filters: list[str], *, cached: bool) -> bytes:
+    def _run_git_diff(
+        self, git: str, context: int, path_filters: list[str], *, cached: bool, env: dict[str, str] | None = None
+    ) -> bytes:
         cmd = [git, "-C", str(self.workspace.root), "diff", f"--unified={context}"]
         if cached:
             cmd.append("--cached")
         if path_filters:
             cmd.append("--")
             cmd.extend(path_filters)
-        completed = self._run_git_bytes(cmd, timeout=10)
+        completed = self._run_git_bytes(cmd, timeout=10, env=env)
         if completed.returncode not in {0, 1}:
             raise ToolFailure("GIT_ERROR", completed.stderr.decode("utf-8", errors="replace"), category="runtime")
         return completed.stdout
@@ -3054,18 +3073,16 @@ class Runtime:
         return {
             "diff": diff_text,
             "files": files,
-            "truncated": truncated,
-            "truncated_by": diff_truncation.truncated_by,
-            "output_lines": diff_truncation.output_lines,
-            "output_bytes": diff_truncation.output_bytes,
+            **truncation_fields(diff_truncation),
             "warnings": ["non-git diff fallback"] + (["diff truncated"] if truncated else []),
         }
 
     def git_log(self, args: dict[str, Any]) -> dict[str, Any]:
         git = require_git()
+        git_env = self._git_env()
         requested_path = str(args.get("path", "."))
         resolved = self.resolve_existing(requested_path)
-        if not self._is_git_repo(resolved.path):
+        if not self._is_git_repo(resolved.path, env=git_env):
             return {"is_repo": False, "commits": [], "truncated": False, "warnings": []}
         ref = validate_git_ref(str(args.get("ref", "HEAD")))
         max_count = int(args.get("max_count", 20))
@@ -3084,7 +3101,7 @@ class Runtime:
         ]
         if path_filter != ".":
             cmd.extend(["--", path_filter])
-        completed = self._run_git_text(cmd, timeout=10)
+        completed = self._run_git_text(cmd, timeout=10, env=git_env)
         if completed.returncode != 0:
             raise ToolFailure("GIT_ERROR", completed.stderr.strip() or "git log failed", category="runtime")
         commits: list[dict[str, Any]] = []
@@ -3127,18 +3144,14 @@ class Runtime:
 
     def git_show(self, args: dict[str, Any]) -> dict[str, Any]:
         git = require_git()
-        if not self._is_git_repo(self.workspace.root):
+        git_env = self._git_env()
+        if not self._is_git_repo(self.workspace.root, env=git_env):
             return {"is_repo": False, "content": "", "files": [], "truncated": False, "warnings": []}
         rev = validate_git_ref(str(args.get("rev", "HEAD")))
         context = int(args.get("context_lines", 3))
         max_bytes = int(args.get("max_bytes", 262144))
         include_diff = bool(args.get("include_diff", True))
-        path_filters: list[str] = []
-        if isinstance(args.get("path"), str):
-            path_filters.append(str(args["path"]))
-        if isinstance(args.get("paths"), list):
-            path_filters.extend(str(item) for item in args["paths"])
-        normalized_filters = [self.git_path_filter(path) for path in path_filters]
+        normalized_filters = self._git_path_filters(args)
         cmd = [
             git,
             "-C",
@@ -3154,7 +3167,7 @@ class Runtime:
         if normalized_filters:
             cmd.append("--")
             cmd.extend(normalized_filters)
-        completed = self._run_git_bytes(cmd, timeout=10)
+        completed = self._run_git_bytes(cmd, timeout=10, env=git_env)
         if completed.returncode != 0:
             raise ToolFailure("GIT_ERROR", completed.stderr.decode("utf-8", errors="replace").strip() or "git show failed", category="runtime")
         truncation = truncate_text_head(completed.stdout.decode("utf-8", errors="replace"), max_lines=DEFAULT_MAX_LINES, max_bytes=max_bytes)
@@ -3164,20 +3177,18 @@ class Runtime:
             "rev": rev,
             "content": content,
             "files": parse_diff_files(content),
-            "truncated": truncation.truncated,
-            "truncated_by": truncation.truncated_by,
-            "output_lines": truncation.output_lines,
-            "output_bytes": truncation.output_bytes,
+            **truncation_fields(truncation),
             "warnings": ["output truncated"] if truncation.truncated else [],
         }
 
     def git_blame(self, args: dict[str, Any]) -> dict[str, Any]:
         git = require_git()
+        git_env = self._git_env()
         requested_path = str(args.get("path", ""))
         resolved = self.resolve_existing(requested_path)
         if resolved.path.is_dir():
             raise ToolFailure("IS_DIRECTORY", "Path is a directory.", category="validation")
-        if not self._is_git_repo(self.workspace.root):
+        if not self._is_git_repo(self.workspace.root, env=git_env):
             return {"is_repo": False, "path": resolved.display, "lines": [], "truncated": False, "warnings": []}
         ref_arg = args.get("rev")
         ref = validate_git_ref(str(ref_arg)) if isinstance(ref_arg, str) and ref_arg else None
@@ -3205,7 +3216,7 @@ class Runtime:
         if ref:
             cmd.append(ref)
         cmd.extend(["--", resolved.display])
-        completed = self._run_git_text(cmd, timeout=10)
+        completed = self._run_git_text(cmd, timeout=10, env=git_env)
         if completed.returncode != 0:
             raise ToolFailure("GIT_ERROR", completed.stderr.strip() or "git blame failed", category="runtime")
         lines = parse_git_blame_porcelain(completed.stdout)
@@ -3332,18 +3343,11 @@ def path_batches(paths: Iterator[Path], size: int) -> Iterator[list[Path]]:
         yield batch
 
 
-def find_literal(line: str, query: str, case_sensitive: bool) -> Any:
+def find_literal(line: str, needle: str, case_sensitive: bool) -> int:
+    """Return the match index of a pre-normalized needle (lowered unless
+    case_sensitive) in line, or -1."""
     haystack = line if case_sensitive else line.lower()
-    needle = query if case_sensitive else query.lower()
-    index = haystack.find(needle)
-    if index < 0:
-        return None
-
-    class Match:
-        def start(self) -> int:
-            return index
-
-    return Match()
+    return haystack.find(needle)
 
 
 def shlex_split(command: str) -> list[str]:
@@ -3838,7 +3842,7 @@ def parse_branch_line(line: str) -> tuple[str, str, int, int]:
 
 
 def require_git() -> str:
-    git = shutil.which("git")
+    git = cached_which("git")
     if not git:
         raise ToolFailure("GIT_ERROR", "git executable not found.", category="runtime")
     return git
@@ -3907,21 +3911,6 @@ class LandlockRulesetAttr(ctypes.Structure):
 
 class LandlockPathBeneathAttr(ctypes.Structure):
     _fields_ = [("allowed_access", ctypes.c_uint64), ("parent_fd", ctypes.c_int)]
-
-
-_LIBC: Any | None = None
-
-
-def landlock_libc() -> Any:
-    global _LIBC
-    if _LIBC is None:
-        _LIBC = ctypes.CDLL(None, use_errno=True)
-    return _LIBC
-
-
-def libc_syscall(number: int, *args: Any) -> int:
-    ctypes.set_errno(0)
-    return int(landlock_libc().syscall(number, *args))
 
 
 def landlock_abi_version() -> int:
@@ -4062,19 +4051,6 @@ def landlock_path_allowed_access(path: Path) -> int:
     )
 
 
-def restrict_self_with_landlock(ruleset_fd: int) -> None:
-    rc = int(landlock_libc().prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0))
-    if rc != 0:
-        os._exit(126)
-    rc = libc_syscall(SYS_LANDLOCK_RESTRICT_SELF, ruleset_fd, 0)
-    if rc != 0:
-        os._exit(126)
-    try:
-        os.close(ruleset_fd)
-    except OSError:
-        pass
-
-
 def landlock_exec_argv(ruleset_fd: int, cmd: str) -> list[str]:
     helper = Path(__file__).with_name("landlock_exec.py")
     return [sys.executable, str(helper), str(ruleset_fd), cmd]
@@ -4099,6 +4075,20 @@ def _resolved_system_path_root_prefixes() -> tuple[Path, ...]:
 
 
 def guard_allow_roots() -> list[str]:
+    # Keyed on the env vars the computation reads, so repeated exec_command
+    # calls skip the dozens of Path.resolve()/is_dir() syscalls while env
+    # changes still invalidate the cache.
+    return list(
+        _guard_allow_roots_cached(
+            os.environ.get("JAVA_HOME", ""),
+            os.environ.get("PATH", ""),
+            os.environ.get(f"{ENV_PREFIX}_EXEC_ALLOW_ROOTS", ""),
+        )
+    )
+
+
+@functools.lru_cache(maxsize=8)
+def _guard_allow_roots_cached(java_home: str, path_env: str, extra_roots: str) -> tuple[str, ...]:
     roots = set(TOOLCHAIN_READ_ROOTS)
     roots.update(OS_METADATA_READ_FILES)
     roots.update(GIT_READ_ROOTS)
@@ -4110,7 +4100,6 @@ def guard_allow_roots() -> list[str]:
             str(Path(sys.base_prefix).resolve()),
         }
     )
-    java_home = os.environ.get("JAVA_HOME")
     if java_home:
         try:
             resolved_java_home = Path(java_home).expanduser().resolve()
@@ -4118,7 +4107,7 @@ def guard_allow_roots() -> list[str]:
             pass
         else:
             roots.add(str(resolved_java_home))
-    for item in os.environ.get("PATH", "").split(os.pathsep):
+    for item in path_env.split(os.pathsep):
         if not item:
             continue
         try:
@@ -4127,7 +4116,7 @@ def guard_allow_roots() -> list[str]:
             continue
         if resolved.is_dir() and is_default_system_path_root(resolved):
             roots.add(str(resolved))
-    for item in os.environ.get(f"{ENV_PREFIX}_EXEC_ALLOW_ROOTS", "").split(os.pathsep):
+    for item in extra_roots.split(os.pathsep):
         if not item:
             continue
         try:
@@ -4136,7 +4125,7 @@ def guard_allow_roots() -> list[str]:
             continue
         if resolved.is_dir():
             roots.add(str(resolved))
-    return sorted(root for root in roots if root and Path(root).is_absolute())
+    return tuple(sorted(root for root in roots if root and Path(root).is_absolute()))
 
 
 def parse_diff_files(diff_text: str) -> list[dict[str, Any]]:
@@ -4441,7 +4430,10 @@ def tool_annotations(name: str, *, fake_readonly: bool = False) -> dict[str, Any
     }
 
 
+@functools.cache
 def input_schemas() -> dict[str, dict[str, Any]]:
+    # Cached: callers only read the returned tree, and rebuilding the full
+    # ~190-line schema dict on every tools/call dispatch is measurable.
     string = {"type": "string"}
     integer = {"type": "integer"}
     boolean = {"type": "boolean"}
@@ -4661,12 +4653,12 @@ def server_card_payload(runtime: Runtime, *, oauth_base_url: str | None = None) 
         "protocolVersion": PROTOCOL_VERSION,
         "server": {
             "name": SERVER_NAME,
-            "title": "Coding Tools MCP",
+            "title": SERVER_TITLE,
             "version": __version__,
         },
         "transport": {
             "type": "streamable_http",
-            "endpoint": "/mcp",
+            "endpoint": MCP_ENDPOINT_PATH,
             "methods": ["POST", "DELETE", "OPTIONS"],
         },
         "auth": _server_card_auth(runtime, oauth_base_url=oauth_base_url),
@@ -4685,7 +4677,7 @@ def server_card_payload(runtime: Runtime, *, oauth_base_url: str | None = None) 
 
 
 class MCPHandler(http.server.BaseHTTPRequestHandler):
-    server_version = "CodingToolsMCP/0.2"
+    server_version = f"CodingToolsMCP/{__version__}"
 
     @property
     def runtime(self) -> Runtime:
@@ -4693,6 +4685,24 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
 
     def log_message(self, format: str, *args: Any) -> None:
         print(format % args, file=sys.stderr)
+
+    def send_rpc_error(
+        self,
+        code: int,
+        message: str,
+        *,
+        status: int = 400,
+        request_id: str | int | None = None,
+        data: Any = None,
+        extra_headers: dict[str, str] | None = None,
+        head_only: bool = False,
+    ) -> None:
+        self.send_json(
+            jsonrpc_error(request_id, code, message, data),
+            status=status,
+            extra_headers=extra_headers,
+            head_only=head_only,
+        )
 
     def do_GET(self) -> None:
         self.handle_metadata_request(head_only=False)
@@ -4702,7 +4712,7 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
 
     def do_DELETE(self) -> None:
         request_path = self.path.split("?", 1)[0]
-        if posixpath.normpath(request_path) != "/mcp":
+        if posixpath.normpath(request_path) != MCP_ENDPOINT_PATH:
             self.send_json({"error": "Unknown endpoint"}, status=404)
             return
         if not self.is_authorized():
@@ -4710,10 +4720,7 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             return
         session_id = self.headers.get("Mcp-Session-Id")
         if not session_id or not self.server.sessions.delete(session_id):  # type: ignore[attr-defined]
-            self.send_json(
-                {"jsonrpc": "2.0", "id": None, "error": {"code": -32001, "message": "Unknown MCP session"}},
-                status=404,
-            )
+            self.send_rpc_error(-32001, "Unknown MCP session", status=404)
             return
         self.send_response(200)
         self.send_header("Content-Length", "0")
@@ -4723,7 +4730,7 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
     def do_OPTIONS(self) -> None:
         request_path = self.path.split("?", 1)[0]
         if posixpath.normpath(request_path) not in {
-            "/mcp",
+            MCP_ENDPOINT_PATH,
             "/.well-known/mcp.json",
             "/.well-known/mcp/server-card.json",
             "/.well-known/oauth-authorization-server",
@@ -4755,7 +4762,7 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         if normalized == "/oauth/authorize" and not head_only:
             self.handle_oauth_authorize_get()
             return
-        if normalized == "/mcp":
+        if normalized == MCP_ENDPOINT_PATH:
             origin = self.headers.get("Origin")
             if origin and not is_allowed_origin(origin):
                 self.send_json({"error": "Origin denied"}, status=403, head_only=head_only)
@@ -4763,8 +4770,9 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             if not self.is_authorized():
                 self.send_unauthorized(head_only=head_only)
                 return
-            self.send_json(
-                {"jsonrpc": "2.0", "id": None, "error": {"code": -32000, "message": "SSE GET stream is not supported"}},
+            self.send_rpc_error(
+                -32000,
+                "SSE GET stream is not supported",
                 status=405,
                 extra_headers={"Allow": "POST, DELETE"},
                 head_only=head_only,
@@ -4787,119 +4795,65 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         if normalized == "/oauth/register":
             self.handle_oauth_register()
             return
-        if normalized != "/mcp":
-            self.send_json({"jsonrpc": "2.0", "id": None, "error": {"code": -32601, "message": "Unknown endpoint"}}, status=404)
+        if normalized != MCP_ENDPOINT_PATH:
+            self.send_rpc_error(-32601, "Unknown endpoint", status=404)
             return
         origin = self.headers.get("Origin")
         if origin and not is_allowed_origin(origin):
-            self.send_json({"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "Origin denied"}}, status=403)
+            self.send_rpc_error(-32600, "Origin denied", status=403)
             return
         if not self.is_authorized():
             self.send_unauthorized()
             return
         if self.headers.get_content_type().lower() != "application/json":
-            self.send_json(
-                {
-                    "jsonrpc": "2.0",
-                    "id": None,
-                    "error": {"code": -32600, "message": "Content-Type must be application/json"},
-                },
-                status=415,
-            )
+            self.send_rpc_error(-32600, "Content-Type must be application/json", status=415)
             return
         protocol_version = self.headers.get("MCP-Protocol-Version")
         if protocol_version and not protocol_version_is_supported(protocol_version):
-            self.send_json(
-                {
-                    "jsonrpc": "2.0",
-                    "id": None,
-                    "error": {
-                        "code": -32600,
-                        "message": "Unsupported MCP protocol version",
-                        "data": {"supported": list(SUPPORTED_PROTOCOL_VERSIONS), "received": protocol_version},
-                    },
-                },
-                status=400,
+            self.send_rpc_error(
+                -32600,
+                "Unsupported MCP protocol version",
+                data={"supported": list(SUPPORTED_PROTOCOL_VERSIONS), "received": protocol_version},
             )
             return
         raw_length = self.headers.get("Content-Length")
         if raw_length is None:
-            self.send_json(
-                {
-                    "jsonrpc": "2.0",
-                    "id": None,
-                    "error": {"code": -32600, "message": "Content-Length is required"},
-                },
-                status=411,
-            )
+            self.send_rpc_error(-32600, "Content-Length is required", status=411)
             return
         try:
             length = int(raw_length)
         except ValueError:
-            self.send_json(
-                {
-                    "jsonrpc": "2.0",
-                    "id": None,
-                    "error": {"code": -32600, "message": "Content-Length must be a non-negative integer"},
-                },
-                status=400,
-            )
+            self.send_rpc_error(-32600, "Content-Length must be a non-negative integer")
             return
         if length < 0:
-            self.send_json(
-                {
-                    "jsonrpc": "2.0",
-                    "id": None,
-                    "error": {"code": -32600, "message": "Content-Length must be a non-negative integer"},
-                },
-                status=400,
-            )
+            self.send_rpc_error(-32600, "Content-Length must be a non-negative integer")
             return
         if length > MAX_HTTP_REQUEST_BYTES:
             self.close_connection = True
-            self.send_json(
-                {
-                    "jsonrpc": "2.0",
-                    "id": None,
-                    "error": {
-                        "code": -32600,
-                        "message": "Request body exceeds maximum size",
-                        "data": {"max_bytes": MAX_HTTP_REQUEST_BYTES},
-                    },
-                },
+            self.send_rpc_error(
+                -32600,
+                "Request body exceeds maximum size",
                 status=413,
+                data={"max_bytes": MAX_HTTP_REQUEST_BYTES},
             )
             return
         body = self.rfile.read(length)
         try:
             request = json.loads(body.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError):
-            self.send_json({"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "Parse error"}}, status=400)
+            self.send_rpc_error(-32700, "Parse error")
             return
         if isinstance(request, list):
-            self.send_json(
-                {
-                    "jsonrpc": "2.0",
-                    "id": None,
-                    "error": {
-                        "code": -32600,
-                        "message": "JSON-RPC batch requests are not supported by Streamable HTTP",
-                    },
-                },
-                status=400,
-            )
+            self.send_rpc_error(-32600, "JSON-RPC batch requests are not supported by Streamable HTTP")
             return
         if not isinstance(request, dict):
-            self.send_json({"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "Invalid Request"}}, status=400)
+            self.send_rpc_error(-32600, "Invalid Request")
             return
         try:
             validate_rpc_envelope(request)
         except JsonRpcError as exc:
-            error: dict[str, Any] = {"code": exc.code, "message": exc.message}
-            if exc.data is not None:
-                error["data"] = exc.data
-            self.send_json(
-                {"jsonrpc": "2.0", "id": response_id(request), "error": error},
+            self.send_rpc_error(
+                exc.code, exc.message, status=200, request_id=response_id(request), data=exc.data
             )
             return
         method = request.get("method")
@@ -4907,56 +4861,38 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         created_session = False
         if method == "initialize":
             if session_id:
-                self.send_json(
-                    {"jsonrpc": "2.0", "id": request.get("id"), "error": {"code": -32600, "message": "initialize must not include Mcp-Session-Id"}},
-                    status=400,
+                self.send_rpc_error(
+                    -32600, "initialize must not include Mcp-Session-Id", request_id=request.get("id")
                 )
                 return
             try:
                 self._runtime = self.server.sessions.create()  # type: ignore[attr-defined]
             except RuntimeError as exc:
-                self.send_json(
-                    {"jsonrpc": "2.0", "id": request.get("id"), "error": {"code": -32000, "message": str(exc)}},
-                    status=503,
-                )
+                self.send_rpc_error(-32000, str(exc), status=503, request_id=request.get("id"))
                 return
             self._send_session_header = True
             created_session = True
         elif session_id:
             runtime = self.server.sessions.get(session_id)  # type: ignore[attr-defined]
             if runtime is None:
-                self.send_json(
-                    {
-                        "jsonrpc": "2.0",
-                        "id": response_id(request),
-                        "error": {"code": -32001, "message": "Unknown MCP session"},
-                    },
-                    status=404,
+                self.send_rpc_error(
+                    -32001, "Unknown MCP session", status=404, request_id=response_id(request)
                 )
                 return
             self._runtime = runtime
             self._send_session_header = True
             if protocol_version != runtime.protocol_version:
-                self.send_json(
-                    {
-                        "jsonrpc": "2.0",
-                        "id": request.get("id"),
-                        "error": {
-                            "code": -32600,
-                            "message": "MCP-Protocol-Version does not match the initialized session",
-                            "data": {"expected": runtime.protocol_version, "received": protocol_version},
-                        },
-                    },
-                    status=400,
+                self.send_rpc_error(
+                    -32600,
+                    "MCP-Protocol-Version does not match the initialized session",
+                    request_id=request.get("id"),
+                    data={"expected": runtime.protocol_version, "received": protocol_version},
                 )
                 return
         elif method == "ping":
             self._runtime = self.server.control_runtime  # type: ignore[attr-defined]
         else:
-            self.send_json(
-                {"jsonrpc": "2.0", "id": request.get("id"), "error": {"code": -32002, "message": "Server not initialized"}},
-                status=400,
-            )
+            self.send_rpc_error(-32002, "Server not initialized", request_id=request.get("id"))
             return
         response = self.handle_rpc(request)
         if created_session and response is not None and "error" in response:
@@ -4975,11 +4911,7 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         try:
             return dispatch_rpc(self.runtime, request)
         except Exception as exc:  # noqa: BLE001 - HTTP must always answer with JSON-RPC
-            return {
-                "jsonrpc": "2.0",
-                "id": response_id(request),
-                "error": {"code": -32603, "message": str(exc)},
-            }
+            return jsonrpc_error(response_id(request), -32603, str(exc))
 
     def is_authorized(self) -> bool:
         if not self.runtime.auth_enabled():
@@ -5023,8 +4955,9 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             www_auth = f'Bearer realm="coding-tools-mcp", resource_metadata="{base}/.well-known/oauth-protected-resource"'
         else:
             www_auth = 'Bearer realm="coding-tools-mcp"'
-        self.send_json(
-            {"jsonrpc": "2.0", "id": None, "error": {"code": -32000, "message": "Unauthorized"}},
+        self.send_rpc_error(
+            -32000,
+            "Unauthorized",
             status=401,
             extra_headers={"WWW-Authenticate": www_auth},
             head_only=head_only,
@@ -5045,7 +4978,7 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
                 "response_types_supported": ["code"],
                 "grant_types_supported": ["authorization_code"],
                 "code_challenge_methods_supported": ["S256"],
-                "token_endpoint_auth_methods_supported": _oauth_token_auth_methods(),
+                "token_endpoint_auth_methods_supported": list(OAUTH_TOKEN_AUTH_METHODS),
             },
             head_only=head_only,
         )
@@ -5128,11 +5061,7 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             self.send_json({"error": "OAuth not configured"}, status=404)
             return
         params = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query, keep_blank_values=True)
-
-        def _p(k: str) -> str:
-            v = params.get(k)
-            return v[0] if v else ""
-
+        _p = functools.partial(_first_form_value, params)
         client_id = _p("client_id")
         redirect_uri = _p("redirect_uri")
         code_challenge = _p("code_challenge")
@@ -5173,11 +5102,7 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             self.send_json({"error": "invalid_request", "error_description": "Content-Type must be application/x-www-form-urlencoded"}, status=400)
             return
         params = urllib.parse.parse_qs(body.decode("utf-8", errors="replace"), keep_blank_values=True)
-
-        def _p(k: str) -> str:
-            v = params.get(k)
-            return v[0] if v else ""
-
+        _p = functools.partial(_first_form_value, params)
         client_id = _p("client_id")
         redirect_uri = _p("redirect_uri")
         code_challenge = _p("code_challenge")
@@ -5186,33 +5111,24 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         resource = _p("resource")
         password = _p("password")
 
-        if cfg.registry.get(client_id) is None or not cfg.registry.accepts_redirect(client_id, redirect_uri):
+        def fail(error: str, status: int = 400) -> None:
             self._send_html(self._oauth_login_page(
                 client_id=client_id, redirect_uri=redirect_uri, code_challenge=code_challenge,
                 code_challenge_method=code_challenge_method, state=state, resource=resource,
-                error="Invalid client or redirect URI",
-            ), status=400)
+                error=error,
+            ), status=status)
+
+        if cfg.registry.get(client_id) is None or not cfg.registry.accepts_redirect(client_id, redirect_uri):
+            fail("Invalid client or redirect URI")
             return
         if code_challenge_method != "S256" or not valid_pkce_challenge(code_challenge):
-            self._send_html(self._oauth_login_page(
-                client_id=client_id, redirect_uri=redirect_uri, code_challenge=code_challenge,
-                code_challenge_method=code_challenge_method, state=state, resource=resource,
-                error="Invalid PKCE parameters",
-            ), status=400)
+            fail("Invalid PKCE parameters")
             return
         if resource.rstrip("/") != self.oauth_base_url():
-            self._send_html(self._oauth_login_page(
-                client_id=client_id, redirect_uri=redirect_uri, code_challenge=code_challenge,
-                code_challenge_method=code_challenge_method, state=state, resource=resource,
-                error="Invalid resource",
-            ), status=400)
+            fail("Invalid resource")
             return
         if not secrets.compare_digest(password, cfg.password):
-            self._send_html(self._oauth_login_page(
-                client_id=client_id, redirect_uri=redirect_uri, code_challenge=code_challenge,
-                code_challenge_method=code_challenge_method, state=state, resource=resource,
-                error="Invalid password",
-            ), status=401)
+            fail("Invalid password", status=401)
             return
 
         code = secrets.token_urlsafe(32)
@@ -5260,11 +5176,7 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             _err("invalid_request", "Content-Type must be application/x-www-form-urlencoded")
             return
         params = urllib.parse.parse_qs(body.decode("utf-8", errors="replace"), keep_blank_values=True)
-
-        def _p(k: str) -> str:
-            v = params.get(k)
-            return v[0] if v else ""
-
+        _p = functools.partial(_first_form_value, params)
         grant_type = _p("grant_type")
         code = _p("code")
         redirect_uri = _p("redirect_uri")
