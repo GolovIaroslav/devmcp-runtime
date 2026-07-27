@@ -72,6 +72,21 @@ Artifacts:
 
 Default smoke conclusion: `PREFLIGHT_ONLY`.
 
+## Aider Polyglot Tool-Chain Evaluation
+
+Reports:
+
+- [reports/benchmark/aider-polyglot-mcp-20260725.md](reports/benchmark/aider-polyglot-mcp-20260725.md)
+- [reports/benchmark/aider-polyglot-mcp-20260725.json](reports/benchmark/aider-polyglot-mcp-20260725.json)
+
+A deterministic run over the 225 Aider Polyglot Exercism tasks that exercises
+the `read_file -> apply_patch -> read-back verification -> exec_command` chain
+using repository reference implementations. It measures the tool chain, not
+model problem-solving: all 225 patches were accepted by `apply_patch`, 224/225
+read-backs matched the reference exactly, and 211/225 official test suites
+passed, with every failure traced to missing benchmark fixtures or sandbox
+dependencies rather than incorrect patch application.
+
 ## MCP Runtime Latency
 
 Command:
