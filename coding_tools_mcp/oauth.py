@@ -16,6 +16,8 @@ import jwt
 OAUTH_CODE_TTL_SECONDS = 300
 OAUTH_TOKEN_TTL_SECONDS = 60 * 60
 OAUTH_MAX_BODY_BYTES = 8_192
+OAUTH_GRANT_TYPES_SUPPORTED = ("authorization_code",)
+OAUTH_RESPONSE_TYPES_SUPPORTED = ("code",)
 MAX_REDIRECT_URIS = 10
 MAX_REGISTERED_CLIENTS = 1_024
 MAX_PENDING_CODES = 256
@@ -68,16 +70,22 @@ class OAuthClientRegistry:
 
     def register(self, metadata: dict[str, Any]) -> dict[str, Any]:
         redirects = validate_redirect_uris(metadata.get("redirect_uris"))
-        grant_types = metadata.get("grant_types", ["authorization_code"])
-        response_types = metadata.get("response_types", ["code"])
-        if not isinstance(grant_types, list) or not all(isinstance(item, str) for item in grant_types):
+        requested_grant_types = metadata.get("grant_types", list(OAUTH_GRANT_TYPES_SUPPORTED))
+        requested_response_types = metadata.get("response_types", list(OAUTH_RESPONSE_TYPES_SUPPORTED))
+        if not isinstance(requested_grant_types, list) or not all(
+            isinstance(item, str) for item in requested_grant_types
+        ):
             raise ValueError("grant_types must be an array of strings")
-        if set(grant_types) != {"authorization_code"}:
-            raise ValueError("grant_types must contain only authorization_code")
-        if not isinstance(response_types, list) or not all(isinstance(item, str) for item in response_types):
+        grant_types = tuple(item for item in OAUTH_GRANT_TYPES_SUPPORTED if item in requested_grant_types)
+        if not grant_types:
+            raise ValueError("grant_types must include at least one supported value")
+        if not isinstance(requested_response_types, list) or not all(
+            isinstance(item, str) for item in requested_response_types
+        ):
             raise ValueError("response_types must be an array of strings")
-        if set(response_types) != {"code"}:
-            raise ValueError("response_types must contain only code")
+        response_types = tuple(item for item in OAUTH_RESPONSE_TYPES_SUPPORTED if item in requested_response_types)
+        if not response_types:
+            raise ValueError("response_types must include at least one supported value")
         method = str(metadata.get("token_endpoint_auth_method") or "none")
         if method not in {"none", "client_secret_post", "client_secret_basic"}:
             raise ValueError("unsupported token_endpoint_auth_method")
@@ -100,8 +108,8 @@ class OAuthClientRegistry:
             "client_id": client.client_id,
             "client_id_issued_at": client.issued_at,
             "redirect_uris": list(client.redirect_uris),
-            "grant_types": ["authorization_code"],
-            "response_types": ["code"],
+            "grant_types": list(grant_types),
+            "response_types": list(response_types),
             "token_endpoint_auth_method": client.token_endpoint_auth_method,
         }
         if client.client_name:

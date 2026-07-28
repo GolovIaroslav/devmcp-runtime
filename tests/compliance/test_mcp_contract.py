@@ -667,6 +667,72 @@ class MCPContractTests(ComplianceTestCase):
         finally:
             self.stop_process(process)
 
+    def test_oauth_dynamic_registration_normalizes_unsupported_flow_metadata(self) -> None:
+        port = free_port()
+        base_url = f"http://127.0.0.1:{port}"
+        env = self.oauth_server_env(
+            CODING_TOOLS_MCP_OAUTH_PASSWORD="test-password",
+            CODING_TOOLS_MCP_OAUTH_TOKEN_SECRET=bytes(range(32)).hex(),
+        )
+        process = self.start_oauth_server(port, env)
+        try:
+            self.wait_for_json(f"{base_url}/.well-known/oauth-authorization-server")
+            body = json.dumps(
+                {
+                    "client_name": "Refresh Token Compatibility Test",
+                    "redirect_uris": ["http://127.0.0.1/callback"],
+                    "grant_types": ["authorization_code", "refresh_token"],
+                    "response_types": ["code", "token"],
+                    "token_endpoint_auth_method": "none",
+                }
+            ).encode("utf-8")
+            status, _, response_body = self.raw_base_http_request(
+                base_url,
+                "POST",
+                "/oauth/register",
+                body=body,
+                headers={"Content-Type": "application/json"},
+            )
+            self.assertEqual(status, 201, response_body)
+            response = json.loads(response_body)
+            self.assertEqual(response.get("grant_types"), ["authorization_code"])
+            self.assertEqual(response.get("response_types"), ["code"])
+
+            unsupported_only_body = json.dumps(
+                {
+                    "redirect_uris": ["http://127.0.0.1/callback"],
+                    "grant_types": ["refresh_token"],
+                }
+            ).encode("utf-8")
+            unsupported_status, _, unsupported_response = self.raw_base_http_request(
+                base_url,
+                "POST",
+                "/oauth/register",
+                body=unsupported_only_body,
+                headers={"Content-Type": "application/json"},
+            )
+            self.assertEqual(unsupported_status, 400)
+            self.assertEqual(json.loads(unsupported_response).get("error"), "invalid_client_metadata")
+
+            unsupported_response_type_body = json.dumps(
+                {
+                    "redirect_uris": ["http://127.0.0.1/callback"],
+                    "grant_types": ["authorization_code"],
+                    "response_types": ["token"],
+                }
+            ).encode("utf-8")
+            unsupported_response_status, _, unsupported_response_body = self.raw_base_http_request(
+                base_url,
+                "POST",
+                "/oauth/register",
+                body=unsupported_response_type_body,
+                headers={"Content-Type": "application/json"},
+            )
+            self.assertEqual(unsupported_response_status, 400)
+            self.assertEqual(json.loads(unsupported_response_body).get("error"), "invalid_client_metadata")
+        finally:
+            self.stop_process(process)
+
     def test_http_pre_dispatch_errors_include_null_json_rpc_id(self) -> None:
         cases = [
             (

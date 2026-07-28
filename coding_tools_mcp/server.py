@@ -37,7 +37,9 @@ from .errors import JsonRpcError, ToolFailure
 from .landlock_exec import libc_syscall
 from .oauth import (
     OAUTH_CODE_TTL_SECONDS,
+    OAUTH_GRANT_TYPES_SUPPORTED,
     OAUTH_MAX_BODY_BYTES,
+    OAUTH_RESPONSE_TYPES_SUPPORTED,
     MAX_PENDING_CODES,
     OAUTH_TOKEN_TTL_SECONDS,
     OAuthConfig,
@@ -4975,8 +4977,8 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
                 "authorization_endpoint": f"{base}/oauth/authorize",
                 "token_endpoint": f"{base}/oauth/token",
                 "registration_endpoint": f"{base}/oauth/register",
-                "response_types_supported": ["code"],
-                "grant_types_supported": ["authorization_code"],
+                "response_types_supported": list(OAUTH_RESPONSE_TYPES_SUPPORTED),
+                "grant_types_supported": list(OAUTH_GRANT_TYPES_SUPPORTED),
                 "code_challenge_methods_supported": ["S256"],
                 "token_endpoint_auth_methods_supported": list(OAUTH_TOKEN_AUTH_METHODS),
             },
