@@ -414,6 +414,8 @@ class MCPContractTests(ComplianceTestCase):
         try:
             metadata = self.wait_for_json(f"{base_url}/.well-known/oauth-authorization-server")
             self.assertEqual(metadata.get("issuer"), base_url)
+            self.assertEqual(metadata.get("grant_types_supported"), ["authorization_code"])
+            self.assertEqual(metadata.get("response_types_supported"), ["code"])
             self.assertEqual(
                 set(metadata.get("token_endpoint_auth_methods_supported", [])),
                 {"none", "client_secret_basic", "client_secret_post"},
@@ -697,6 +699,24 @@ class MCPContractTests(ComplianceTestCase):
             response = json.loads(response_body)
             self.assertEqual(response.get("grant_types"), ["authorization_code"])
             self.assertEqual(response.get("response_types"), ["code"])
+
+            refresh_body = urllib.parse.urlencode(
+                {
+                    "grant_type": "refresh_token",
+                    "client_id": response["client_id"],
+                    "refresh_token": "not-issued",
+                    "resource": base_url,
+                }
+            ).encode("utf-8")
+            refresh_status, _, refresh_response = self.raw_base_http_request(
+                base_url,
+                "POST",
+                "/oauth/token",
+                body=refresh_body,
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+            self.assertEqual(refresh_status, 400)
+            self.assertEqual(json.loads(refresh_response).get("error"), "unsupported_grant_type")
 
             unsupported_only_body = json.dumps(
                 {

@@ -37,6 +37,7 @@ from .errors import JsonRpcError, ToolFailure
 from .landlock_exec import libc_syscall
 from .oauth import (
     OAUTH_CODE_TTL_SECONDS,
+    OAUTH_GRANT_TYPE_AUTHORIZATION_CODE,
     OAUTH_GRANT_TYPES_SUPPORTED,
     OAUTH_MAX_BODY_BYTES,
     OAUTH_RESPONSE_TYPES_SUPPORTED,
@@ -5202,8 +5203,11 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             except Exception:  # noqa: BLE001
                 pass
 
-        if grant_type != "authorization_code":
-            _err("unsupported_grant_type", "Only authorization_code is supported")
+        if grant_type != OAUTH_GRANT_TYPE_AUTHORIZATION_CODE:
+            _err(
+                "unsupported_grant_type",
+                f"Only {OAUTH_GRANT_TYPE_AUTHORIZATION_CODE} is supported",
+            )
             return
         if cfg.registry.get(client_id) is None:
             _err("invalid_client", "Unknown client_id")
