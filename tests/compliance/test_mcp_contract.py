@@ -462,6 +462,7 @@ class MCPContractTests(ComplianceTestCase):
             code = self.oauth_authorization_code(base_url, client_id, "test-password", verifier)
             token_status, token_response = self.oauth_token_request(base_url, client_id, code, verifier)
             self.assertEqual(token_status, 200)
+            self.assertEqual(token_response.get("expires_in"), 24 * 60 * 60)
             access_token = token_response.get("access_token")
             self.assertIsInstance(access_token, str)
 

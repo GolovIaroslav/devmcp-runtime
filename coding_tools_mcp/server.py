@@ -5204,10 +5204,7 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
                 pass
 
         if grant_type != OAUTH_GRANT_TYPE_AUTHORIZATION_CODE:
-            _err(
-                "unsupported_grant_type",
-                f"Only {OAUTH_GRANT_TYPE_AUTHORIZATION_CODE} is supported",
-            )
+            _err("unsupported_grant_type", "Only authorization_code is supported")
             return
         if cfg.registry.get(client_id) is None:
             _err("invalid_client", "Unknown client_id")

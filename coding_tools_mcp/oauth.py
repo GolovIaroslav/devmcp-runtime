@@ -14,12 +14,14 @@ import jwt
 
 
 OAUTH_CODE_TTL_SECONDS = 300
-OAUTH_TOKEN_TTL_SECONDS = 60 * 60
+OAUTH_TOKEN_TTL_SECONDS = 24 * 60 * 60
 OAUTH_MAX_BODY_BYTES = 8_192
 OAUTH_GRANT_TYPE_AUTHORIZATION_CODE = "authorization_code"
-OAUTH_RESPONSE_TYPE_CODE = "code"
+# Advertised in AS metadata and used to narrow DCR requests. The token endpoint
+# implements authorization_code only — adding an entry here requires a matching
+# branch in handle_oauth_token, not just a wider check.
 OAUTH_GRANT_TYPES_SUPPORTED = (OAUTH_GRANT_TYPE_AUTHORIZATION_CODE,)
-OAUTH_RESPONSE_TYPES_SUPPORTED = (OAUTH_RESPONSE_TYPE_CODE,)
+OAUTH_RESPONSE_TYPES_SUPPORTED = ("code",)
 MAX_REDIRECT_URIS = 10
 MAX_REGISTERED_CLIENTS = 1_024
 MAX_PENDING_CODES = 256
