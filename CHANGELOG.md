@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.2.2 - 2026-07-28
+
+### Fixed
+
+- Dynamic client registration no longer rejects clients that request grant or
+  response types the server does not implement. Requested values are now
+  narrowed to the supported set and reported back in the registration
+  response, per RFC 7591, instead of failing the registration with
+  `invalid_client_metadata`. Clients that register with
+  `grant_types: ["authorization_code", "refresh_token"]` — the common case —
+  could not connect at all.
+
+### Changed
+
+- Raised the default OAuth access token lifetime from one hour to 24 hours
+  (`CODING_TOOLS_MCP_OAUTH_TOKEN_TTL`, still capped at 604800). The server
+  does not issue refresh tokens, so a one-hour default forced re-authorization
+  every hour.
+- Advertised grant and response types now derive from single constants shared
+  by authorization-server metadata and the registration endpoint.
+
 ## 0.2.1 - 2026-07-26
 
 ### Changed
