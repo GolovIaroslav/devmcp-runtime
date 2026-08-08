@@ -99,6 +99,8 @@ TASK_REGISTRY = [
     _task("bun.test", "bun", "Run bun tests.", "bun", ["test"]),
     _task("bun.build", "bun", "Run bun build.", "bun", ["run", "build"]),
     _task("bun.install", "bun", "Install bun dependencies with an approved network grant.", "bun", ["install"], network=True, approval="ASK"),
+    _task("vitest.run", "javascript", "Run Vitest tests.", "vitest", ["run"]),
+    _task("jest.run", "javascript", "Run Jest tests.", "jest"),
     _task("pytest.all", "python", "Run all pytest tests.", "pytest"),
     _task("pytest.file", "python", "Run pytest on a file.", "pytest", arguments={"path": {"type": "path", "required": True}}),
     _task("unittest.all", "python", "Run all unittests.", "python3", ["-m", "unittest", "discover"]),
@@ -151,6 +153,30 @@ class TaskRegistry:
 
     def get_task(self, task_id: str) -> TaskTemplate | None:
         return self.tasks.get(task_id)
+
+    def match_direct_argv(self, argv: list[str]) -> TaskTemplate | None:
+        """Match only commands with a registered, fixed argv shape.
+
+        This is deliberately narrower than shell-command pattern matching. A
+        direct ``exec_command`` call is auto-allowed only when its argv is the
+        exact argv of a non-network registered task, or a registered pytest
+        file task with one validated workspace-relative path argument.
+        """
+        if not argv:
+            return None
+        for task in self.tasks.values():
+            fixed = [task.executable, *task.argv]
+            if argv == fixed:
+                return task
+            if task.id == "pytest.file" and len(argv) == 2 and argv[0] == task.executable:
+                path = argv[1]
+                if path and not path.startswith("-"):
+                    from pathlib import PurePosixPath
+
+                    pure = PurePosixPath(path)
+                    if not pure.is_absolute() and ".." not in pure.parts:
+                        return task
+        return None
 
     def list_tasks(self, category: str | None = None, query: str | None = None) -> list[dict[str, Any]]:
         results = []

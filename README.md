@@ -16,8 +16,8 @@ We heavily dogfood the runtime with our internal development.
 
 ## Features
 
-- **Strict Sandbox Execution**: All commands and destructive patches are executed inside an ephemeral sandbox directory. 
-- **Approval Engine**: Destructive or unknown commands prompt a side-channel approval challenge (`devmcp approve <id>`).
+- **Strict Sandbox Execution**: Registered tests and commands run in an ephemeral sandbox with default network isolation.
+- **Approval Engine**: Risky operations return an out-of-band approval record (`devmcp approve <id>`); ordinary safe patches and registered tasks run automatically.
 - **Antigravity SDK Support**: Subagent delegation is wired directly through the runtime using Google's Antigravity framework.
 - **Task Registry**: Pre-bundled task templates for common project lifecycles (tests, linters, builds).
 - **Core Constraints**: 
@@ -28,9 +28,9 @@ We heavily dogfood the runtime with our internal development.
 
 ## Architecture
 
-1. **Authoritative Workspace**: The real user directory on disk. Safe reads, limited atomic appends.
+1. **Authoritative Workspace**: The explicitly selected user directory on disk. Safe reads, previews, and small atomic Add/Update patches are allowed.
 2. **Execution Sandbox**: An ephemeral copy generated on session start where `exec_command` runs. 
-3. **Approval API**: Blocks MCP execution until `devmcp approve <id>` is executed by the human on the terminal.
+3. **Approval API**: Only risky operations pause for `devmcp approve <id>`; the model retries the exact operation after local approval.
 
 ## Installation
 
@@ -41,6 +41,10 @@ uv sync
 ./scripts/install_systemd.sh
 ```
 
+The installer creates user services only. Use `devmcp status`, `devmcp start`,
+`devmcp stop`, `devmcp restart`, and `devmcp logs` for local supervision; it
+does not expose these security-management commands to the model.
+
 ## Tools
 
 The agent gets access to a curated strict toolset to read files, examine git, list directory info, and invoke sandbox/antigravity commands.
@@ -49,4 +53,3 @@ The agent gets access to a curated strict toolset to read files, examine git, li
 - `exec_command` (Sandboxed)
 - `apply_patch` (Strict additions/updates only)
 - `list_tasks`, `run_task`
-- `antigravity_start`

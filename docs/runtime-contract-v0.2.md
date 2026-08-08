@@ -110,7 +110,7 @@ Tool failures keep the same envelope with `isError: true`, a readable error in
 Known tool error codes include:
 
 ```json
-["ABSOLUTE_PATH_DENIED", "ACCESS_DENIED", "BINARY_FILE", "ELICITATION_UNSUPPORTED", "GIT_ERROR", "INTERNAL_ERROR", "INVALID_ARGUMENT", "INVALID_STATE", "IS_DIRECTORY", "NOT_A_DIRECTORY", "NOT_FOUND", "NOT_IMPLEMENTED", "OUTPUT_TOO_LARGE", "PATCH_CONFLICT", "PATCH_CONTEXT_AMBIGUOUS", "PATCH_CONTEXT_NOT_FOUND", "PATCH_FAILED", "PATCH_HUNKS_OVERLAP", "PATCH_ROLLBACK_FAILED", "PATH_OUTSIDE_WORKSPACE", "PERMISSION_REQUIRED", "RUNTIME_DIR_UNWRITABLE", "SANDBOX_FAILED", "SANDBOX_UNAVAILABLE", "SESSION_CLOSED", "SESSION_LIMIT_REACHED", "SESSION_NOT_FOUND", "SYMLINK_ESCAPE", "TTY_UNSUPPORTED", "UNSUPPORTED_ENCODING"]
+["ABSOLUTE_PATH_DENIED", "ACCESS_DENIED", "BINARY_FILE", "GIT_ERROR", "INTERNAL_ERROR", "INVALID_ARGUMENT", "INVALID_STATE", "IS_DIRECTORY", "NOT_A_DIRECTORY", "NOT_FOUND", "NOT_IMPLEMENTED", "OUTPUT_TOO_LARGE", "PATCH_CONFLICT", "PATCH_CONTEXT_AMBIGUOUS", "PATCH_CONTEXT_NOT_FOUND", "PATCH_FAILED", "PATCH_HUNKS_OVERLAP", "PATCH_ROLLBACK_FAILED", "PATH_OUTSIDE_WORKSPACE", "PERMISSION_REQUIRED", "RUNTIME_DIR_UNWRITABLE", "SANDBOX_FAILED", "SANDBOX_UNAVAILABLE", "SESSION_CLOSED", "SESSION_LIMIT_REACHED", "SESSION_NOT_FOUND", "SYMLINK_ESCAPE", "TTY_UNSUPPORTED", "UNSUPPORTED_ENCODING"]
 ```
 
 Error categories are `validation`, `security`, `permission`, `runtime`,
@@ -182,7 +182,8 @@ Inputs: none.
 Annotations: `{"title":"Server info","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}`.
 
 Returns server version, protocol, workspace, cwd, fixed tool count, auth state,
-permission mode, runtime directories, project-context metadata, and exec policy.
+permission mode, runtime directories, project-context metadata, exec policy,
+and the auto-allow/approval/deny permission policy.
 
 ### check_exec_environment
 
@@ -251,13 +252,14 @@ cap is known to be exceeded. `context_lines=0` does not reread matching files.
 
 Inputs: `"patch"`, `"dry_run"`, `"approval_id"`.
 
-Annotations: `{"title":"Apply patch","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":false}`.
+Annotations: `{"title":"Apply patch","readOnlyHint":false,"destructiveHint":false,"idempotentHint":false,"openWorldHint":false}`.
 
 Supports `*** Add File` and `*** Update File` inside a
 `*** Begin Patch` / `*** End Patch` envelope. Delete and move operations are
 unconditionally denied. Preview returns a unified diff, line counts, removal
-percentage, and risk classification; large destructive updates require a
-single-use approval.
+percentage, and risk classification. Small updates execute immediately; an
+update above either configured destructive threshold requires a single-use
+local out-of-band approval.
 
 ### exec_command
 
@@ -278,11 +280,13 @@ gates only.
 
 Inputs: `"task_id"`, `"args"`, `"path"`, `"cwd"`, `"env"`, `"timeout_ms"`, `"yield_time_ms"`, `"max_output_bytes"`, `"approval_id"`.
 
-Annotations: `{"title":"Run task","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":false}`.
+Annotations: `{"title":"Run task","readOnlyHint":false,"destructiveHint":false,"idempotentHint":false,"openWorldHint":false}`.
 
-Tasks use validated templates and an argv-only subprocess path. Network and
-other approval-class capabilities are granted per operation and are never
-inherited from an unrelated command.
+Tasks use validated registry metadata and an argv-only subprocess path. Known
+non-network tasks such as pytest, unittest, Vitest, Jest, lint, typecheck, and
+build/check workflows execute automatically in the sandbox. Network and other
+approval-class capabilities are granted per operation and are never inherited
+from an unrelated command.
 
 ### write_stdin
 
@@ -335,16 +339,6 @@ Annotations: `{"title":"Git show","readOnlyHint":true,"destructiveHint":false,"i
 Inputs: `"path"`, `"rev"`, `"start_line"`, `"end_line"`, `"max_lines"`.
 
 Annotations: `{"title":"Git blame","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}`.
-
-### request_permissions
-
-Inputs: `"tool_name"`, `"tools"`, `"arguments"`, `"reason"`, `"permission"`, `"scope"`, `"ttl_seconds"`.
-
-Annotations: `{"title":"Request permissions","readOnlyHint":true,"destructiveHint":false,"idempotentHint":false,"openWorldHint":false}`.
-
-The current server does not advertise MCP elicitation. This tool therefore
-returns `ELICITATION_UNSUPPORTED`, except that dangerous mode reports the
-operator's explicit auto-grant policy. It never silently escalates safe mode.
 
 ### view_image
 

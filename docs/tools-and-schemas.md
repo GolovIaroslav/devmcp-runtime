@@ -6,7 +6,7 @@ properties, annotations, and error codes with the contract.
 
 ## Fixed inventory
 
-The default catalog contains exactly 33 tools:
+The default catalog contains exactly 32 tools:
 
 - `server_info`: Server info.
 - `health`: Health check.
@@ -40,10 +40,8 @@ The default catalog contains exactly 33 tools:
 - `check_exec_environment`: Check exec environment.
 - `get_default_cwd`: Get default cwd.
 - `set_default_cwd`: Set default cwd.
-- `request_permissions`: Request permissions.
-
 `view_image` may be disabled when an installation cannot accept binary image
-content. That capability gate is not a tool profile. The other 19 tools are
+content. That capability gate is not a tool profile. The other 31 tools are
 always advertised, and `listChanged` is `false`.
 
 ## Result envelope
@@ -70,7 +68,11 @@ count, dimensions, resize metadata, and warnings, but no base64 or data URL.
 
 ## Patch behavior
 
-`apply_patch` accepts the standard envelope:
+`apply_patch` accepts the standard envelope. Preview and small Add/Update
+patches are automatic; Delete and Move are always denied. An Update is routed
+to local out-of-band approval only when it removes more than 200 existing lines
+or more than 30% of an existing file. Unique context, baseline/hash protection,
+atomic writes, rollback, and symlink defenses apply to every patch.
 
 ```text
 *** Begin Patch
@@ -89,7 +91,7 @@ count, dimensions, resize metadata, and warnings, but no base64 or data URL.
 All operations are parsed and matched before writes. Context must be unique.
 Files are prepared in their destination directories, fsynced, baseline-checked,
 and installed with atomic replacement. Multi-file failure restores prior files.
-Mode bits, BOM, and newline style are preserved; moves inherit source mode.
+Mode bits, BOM, and newline style are preserved.
 
 ## Command and output behavior
 
@@ -110,8 +112,10 @@ than labeling pipes as a TTY.
 
 ## Permission modes
 
-- `safe`: blocks network-looking commands, shell expansion, inline scripts,
-  destructive commands, outside-workspace arguments, and secret/loader env.
+- `safe`: allows registered non-network tasks and safe local coding operations;
+  unknown commands, network, shell expansion, inline scripts, destructive
+  commands, outside-workspace arguments, and secret/loader env require local
+  approval or are denied according to the policy.
 - `trusted`: enables normal local-development network, expansion, and inline
   snippets while retaining secret and destructive-command checks.
 - `dangerous`: disables command permission gates and Landlock; use only inside

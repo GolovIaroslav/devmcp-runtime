@@ -44,7 +44,8 @@ Secret redaction is defense in depth and must not be treated as the primary prot
 
 ## Permission Model
 
-Risky capabilities return structured permission-required or unsupported responses; the server never silently grants:
+Risky capabilities return structured out-of-band approval records; the server
+never silently grants:
 
 - `network`
 - `destructive_command`
@@ -55,11 +56,21 @@ Risky capabilities return structured permission-required or unsupported response
 - `privileged_executable`
 - `write_generated_or_ignored`
 
-`request_permissions` currently returns `ELICITATION_UNSUPPORTED` unless a future MCP client elicitation flow is implemented and tested.
+The model-facing catalog does not expose MCP elicitation. Operators approve
+locally with `devmcp approve <approval_id>`, and the model must retry the exact
+operation with that single-use ID. Safe registered tasks and small patches do
+not enter this workflow.
 
 Operators should choose one of three permission modes:
 
-- `safe`: default mode. Workspace writes are allowed, system toolchain roots are read-only, `HOME`, `TMPDIR`, and `cache_dir` point under an external server-owned runtime directory, network-looking commands are denied, shell expansion and inline scripts are denied, secrets and loader/startup env are filtered, and Landlock is enabled when available.
+- `safe`: default mode. Read-only inspection, preview, small Add/Update patches,
+  and registered non-network tasks are automatic. Unknown/network operations
+  return out-of-band approval records; Delete/Move patches, outside paths,
+  secrets, privileged commands, sandbox escape, and Docker/Podman socket access
+  are denied. `HOME`, `TMPDIR`, and `cache_dir` point under an external
+  server-owned runtime directory, secrets and loader/startup env are filtered,
+  and Landlock is enabled when available. Large updates require approval when
+  they remove more than 200 existing lines or more than 30% of an existing file.
 - `trusted`: local development mode. It allows network-looking commands, shell expansion, and inline scripts while still filtering secrets and blocking destructive commands and host-root writes. Runtime writes are scoped to the exact external runtime directory, not global `/tmp`.
 - `dangerous`: disables `exec_command` permission gates and Landlock. Use only inside an isolated container or VM. Workspace path boundaries for direct file and patch tools still apply.
 

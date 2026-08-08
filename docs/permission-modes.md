@@ -4,15 +4,28 @@
 
 ## safe
 
-Default mode. Commands run with:
+Default mode. Commands run with the coding-agent policy:
 
 - workspace read/write
 - system toolchain and DNS resolver paths read-only
 - `HOME`, `TMPDIR`, and `cache_dir` under an external server-owned runtime directory
-- network-looking commands blocked
-- shell expansion and inline interpreter snippets blocked
+- registered non-network tasks (for example pytest, unittest, Vitest, Jest,
+  lint, typecheck, and build/check workflows) auto-allowed
+- network-looking commands, unknown commands, shell expansion, and inline
+  interpreter snippets return an out-of-band `approval_required` record
 - secret-looking and loader/startup env filtered
 - Landlock enabled when available
+
+The same policy auto-allows read-only workspace and Git inspection, patch
+preview, and small safe Add/Update patches. Delete/Move patches, paths outside
+the authoritative workspace, secrets, sandbox escape, privileged commands, and
+Docker/Podman socket exposure are always denied. Large updates (more than 200
+removed existing lines or more than 30% of an existing file) require local
+ApprovalEngine approval.
+
+Approval is not MCP elicitation. The server returns an approval ID and the
+operator runs `devmcp approve <id>` locally; the model retries the exact
+operation with that ID.
 
 Start explicitly:
 

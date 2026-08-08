@@ -304,27 +304,17 @@ class SecurityComplianceTests(ComplianceTestCase):
         self.assertEqual(payload.get("matches"), [])
         self.assertEqual(payload.get("total_matches"), 0)
 
-    def test_request_permissions_does_not_silently_grant_dangerous_operations(self) -> None:
+    def test_risky_operations_return_local_approval_records(self) -> None:
         result = self.client.call_tool(
-            "request_permissions",
-            {
-                "tool_name": "exec_command",
-                "permission": "network",
-                "reason": "verify compliance denial shape",
-                "arguments": {"cmd": "curl https://example.com"},
-            },
+            "exec_command",
+            {"cmd": "curl https://example.com", "network_required": True},
         )
-        self.assertTrue(result.get("isError"), f"permission request must not silently grant access: {result!r}")
-        payload = self.assert_denied_or_permission_required(
-            "request_permissions",
-            {
-                "tool_name": "exec_command",
-                "permission": "destructive_command",
-                "reason": "verify compliance denial shape",
-                "arguments": {"cmd": "git reset --hard"},
-            },
-        )
-        self.assertFalse(payload.get("ok", True))
+        payload = self.assert_tool_error("exec_command", {"cmd": "git reset --hard"})
+        self.assertEqual(payload.get("status"), "approval_required")
+        self.assertIsInstance(payload.get("approval_id"), str)
+        self.assertIn("operation_summary", payload)
+        self.assertIn("capabilities", payload)
+        self.assertNotEqual(result.get("status"), "unsupported")
 
     def test_stdout_json_rpc_pollution_is_absent(self) -> None:
         stdout = self.client.stdout_snapshot()

@@ -323,6 +323,36 @@ class RuntimePolicy:
     fake_readonly_annotations: bool = False
 
 
+AUTO_ALLOW_POLICY = {
+    "read_only": [
+        "workspace inspection and search",
+        "git read-only inspection",
+        "preview_patch",
+        "safe local process inspection",
+    ],
+    "safe_mutations": [
+        "apply_patch below the destructive thresholds",
+        "registered non-network tests, lint, typecheck, and build/check tasks",
+    ],
+    "approval_required": [
+        "network capability",
+        "dependency installation or update",
+        "database migration",
+        "unknown or unregistered exec_command operations",
+        "unregistered shell expansion or inline scripts",
+        "destructive patches over configured thresholds",
+        "sensitive environment injection",
+        "privileged or unusual executables",
+    ],
+    "deny": [
+        "patch deletes and moves",
+        "paths outside the authoritative workspace",
+        "sudo, su, doas, mount, umount, docker, and podman operations",
+        "sandbox escape and policy/configuration modification",
+    ],
+}
+
+
 OAUTH_TOKEN_AUTH_METHODS = ("client_secret_basic", "client_secret_post", "none")
 
 
@@ -562,7 +592,10 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     "search_text": ToolSpec(title="Search text", description="Search text.", read_only=True, idempotent=True),
     "view_image": ToolSpec(title="View image", description="View image.", read_only=True, idempotent=True, content_builder=_image_content),
     "preview_patch": ToolSpec(title="Preview patch", description="Preview patch.", read_only=True, idempotent=True),
-    "apply_patch": ToolSpec(title="Apply patch", description="Apply patch.", destructive=True),
+    "apply_patch": ToolSpec(
+        title="Apply patch",
+        description="Apply a previewed Add/Update patch. Small non-destructive updates run automatically; deletes, moves, and high-risk updates are blocked or require local approval.",
+    ),
     "git_status": ToolSpec(title="Git status", description="Git status.", read_only=True, idempotent=True),
     "git_diff": ToolSpec(title="Git diff", description="Git diff.", read_only=True, idempotent=True),
     "git_log": ToolSpec(title="Git log", description="Git log.", read_only=True, idempotent=True),
@@ -570,7 +603,10 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     "git_blame": ToolSpec(title="Git blame", description="Git blame.", read_only=True, idempotent=True),
     "list_tasks": ToolSpec(title="List tasks", description="List tasks.", read_only=True, idempotent=True),
     "describe_task": ToolSpec(title="Describe task", description="Describe task.", read_only=True, idempotent=True),
-    "run_task": ToolSpec(title="Run task", description="Run task.", destructive=True),
+    "run_task": ToolSpec(
+        title="Run task",
+        description="Run a registered local test, lint, typecheck, build, or check task in the isolated sandbox. Safe non-network tasks run automatically.",
+    ),
     "exec_command": ToolSpec(title="Exec command", description="Exec command.", destructive=True, open_world=True, error_status="failed"),
     "job_status": ToolSpec(title="Job status", description="Job status.", read_only=True, idempotent=True),
     "read_output": ToolSpec(title="Read output", description="Read output.", read_only=True, idempotent=True),
@@ -584,7 +620,6 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     "check_exec_environment": ToolSpec(title="Check exec environment", description="Check exec environment.", read_only=True, idempotent=True),
     "get_default_cwd": ToolSpec(title="Get default cwd", description="Get default cwd.", read_only=True, idempotent=True),
     "set_default_cwd": ToolSpec(title="Set default cwd", description="Set default cwd.", idempotent=True),
-    "request_permissions": ToolSpec(title="Request permissions", description="Request permissions.", read_only=True, idempotent=False),
 }
 
 LANDLOCK_CREATE_RULESET_VERSION = 1
@@ -1375,6 +1410,7 @@ class Runtime:
                 "global_tmp_write": self.global_tmp_write_policy(),
                 "secret_env_filter": self.secret_env_filter_policy(),
             },
+            "permission_policy": AUTO_ALLOW_POLICY,
             "shell_env_inherit": self.shell_env_policy.inherit,
             "shell_env_include_only": list(self.shell_env_policy.include_only),
             "shell_env_exclude": list(self.shell_env_policy.exclude),
@@ -1439,8 +1475,6 @@ class Runtime:
                     "status": "required",
                     "retryable": True,
                 }
-            if exc.code == "ELICITATION_UNSUPPORTED":
-                payload["status"] = "unsupported"
             self.emit_tool_trace(name, args, payload, started_at)
             return make_tool_result(name, payload, is_error=True)
         except Exception as exc:  # noqa: BLE001 - tool failures must stay structured
@@ -2067,6 +2101,8 @@ class Runtime:
                 orig_lines = 0
                 add_lines = len(new_content.splitlines())
                 rem_lines = 0
+                removed_existing_lines = 0
+                pct_rem = 0.0
                 file_risk = "ALLOW"
 
                 diff_lines = list(difflib.unified_diff(
@@ -2104,10 +2140,15 @@ class Runtime:
                 orig_lines = len(orig_text.splitlines())
                 add_lines = sum(1 for line in diff_lines if line.startswith("+") and not line.startswith("+++"))
                 rem_lines = sum(1 for line in diff_lines if line.startswith("-") and not line.startswith("---"))
-                pct_rem = round((rem_lines / orig_lines) * 100, 2) if orig_lines > 0 else 0.0
+                # A replacement removes lines from the unified diff but is not
+                # destructive when the file keeps the same line count. Risk is
+                # based on net existing lines removed, so a one-line surgical
+                # fix in a two-line file remains an automatic operation.
+                removed_existing_lines = max(0, orig_lines - len(new_list))
+                pct_rem = round((removed_existing_lines / orig_lines) * 100, 2) if orig_lines > 0 else 0.0
 
                 file_risk = "ALLOW"
-                if rem_lines > 200 or pct_rem > 30.0:
+                if removed_existing_lines > 200 or pct_rem > 30.0:
                     file_risk = "ASK"
 
                 staged[source.display] = StagedFile(source.display, source.path, updated_text, baseline, baseline.mode)
@@ -2122,8 +2163,9 @@ class Runtime:
                 "operation": op.kind,
                 "additions": add_lines,
                 "removals": rem_lines,
+                "removed_existing_lines": removed_existing_lines if op.kind == "update" else rem_lines,
                 "original_line_count": orig_lines,
-                "percentage_removed": round((rem_lines / orig_lines) * 100, 2) if orig_lines > 0 else 0.0,
+                "percentage_removed": pct_rem,
                 "risk": file_risk,
                 "risk_class": "high" if file_risk == "ASK" else "normal",
             })
@@ -2132,7 +2174,12 @@ class Runtime:
 
         if not file_metrics:
             raise ToolFailure("PATCH_FAILED", "No files were modified.", category="validation")
-        total_pct_rem = round((total_removals / total_orig_lines) * 100, 2) if total_orig_lines > 0 else 0.0
+        total_removed_existing_lines = sum(int(item.get("removed_existing_lines", 0)) for item in file_metrics)
+        total_pct_rem = (
+            round((total_removed_existing_lines / total_orig_lines) * 100, 2)
+            if total_orig_lines > 0
+            else 0.0
+        )
 
         return {
             "staged": list(staged.values()),
@@ -2142,6 +2189,7 @@ class Runtime:
             "files": file_metrics,
             "additions": total_additions,
             "removals": total_removals,
+            "removed_existing_lines": total_removed_existing_lines,
             "original_line_count": total_orig_lines,
             "percentage_removed": total_pct_rem,
             "risk": overall_risk,
@@ -2196,6 +2244,7 @@ class Runtime:
             "removals": analysis["removals"],
             "original_line_count": analysis["original_line_count"],
             "percentage_removed": analysis["percentage_removed"],
+            "removed_existing_lines": analysis["removed_existing_lines"],
             "risk": analysis["risk"],
             "risk_class": analysis["risk_class"],
             "warnings": [],
@@ -2267,7 +2316,18 @@ class Runtime:
         network_required = bool(args.get("network_required", False))
         operation_cwd = str(workdir.path)
         required_caps = self._required_command_capabilities(cmd, args)
+        if self._contains_always_denied_command(cmd):
+            raise ToolFailure(
+                "ACCESS_DENIED",
+                "The requested executable is unconditionally denied by the runtime policy.",
+                category="security",
+            )
+        registered_task = self._registered_direct_task(cmd)
+        if registered_task is not None and registered_task.approval_class == "DENY":
+            raise ToolFailure("ACCESS_DENIED", "The registered task is unconditionally denied.", category="security")
         if self.dangerously_skip_all_permissions or self.permission_mode == "trusted":
+            decision = "ALLOW"
+        elif registered_task is not None and not registered_task.network_requirement and registered_task.approval_class == "ALLOW":
             decision = "ALLOW"
         else:
             decision = str(args.get("approval_class") or approval_engine.evaluate_command(cmd))
@@ -2685,6 +2745,25 @@ class Runtime:
                 return
             if exc.code in {"PATH_OUTSIDE_WORKSPACE", "ABSOLUTE_PATH_DENIED", "SYMLINK_ESCAPE"}:
                 raise escape_failure() from exc
+
+    @staticmethod
+    def _contains_always_denied_command(cmd: str) -> bool:
+        normalized = cmd.replace("\\", "/").lower()
+        if any(marker in normalized for marker in ("docker.sock", "podman.sock", "/var/run/docker", "/run/docker")):
+            return True
+        try:
+            tokens = shlex_split(strip_heredoc_payloads(cmd))
+        except ValueError:
+            tokens = cmd.split()
+        denied = {"sudo", "su", "doas", "mount", "umount", "docker", "podman"}
+        return any(PurePosixPath(token.replace("\\", "/")).name in denied for token in tokens)
+
+    def _registered_direct_task(self, cmd: str):
+        try:
+            tokens = shlex_split(strip_heredoc_payloads(cmd))
+        except ValueError:
+            return None
+        return self.task_registry.match_direct_argv(tokens)
 
     def _reject_setuid_executable(self, executable: str) -> None:
         if not executable:
@@ -3459,36 +3538,6 @@ class Runtime:
             }
         return result
 
-    def request_permissions(self, args: dict[str, Any]) -> dict[str, Any]:
-        if self.dangerously_skip_all_permissions:
-            return {
-                "ok": True,
-                "status": "granted",
-                "grant_id": "dangerously-skip-all-permissions",
-                "expires_at": None,
-                "constraints": {
-                    "mode": "dangerously_skip_all_permissions",
-                    "workspace": str(self.workspace.root),
-                    "requested": args,
-                },
-                "warnings": [
-                    "dangerously-skip-all-permissions is enabled; permission-gated operations are auto-granted"
-                ],
-            }
-        return {
-            "ok": False,
-            "status": "unsupported",
-            "grant_id": None,
-            "expires_at": None,
-            "error": {
-                "code": "ELICITATION_UNSUPPORTED",
-                "message": "Permission elicitation is not available for this client.",
-                "category": "permission",
-                "retryable": False,
-                "details": {"requested": args},
-            },
-        }
-
     def view_image(self, args: dict[str, Any]) -> dict[str, Any]:
         resolved = self.resolve_existing(str(args.get("path", "")))
         max_bytes = int(args.get("max_bytes", 5_242_880))
@@ -3570,6 +3619,7 @@ class Runtime:
             "removals": analysis["removals"],
             "original_line_count": analysis["original_line_count"],
             "percentage_removed": analysis["percentage_removed"],
+            "removed_existing_lines": analysis["removed_existing_lines"],
             "risk": analysis["risk"],
             "risk_class": analysis["risk_class"],
             "warnings": [],
@@ -3637,9 +3687,17 @@ class Runtime:
             "timeout_ms": args.get("timeout_ms", 30000),
             "yield_time_ms": args.get("yield_time_ms", 10000),
             "max_output_bytes": args.get("max_output_bytes", 65536),
-            "env": args.get("env", {}),
+            "env": self._task_env(args.get("env", {})),
         }
         return self._execute_task_argv(cmd_argv, exec_args, granted_caps)
+
+    @staticmethod
+    def _task_env(raw_env: Any) -> dict[str, Any]:
+        env = dict(raw_env) if isinstance(raw_env, dict) else {}
+        if "PATH" not in env:
+            runtime_bin = str(Path(sys.executable).parent)
+            env["PATH"] = runtime_bin + os.pathsep + os.environ.get("PATH", os.defpath)
+        return env
         
     def job_status(self, args: dict[str, Any]) -> dict[str, Any]:
         session_id = args.get("session_id", "")
@@ -5043,29 +5101,6 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                 "path": {**string, "minLength": 1},
             },
             ["path"],
-        ),
-        "request_permissions": object_schema(
-            {
-                "tool_name": {**string, "enum": ["exec_command", "apply_patch"]},
-                "permission": {
-                    **string,
-                    "enum": [
-                        "network",
-                        "destructive_command",
-                        "long_timeout",
-                        "sensitive_env",
-                        "shell_expansion",
-                        INLINE_SCRIPT_PERMISSION,
-                        "privileged_executable",
-                        "write_generated_or_ignored",
-                    ],
-                },
-                "reason": {**string, "minLength": 1},
-                "arguments": {"type": "object", "additionalProperties": True},
-                "scope": {**string, "enum": ["once", "session"], "default": "once"},
-                "ttl_seconds": {**integer, "minimum": 1, "maximum": 3600, "default": 300},
-            },
-            ["tool_name", "permission", "reason", "arguments"],
         ),
     }
 def _server_card_auth(runtime: Runtime, *, oauth_base_url: str | None = None) -> dict[str, Any]:

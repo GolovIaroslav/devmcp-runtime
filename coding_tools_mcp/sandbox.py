@@ -264,6 +264,16 @@ class ExecutionSandbox:
     def safe_write_file(self, rel_path: str, content: bytes | str, mode: int | None = None) -> None:
         data = content.encode("utf-8") if isinstance(content, str) else content
         _safe_write_relative(self.sandbox_dir, rel_path, data, mode)
+        # A patch can preserve both the byte length and the timestamp
+        # granularity of a source file (for example ``a - b`` -> ``a + b``).
+        # Remove interpreter bytecode beside updated Python sources so a
+        # registered test cannot execute stale code from the sandbox snapshot.
+        if rel_path.endswith(".py"):
+            cache_dir = self.sandbox_dir.joinpath(*PurePosixPath(rel_path).parts[:-1], "__pycache__")
+            if cache_dir.is_symlink():
+                cache_dir.unlink()
+            elif cache_dir.is_dir():
+                shutil.rmtree(cache_dir)
 
     def safe_delete_file(self, rel_path: str) -> None:
         _safe_unlink_relative(self.sandbox_dir, rel_path)

@@ -713,16 +713,6 @@ class RuntimeHelperTests(unittest.TestCase):
 
             dangerous_runtime = Runtime(workspace, permission_mode="dangerous")
             dangerous_runtime._check_command_policy("curl https://example.com", {})
-            grant = dangerous_runtime.request_permissions(
-                {
-                    "tool_name": "exec_command",
-                    "permission": "network",
-                    "reason": "test dangerous mode",
-                    "arguments": {"cmd": "curl https://example.com"},
-                }
-            )
-            self.assertTrue(grant.get("ok"))
-            self.assertEqual(grant.get("status"), "granted")
 
             filtered_env = default_runtime._command_env({"OPENAI_API_KEY": "sk-test-secret-value"})
             dangerous_env = dangerous_runtime._command_env({"OPENAI_API_KEY": "sk-test-secret-value"})
@@ -849,7 +839,7 @@ Maven home: /usr/share/maven
             self.assertIn("read_file", names)
             self.assertNotIn("edit_file", names)
             apply_patch_tool = next(tool for tool in first if tool["name"] == "apply_patch")
-            self.assertIs(apply_patch_tool["annotations"].get("destructiveHint"), True)
+            self.assertIs(apply_patch_tool["annotations"].get("destructiveHint"), False)
             self.assertIs(apply_patch_tool["annotations"].get("readOnlyHint"), False)
 
     def test_agent_text_matches_per_tool_limits_without_renderer_truncation(self) -> None:

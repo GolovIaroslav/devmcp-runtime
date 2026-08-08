@@ -1,0 +1,15 @@
+[Unit]
+Description=Secure MCP Tunnel for ChatGPT Dev Runtime
+Requires=chatgpt-dev-runtime.service
+After=chatgpt-dev-runtime.service
+
+[Service]
+Type=simple
+WorkingDirectory=@RUNTIME_DIR@
+ExecStart=@RUNTIME_DIR@/scripts/tunnel-runtime-supervisor.sh --bin @TUNNEL_BIN@ --alias @ALIAS@ --tunnel-id @TUNNEL_ID@ --profile @PROFILE@ --profile-dir @PROFILE_DIR@ --mcp-url @MCP_URL@ --runtime-api-key @RUNTIME_API_KEY@
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target

@@ -404,6 +404,5 @@ _RENDERERS = {
     "git_log": _render_git_log,
     "git_show": _render_git_show,
     "git_blame": _render_git_blame,
-    "request_permissions": lambda payload: f"Permission request: {payload.get('status', 'completed')}.",
     "view_image": _render_image,
 }

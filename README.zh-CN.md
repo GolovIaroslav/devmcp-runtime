@@ -124,7 +124,7 @@ coding-tools-mcp-desktop
 | 分组 | 工具 |
 | --- | --- |
 | 文件与搜索 | `read_file` · `list_dir` · `list_files` · `search_text` · `apply_patch` · `view_image` |
-| 执行 | `exec_command` · `write_stdin` · `read_output` · `kill_session` · `request_permissions` |
+| 执行 | `exec_command` · `write_stdin` · `read_output` · `kill_session` · `job_status` · `job_output` · `job_input` · `job_cancel` |
 | Git | `git_status` · `git_diff` · `git_log` · `git_show` · `git_blame` |
 | 运行时 | `server_info` · `check_exec_environment` · `get_default_cwd` · `set_default_cwd` |
 
