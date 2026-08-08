@@ -26,6 +26,11 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+# Commands sent through MCP must be resolvable inside the configured
+# workspace sandbox. An absolute host interpreter path would correctly be
+# rejected as a filesystem escape when the fixture lives under /tmp or CI.
+PYTHON_COMMAND = shlex.quote(Path(sys.executable).name)
+
 from benchmarks.mcp_http import McpHttpClient, McpHttpError, connect_with_retry  # noqa: E402 - repo path is bootstrapped above
 from benchmarks.runtime_latency import percentile  # noqa: E402 - repo path is bootstrapped above
 
@@ -299,7 +304,7 @@ class DogfoodRunner:
         test = self.call(
             "exec_command",
             self.adapter.exec_args(
-                f"{shlex.quote(sys.executable)} -m unittest discover -s tests",
+                f"{PYTHON_COMMAND} -m unittest discover -s tests",
                 cwd="tiny-python-project",
                 timeout_seconds=20,
             ),
@@ -314,7 +319,7 @@ class DogfoodRunner:
         started = self.call(
             "exec_command",
             self.adapter.exec_args(
-                f"{shlex.quote(sys.executable)} repl.py",
+                f"{PYTHON_COMMAND} repl.py",
                 cwd="long-running-project",
                 timeout_seconds=30,
                 tty=True,

@@ -95,7 +95,13 @@ def _portable_write_relative(root: Path, parts: tuple[str, ...], data: bytes, mo
         # symlink. The parent was walked component-by-component above.
         os.replace(temp_name, target)
         if mode is not None:
-            os.chmod(target, stat.S_IMODE(mode), follow_symlinks=False)
+            try:
+                os.chmod(target, stat.S_IMODE(mode), follow_symlinks=False)
+            except NotImplementedError:
+                # Windows does not expose follow_symlinks for chmod. The
+                # target was just installed with os.replace, so it is a
+                # regular file rather than an attacker-controlled link.
+                os.chmod(target, stat.S_IMODE(mode))
     finally:
         try:
             os.unlink(temp_name)
