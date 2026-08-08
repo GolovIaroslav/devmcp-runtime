@@ -2,7 +2,7 @@ name: compliance
 
 on:
   push:
-    branches: [main, "recover-*", "audit-fix-v4"]
+    branches: [main, "recover-*", "audit-fix-v4", "release-blockers-*"]
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -13,8 +13,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
-      - name: Check out repository
+      - name: Check out repository with reachable history
         uses: actions/checkout@v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Scan current tree and all reachable Git history with Gitleaks
+        uses: gitleaks/gitleaks-action@v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_ENABLE_COMMENTS: "false"
 
       - name: Set up Python
         uses: actions/setup-python@v6.2.0
@@ -61,9 +69,6 @@ jobs:
 
       - name: Run dispatch inputs gate
         run: make check-dispatch-inputs
-
-      - name: Run npm launcher gate
-        run: make check-npm-launcher
 
       - name: Run dogfood smoke
         run: make dogfood-smoke
@@ -135,13 +140,13 @@ jobs:
           python -m unittest tests.compliance.test_windows_msvc_smoke
 
   public-beta-linux:
-    name: Public beta gates (Python ${{ matrix.python-version }})
+    name: Public beta full gate (Python ${{ matrix.python-version }})
     strategy:
       fail-fast: false
       matrix:
         python-version: ["3.11", "3.12", "3.13"]
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6.0.2
       - uses: actions/setup-python@v6.2.0
@@ -155,8 +160,19 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e ".[dev,gui]"
           python -m playwright install --with-deps chromium
-      - name: Run release-prep tests
+      - name: Run complete public-beta gate
         run: |
+          make lint
+          make typecheck
+          make test
+          make test-protocol
+          make test-integration
+          make test-docs-required
+          make test-schema-drift
+          make dogfood-smoke
+          make benchmark-latency
+          make benchmark-smoke
+          make compliance
           make test-release-prep
           python -m unittest tests.compliance.test_docs_required
           python -m pytest -q tests/gui
@@ -168,5 +184,4 @@ jobs:
           python -m venv "$clean_env/venv"
           "$clean_env/venv/bin/python" -m pip install dist/*.whl
           "$clean_env/venv/bin/devmcp" --help
-      - name: Secret and history audit
-        run: scripts/secret_audit.sh
+          "$clean_env/venv/bin/devmcp-runtime" --help

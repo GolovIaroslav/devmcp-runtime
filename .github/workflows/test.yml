@@ -2,7 +2,7 @@ name: Compliance & Unit Tests
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [ main, master, "release-blockers-*" ]
   pull_request:
     branches: [ main, master ]
 

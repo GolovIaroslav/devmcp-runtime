@@ -3,12 +3,12 @@ main = "src/index.mjs"
 compatibility_date = "2026-07-06"
 
 [vars]
-GITHUB_OWNER = "xyTom"
-GITHUB_REPO = "coding-tools-mcp"
+GITHUB_OWNER = "GolovIaroslav"
+GITHUB_REPO = "test"
 GITHUB_REF = "main"
 WORKFLOW_ID = "start-sandbox.yml"
 
-DEFAULT_IMAGE = "ghcr.io/xytom/coding-tools-mcp-sandbox:latest"
+DEFAULT_IMAGE = "ghcr.io/goloviaroslav/devmcp-runtime-sandbox:latest"
 DEFAULT_PORT = "8765"
 DEFAULT_DURATION_MINUTES = "120"
 DEFAULT_PERMISSION_MODE = "trusted"

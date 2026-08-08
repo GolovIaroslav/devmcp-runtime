@@ -15,6 +15,10 @@
 - The public package is now `devmcp-runtime` while the `coding_tools_mcp`
   Python import and `coding-tools-mcp` launcher remain compatibility aliases.
 - Telemetry is opt-in and disabled by default.
+- Version tags now build, validate, scan, and retain release artifacts only.
+  They do not publish to PyPI or npm and do not create GitHub Releases; a
+  future `devmcp-runtime` trusted-publisher rollout requires an explicit
+  maintainer change.
 
 ## 0.2.2 - 2026-07-28
 

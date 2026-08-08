@@ -39,12 +39,22 @@ flowchart TD
 Prerequisites: Python 3.11+, Git, and bubblewrap (`bwrap`). A supported
 `tunnel-client` is optional for local-only use.
 
+Before the first PyPI publication, install directly from the current source
+repository:
+
 ```bash
-uv tool install devmcp-runtime
+uv tool install git+https://github.com/GolovIaroslav/test.git
 devmcp setup --workspace /absolute/path/to/project --no-tunnel
 devmcp doctor
 devmcp status
 devmcp ui
+```
+
+After `devmcp-runtime` is deliberately published to PyPI with trusted
+publishing configured, the release-path command will be:
+
+```bash
+uv tool install devmcp-runtime
 ```
 
 The UI is available at `http://127.0.0.1:47158`. The local MCP server uses
@@ -73,7 +83,7 @@ installed Secure MCP Tunnel client.
 | --- | --- |
 | Safe | read-only inspection and safe registered checks; delete/move require approval |
 | Balanced | default public profile; small coding loops auto-run, risky work asks |
-| Power | more local sandbox capabilities auto-run; host-security floor remains |
+| Power | more local sandbox capabilities auto-run; host-boundary protections remain |
 | Custom | every capability is explicitly `AUTO`, `ASK`, or `DENY` |
 
 Change profiles with `devmcp policy profile balanced` or in the UI. The model

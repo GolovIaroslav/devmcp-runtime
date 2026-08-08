@@ -11,6 +11,7 @@ import argparse
 import getpass
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -37,11 +38,8 @@ from coding_tools_mcp.policy import PROFILE_NAMES, effective_rules, validate_rul
 from coding_tools_mcp.protocol import PROTOCOL_VERSION
 
 
-RUNTIME_ROOT = Path(__file__).resolve().parents[2]
 MCP_SERVICE = "devmcp-runtime.service"
 TUNNEL_SERVICE = "devmcp-tunnel.service"
-LEGACY_MCP_SERVICE = "chatgpt-dev-runtime.service"
-LEGACY_TUNNEL_SERVICE = "tunnel-client-chatgpt-dev-runtime.service"
 TUNNEL_BIN = Path(os.environ.get("TUNNEL_CLIENT_BIN", "~/.local/bin/tunnel-client")).expanduser()
 
 
@@ -117,11 +115,20 @@ def _mcp_health(config: dict[str, Any], selected: ConfigPaths) -> bool:
         return False
 
 
-def _tunnel_status(config: dict[str, Any]) -> dict[str, Any]:
+def _tunnel_status(selected: ConfigPaths) -> dict[str, Any]:
+    """Probe the foreground ``tunnel-client run`` daemon, not native runtimes."""
+
     if not TUNNEL_BIN.exists():
         return {}
     result = subprocess.run(
-        [str(TUNNEL_BIN), "runtimes", "status", str(config.get("tunnel_alias", "devmcp-runtime")), "--json"],
+        [
+            str(TUNNEL_BIN),
+            "health",
+            "--url-file",
+            str(selected.tunnel_health_url),
+            "--require-control-plane-poll",
+            "--json",
+        ],
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -143,7 +150,7 @@ def _find_bool(value: Any, keys: set[str]) -> bool:
 
 def _status(_: argparse.Namespace) -> int:
     selected, config = _config()
-    tunnel = _tunnel_status(config)
+    tunnel = _tunnel_status(selected)
     healthy = _find_bool(tunnel, {"healthy", "health_ok"})
     ready = _find_bool(tunnel, {"ready", "readiness"})
     pending = len(ApprovalEngine(selected.approvals_db).list_pending())
@@ -174,8 +181,9 @@ def _service_action(action: str) -> int:
     return 0
 
 
-def _logs(_: argparse.Namespace) -> int:
-    selected, _ = _config()
+def _read_service_logs(selected: ConfigPaths) -> tuple[str, str, int]:
+    """Read a bounded, redacted service log view for the CLI and local UI."""
+
     result = subprocess.run(
         ["journalctl", "--user", "-u", MCP_SERVICE, "-u", TUNNEL_SERVICE, "-n", "200", "--no-pager", "--output", "cat"],
         text=True,
@@ -190,9 +198,15 @@ def _logs(_: argparse.Namespace) -> int:
             secret = ""
         if secret:
             output = output.replace(secret, "[REDACTED]")
+    return output, result.stderr, result.returncode
+
+
+def _logs(_: argparse.Namespace) -> int:
+    selected, _ = _config()
+    output, stderr, returncode = _read_service_logs(selected)
     sys.stdout.write(output)
-    sys.stderr.write(result.stderr)
-    return result.returncode
+    sys.stderr.write(stderr)
+    return returncode
 
 
 def _approvals(args: argparse.Namespace) -> int:
@@ -375,34 +389,65 @@ def _auth_command(args: argparse.Namespace) -> int:
 
 
 def _tunnel_command(args: argparse.Namespace) -> int:
-    _, config = _config()
+    selected, config = _config()
     if args.tunnel_action == "status":
-        status = _tunnel_status(config)
+        status = _tunnel_status(selected)
         print(json.dumps({"alias": config.get("tunnel_alias"), "tunnel_id": config.get("tunnel_id"), "status": status}, indent=2, sort_keys=True))
         return 0 if status else 1
     if not TUNNEL_BIN.exists():
         print("tunnel-client is not installed", file=sys.stderr)
         return 1
+    if args.tunnel_action == "run":
+        tunnel_id = str(config.get("tunnel_id", "")).strip()
+        if not tunnel_id or not secret_status(selected)["control_plane_key_configured"]:
+            print("tunnel id and control-plane key must be configured before starting the tunnel", file=sys.stderr)
+            return 2
+        command = [
+            str(TUNNEL_BIN),
+            "run",
+            "--profile",
+            str(config.get("tunnel_profile", "sample_mcp_with_dcr")),
+            "--control-plane.tunnel-id",
+            tunnel_id,
+            "--control-plane.api-key",
+            f"file:{selected.control_plane_key}",
+            "--mcp.server-url",
+            f"http://{config.get('mcp_host', '127.0.0.1')}:{int(config.get('mcp_port', 47157))}/mcp",
+            "--health.listen-addr",
+            "127.0.0.1:0",
+            "--health.url-file",
+            str(selected.tunnel_health_url),
+        ]
+        return subprocess.run(command).returncode
     command = [str(TUNNEL_BIN), "doctor", "--profile", str(config.get("tunnel_profile", "sample_mcp_with_dcr")), "--explain"]
     result = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     print(result.stdout, end="")
     return result.returncode
 
 
+def _unit_quote(value: str | Path) -> str:
+    """Quote an argument for systemd's ExecStart/Environment parser."""
+
+    return shlex.quote(str(value))
+
+
+def _unit_environment(name: str, value: str | Path) -> str:
+    escaped = str(value).replace("\\", "\\\\").replace('"', '\\"')
+    return f'Environment="{name}={escaped}"'
+
+
 def _service_install(_: argparse.Namespace) -> int:
-    selected, config = _config()
+    selected, _ = _config()
     systemd_dir = Path.home() / ".config/systemd/user"
     systemd_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     python = sys.executable
-    patch_config = config.get("patch", {})
     mcp_unit = f"""[Unit]
 Description=DevMCP Runtime MCP server
 
 [Service]
 Type=simple
-WorkingDirectory={RUNTIME_ROOT}
-Environment=DEVMCP_POLICY_CONFIG_FILE={selected.config_file}
-ExecStart={python} -m coding_tools_mcp --workspace {config['workspace']} --host {config['mcp_host']} --port {config['mcp_port']} --auth-token-file {selected.mcp_token} --policy-profile {config.get('profile', 'balanced')} --sandbox-backend {config.get('sandbox_backend', 'bwrap')} --max-removed-lines {patch_config.get('max_removed_lines', 200)} --max-removed-percent {patch_config.get('max_removed_percent', 30.0)}
+{_unit_environment("DEVMCP_CONFIG_DIR", selected.root)}
+ExecStart={_unit_quote(python)} -m apps.devmcp.cli serve
 Restart=on-failure
 RestartSec=3
 NoNewPrivileges=true
@@ -418,8 +463,8 @@ After={MCP_SERVICE}
 
 [Service]
 Type=simple
-ExecStartPre=/usr/bin/curl --fail --silent --show-error http://{config['mcp_host']}:{config['mcp_port']}/healthz
-ExecStart={TUNNEL_BIN} runtimes connect --alias {config.get('tunnel_alias', 'devmcp-runtime')} --tunnel-id {config.get('tunnel_id', '')} --profile {config.get('tunnel_profile', 'sample_mcp_with_dcr')} --mcp-server-url http://{config['mcp_host']}:{config['mcp_port']}/mcp --runtime-api-key file:{selected.control_plane_key}
+{_unit_environment("DEVMCP_CONFIG_DIR", selected.root)}
+ExecStart={_unit_quote(python)} -m apps.devmcp.cli tunnel run
 Restart=on-failure
 RestartSec=5
 
@@ -438,6 +483,37 @@ WantedBy=default.target
         return result.returncode
     print(f"Installed user services: {MCP_SERVICE}, {TUNNEL_SERVICE}")
     return 0
+
+
+def _serve(_: argparse.Namespace) -> int:
+    """Stable service launcher: resolve every runtime option from config.toml."""
+
+    selected, config = _config()
+    if not secret_status(selected)["mcp_token_configured"]:
+        generate_mcp_token(selected)
+    from coding_tools_mcp.server import main as server_main
+
+    os.environ["DEVMCP_POLICY_CONFIG_FILE"] = str(selected.config_file)
+    return server_main(
+        [
+            "--workspace",
+            str(config["workspace"]),
+            "--host",
+            str(config.get("mcp_host", "127.0.0.1")),
+            "--port",
+            str(int(config.get("mcp_port", 47157))),
+            "--auth-token-file",
+            str(selected.mcp_token),
+            "--policy-profile",
+            str(config.get("profile", "balanced")),
+            "--sandbox-backend",
+            str(config.get("sandbox_backend", "bwrap")),
+            "--max-removed-lines",
+            str(int(config.get("patch", {}).get("max_removed_lines", 200))),
+            "--max-removed-percent",
+            str(float(config.get("patch", {}).get("max_removed_percent", 30.0))),
+        ]
+    )
 
 
 def _service_uninstall(_: argparse.Namespace) -> int:
@@ -477,6 +553,7 @@ def build_parser() -> argparse.ArgumentParser:
     for name in ("start", "stop", "restart", "logs"):
         sub.add_parser(name)
     sub.add_parser("ui", help="start the loopback-only local admin UI")
+    sub.add_parser("serve", help="start MCP from the persistent DevMCP configuration")
 
     config = sub.add_parser("config", help="inspect and edit non-secret configuration")
     config_sub = config.add_subparsers(dest="config_action", required=True)
@@ -516,6 +593,7 @@ def build_parser() -> argparse.ArgumentParser:
     tunnel_sub = tunnel.add_subparsers(dest="tunnel_action", required=True)
     tunnel_sub.add_parser("status")
     tunnel_sub.add_parser("doctor")
+    tunnel_sub.add_parser("run", help="run tunnel-client in the foreground using the configured profile")
 
     service = sub.add_parser("service", help="install or remove Linux systemd user services")
     service_sub = service.add_subparsers(dest="service_action", required=True)
@@ -538,6 +616,8 @@ def main(argv: list[str] | None = None) -> int:
         return _logs(args)
     if args.command == "ui":
         return _ui(args)
+    if args.command == "serve":
+        return _serve(args)
     if args.command == "config":
         return _config_command(args)
     if args.command == "policy":

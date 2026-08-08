@@ -12,7 +12,9 @@ tunnel workflow.
    authenticated runtime connection.
 3. In ChatGPT, create or edit a custom app and add the MCP endpoint and
    authentication configured by the tunnel flow.
-4. Refresh the app's tools after changing the server card, schemas, or policy.
+4. Refresh the app's tools after changing the server card or schemas. A local
+   policy change or service restart alone does not require Refresh; the MCP
+   bearer token is preserved unless you explicitly rotate it.
 5. Confirm that a harmless read-only tool works before enabling write tools.
 
 ChatGPT's current UI and account capabilities determine which connection

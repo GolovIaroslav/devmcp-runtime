@@ -32,7 +32,7 @@ jobs:
         id: image
         run: |
           owner_lc="$(printf '%s' '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
-          echo "tag=ghcr.io/${owner_lc}/coding-tools-mcp-sandbox:latest" >> "$GITHUB_OUTPUT"
+          echo "tag=ghcr.io/${owner_lc}/devmcp-runtime-sandbox:latest" >> "$GITHUB_OUTPUT"
 
       - name: Build and push image
         uses: docker/build-push-action@v6

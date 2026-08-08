@@ -19,7 +19,7 @@ DESKTOP_PACKAGE := apps/desktop-client/mcp_desktop_client
 DESKTOP_TS := $(DESKTOP_PACKAGE)/locales/app_zh_CN.ts
 DESKTOP_QM := $(DESKTOP_PACKAGE)/locales/app_zh_CN.qm
 
-.PHONY: start lint typecheck test ci check-dispatch-inputs check-npm-launcher check-release compliance test-protocol test-integration test-mcp-contract test-tool-golden test-security test-e2e test-runtime-semantics test-docs-required test-schema-drift test-release-prep test-gui secret-audit package-smoke dogfood-mcp dogfood-runner dogfood-smoke benchmark-latency benchmark-smoke benchmark-real-workloads swebench-reference-predictions swebench-preflight swebench-evaluate desktop-i18n-update desktop-i18n-release desktop-i18n-check install-user publish-testpypi publish-pypi publish-all report
+.PHONY: start lint typecheck test ci check-dispatch-inputs check-release compliance test-protocol test-integration test-mcp-contract test-tool-golden test-security test-e2e test-runtime-semantics test-docs-required test-schema-drift test-release-prep test-gui secret-audit package-smoke dogfood-mcp dogfood-runner dogfood-smoke benchmark-latency benchmark-smoke benchmark-real-workloads swebench-reference-predictions swebench-preflight swebench-evaluate desktop-i18n-update desktop-i18n-release desktop-i18n-check report
 
 start:
 	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) -m coding_tools_mcp --workspace "$(MCP_WORKSPACE)" --host "$(MCP_HOST)" --port "$(MCP_PORT)" $(MCP_ARGS)
@@ -31,10 +31,6 @@ lint:
 check-dispatch-inputs:
 	$(PYTHON) scripts/check_dispatch_inputs.py
 
-check-npm-launcher:
-	cd npm/coding-tools-mcp && npm test
-	cd npm/coding-tools-mcp && npm pack --dry-run --json >/dev/null
-
 check-release:
 	$(PYTHON) scripts/check_release_versions.py --tag "$(RELEASE_TAG)"
 
@@ -44,7 +40,7 @@ typecheck:
 test:
 	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) -m unittest discover -s tests -p 'test_*.py'
 
-ci: lint typecheck test check-dispatch-inputs check-npm-launcher test-protocol test-integration test-docs-required test-schema-drift dogfood-smoke benchmark-latency benchmark-smoke
+ci: lint typecheck test check-dispatch-inputs test-protocol test-integration test-docs-required test-schema-drift dogfood-smoke benchmark-latency benchmark-smoke
 
 test-release-prep:
 	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) -m unittest tests.test_release_prep
@@ -63,9 +59,10 @@ package-smoke:
 	uv venv "$$tmp_dir/venv"; \
 	wheel="$$(find "$$tmp_dir" -maxdepth 1 -name 'devmcp_runtime-*.whl' -print -quit)"; \
 	test -n "$$wheel"; \
-	uv pip install --python "$$tmp_dir/venv/bin/python" --no-deps "$$wheel"; \
+	uv pip install --python "$$tmp_dir/venv/bin/python" "$$wheel"; \
 	"$$tmp_dir/venv/bin/devmcp" --version; \
-	"$$tmp_dir/venv/bin/python" -c 'import coding_tools_mcp; assert coding_tools_mcp.__version__ == "0.1.0-beta.1"'
+	"$$tmp_dir/venv/bin/devmcp-runtime" --version; \
+	"$$tmp_dir/venv/bin/python" -c 'from importlib.metadata import version; import coding_tools_mcp; assert coding_tools_mcp.__version__ == version("devmcp-runtime")'
 
 compliance:
 	$(COMPLIANCE_RUNNER) --suite all $(REPORT_FLAG)
@@ -136,18 +133,6 @@ swebench-preflight:
 
 swebench-evaluate:
 	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) benchmarks/swebench/run_smoke.py --run-evaluation $(SWE_BENCH_ARGS)
-
-install-user:
-	scripts/install.sh
-
-publish-testpypi:
-	PYTHON=$(PYTHON) scripts/publish-pypi.sh --testpypi
-
-publish-pypi:
-	PYTHON=$(PYTHON) scripts/publish-pypi.sh --pypi
-
-publish-all:
-	PYTHON=$(PYTHON) scripts/publish-pypi.sh --both
 
 report:
 	$(COMPLIANCE_RUNNER) --write-report-only

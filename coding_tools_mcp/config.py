@@ -35,6 +35,7 @@ class ConfigPaths:
     secrets_dir: Path
     mcp_token: Path
     control_plane_key: Path
+    tunnel_health_url: Path
     approvals_db: Path
     audit_log: Path
 
@@ -53,6 +54,7 @@ def paths() -> ConfigPaths:
         secrets_dir=secrets_dir,
         mcp_token=secrets_dir / "mcp-token",
         control_plane_key=secrets_dir / "control-plane-api-key",
+        tunnel_health_url=root / "tunnel-health.url",
         approvals_db=root / "approvals.db",
         audit_log=root / "audit.jsonl",
     )

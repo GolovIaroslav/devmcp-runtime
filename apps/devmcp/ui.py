@@ -13,6 +13,7 @@ import http.server
 import json
 import secrets
 import shutil
+import subprocess
 import urllib.parse
 import urllib.error
 import urllib.request
@@ -31,7 +32,7 @@ from coding_tools_mcp.config import (
     secret_status,
     write_secret,
 )
-from coding_tools_mcp.policy import CAPABILITIES, PROFILE_NAMES, effective_rules, validate_rules
+from coding_tools_mcp.policy import CAPABILITIES, PROFILE_NAMES, UNIMPLEMENTED_CAPABILITIES, effective_rules, validate_rules
 from coding_tools_mcp.tasks import TaskRegistry
 from coding_tools_mcp import __version__
 
@@ -113,6 +114,18 @@ def _status(state: UIState) -> dict[str, Any]:
         mcp_running = response.status == 200 and health_payload.get("ready") is True
     except (OSError, urllib.error.URLError, ValueError, json.JSONDecodeError):
         mcp_running = False
+    tunnel_status: dict[str, Any] = {}
+    tunnel_process = "not installed"
+    try:
+        from .cli import MCP_SERVICE, TUNNEL_SERVICE, _active, _find_bool, _tunnel_status
+
+        tunnel_status = _tunnel_status(state.config_paths)
+        tunnel_process = "running" if _active(TUNNEL_SERVICE) else "stopped"
+        tunnel_ready = _find_bool(tunnel_status, {"ready", "readiness"}) and _find_bool(tunnel_status, {"healthy", "health_ok"})
+        mcp_service = "running" if _active(MCP_SERVICE) else "stopped"
+    except (OSError, subprocess.SubprocessError):
+        tunnel_ready = False
+        mcp_service = "unknown"
     return {
         "mcp_running": mcp_running,
         "mcp_health": "ok" if mcp_running else "stopped/unreachable",
@@ -122,7 +135,15 @@ def _status(state: UIState) -> dict[str, Any]:
         "sandbox_secure": secure,
         "policy_profile": str(state.config.get("profile", "balanced")),
         "tunnel_id": str(state.config.get("tunnel_id", "")) or "not configured",
-        "tunnel_state": "not configured" if not state.config.get("tunnel_id") else "configured",
+        "tunnel_state": (
+            "not configured"
+            if not state.config.get("tunnel_id")
+            else "ready" if tunnel_ready else f"{tunnel_process}; readiness {'unknown' if not tunnel_status else 'not ready'}"
+        ),
+        "tunnel_ready": tunnel_ready,
+        "tunnel_status": tunnel_status,
+        "mcp_service": mcp_service,
+        "tunnel_process": tunnel_process,
         "pending_approvals": len(approvals),
         "version": __version__,
         "auth": secret_status(state.config_paths),
@@ -191,6 +212,12 @@ class UIHandler(http.server.BaseHTTPRequestHandler):
         if route == "api/status":
             self._send_json(_status(self.state))
             return
+        if route == "api/services/logs":
+            from .cli import _read_service_logs
+
+            output, stderr, returncode = _read_service_logs(self.state.config_paths)
+            self._send_json({"ok": returncode == 0, "logs": output, "stderr": stderr}, 200 if returncode == 0 else 502)
+            return
         body = self._route_page(route)
         self._send_html(body)
 
@@ -242,12 +269,32 @@ class UIHandler(http.server.BaseHTTPRequestHandler):
                     raise ValueError("unknown profile")
                 self.state.config["profile"] = profile
                 save_config(self.state.config, self.state.config_paths)
-                generate_mcp_token(self.state.config_paths)
+                if not secret_status(self.state.config_paths)["mcp_token_configured"]:
+                    generate_mcp_token(self.state.config_paths)
                 control_key = form.get("control_plane_key", [""])[0]
                 if control_key.strip():
                     write_secret(self.state.config_paths.control_plane_key, control_key)
                 self.state.reload()
                 self._send_json({"ok": True, "auth": secret_status(self.state.config_paths)})
+                return
+            if route == "api/auth/rotate-mcp-token":
+                if form.get("confirmation", [""])[0] != "ROTATE":
+                    raise ValueError("enter ROTATE to confirm MCP token rotation")
+                generate_mcp_token(self.state.config_paths)
+                self._send_json({"ok": True, "auth": secret_status(self.state.config_paths)})
+                return
+            if route == "api/policy/patch":
+                max_lines = int(form.get("max_removed_lines", [""])[0])
+                max_percent = float(form.get("max_removed_percent", [""])[0])
+                if max_lines < 0 or max_percent < 0:
+                    raise ValueError("patch thresholds cannot be negative")
+                self.state.config["patch"] = {
+                    "max_removed_lines": max_lines,
+                    "max_removed_percent": max_percent,
+                }
+                save_config(self.state.config, self.state.config_paths)
+                self.state.reload()
+                self._send_json({"ok": True, "patch": self.state.config["patch"]})
                 return
             if route == "api/workspaces/add":
                 root_path = Path(form.get("workspace", [""])[0]).expanduser().resolve()
@@ -272,16 +319,34 @@ class UIHandler(http.server.BaseHTTPRequestHandler):
                 self.state.reload()
                 self._send_json({"ok": True, "workspaces": roots})
                 return
+            if route == "api/approvals/clear-expired":
+                removed = ApprovalEngine(self.state.config_paths.approvals_db).clear_expired()
+                self._send_json({"ok": True, "removed": removed})
+                return
             if route.startswith("api/approvals/"):
                 parts = route.split("/")
-                if len(parts) != 4 or parts[3] not in {"approve", "deny"}:
+                if len(parts) != 4 or parts[3] not in {"approve", "approve-always", "deny"}:
                     raise ValueError("invalid approval route")
                 engine = ApprovalEngine(self.state.config_paths.approvals_db)
                 if parts[3] == "approve":
                     engine.approve(parts[2])
+                elif parts[3] == "approve-always":
+                    pattern = form.get("pattern", [""])[0].strip()
+                    if not pattern:
+                        raise ValueError("an Always Allow rule needs a scoped command pattern")
+                    engine.approve(parts[2], pattern=pattern)
                 else:
                     engine.deny(parts[2])
                 self._send_json({"ok": True})
+                return
+            if route.startswith("api/services/"):
+                action = route.rsplit("/", 1)[-1]
+                if action not in {"start", "stop", "restart"}:
+                    raise ValueError("unknown service action")
+                from .cli import _service_action
+
+                result = _service_action(action)
+                self._send_json({"ok": result == 0, "action": action, "returncode": result}, 200 if result == 0 else 502)
                 return
             self._send_json({"error": "unknown route"}, 404)
         except (OSError, ValueError, KeyError) as exc:
@@ -300,18 +365,21 @@ class UIHandler(http.server.BaseHTTPRequestHandler):
             options = "".join(f'<option value="{name}" {"selected" if name == profile else ""}>{name}</option>' for name in PROFILE_NAMES)
             rows: list[str] = []
             for capability in CAPABILITIES:
+                unavailable = capability in UNIMPLEMENTED_CAPABILITIES
                 decision_options = "".join(
                     f'<option value="{value}" {"selected" if value == rules[capability] else ""}>{value.upper()}</option>'
                     for value in ("auto", "ask", "deny")
                 )
                 rows.append(
-                    f'<tr><td>{html.escape(capability)}</td><td><select name="rule.{html.escape(capability)}">{decision_options}</select></td></tr>'
+                    f'<tr><td>{html.escape(capability)}</td><td><select name="rule.{html.escape(capability)}" {"disabled" if unavailable else ""}>{decision_options}</select>{" (not implemented)" if unavailable else ""}</td></tr>'
                 )
             rows_html = "".join(rows)
-            body = f'<h2>Permissions</h2><form method="post" action="/api/policy/profile"><input type="hidden" name="csrf" value="{html.escape(self.state.csrf_token)}"><select name="profile">{options}</select><button>Apply profile</button></form><form method="post" action="/api/policy/custom"><input type="hidden" name="csrf" value="{html.escape(self.state.csrf_token)}"><table><tr><th>Capability</th><th>Decision</th></tr>{rows_html}</table><button>Save Custom matrix</button></form><p>Patch thresholds: {html.escape(str(self.state.config.get("patch")))}</p>'
+            patch = self.state.config.get("patch", {})
+            body = f'<h2>Permissions</h2><form method="post" action="/api/policy/profile"><input type="hidden" name="csrf" value="{html.escape(self.state.csrf_token)}"><select name="profile">{options}</select><button>Apply profile</button></form><form method="post" action="/api/policy/custom"><input type="hidden" name="csrf" value="{html.escape(self.state.csrf_token)}"><table><tr><th>Capability</th><th>Decision</th></tr>{rows_html}</table><button>Save Custom matrix</button></form><form method="post" action="/api/policy/patch"><input type="hidden" name="csrf" value="{html.escape(self.state.csrf_token)}"><h3>Destructive patch thresholds</h3><label>Maximum removed lines <input name="max_removed_lines" type="number" min="0" value="{html.escape(str(patch.get("max_removed_lines", 200)))}"></label><label>Maximum removed percent <input name="max_removed_percent" type="number" min="0" step="0.01" value="{html.escape(str(patch.get("max_removed_percent", 30.0)))}"></label><button>Save thresholds</button></form>'
             return _page("Permissions", body, self.state)
         if route == "setup":
-            body = f'<h2>First-run setup</h2><form method="post" action="/api/setup"><input type="hidden" name="csrf" value="{html.escape(self.state.csrf_token)}"><label>Workspace <input name="workspace" value="{html.escape(str(self.state.config.get("workspace", "")))}" size="70"></label><br><label>Profile <select name="profile">{"".join(f"<option>{name}</option>" for name in PROFILE_NAMES)}</select></label><br><label>Secure MCP Tunnel key (optional, never displayed again) <input type="password" name="control_plane_key" autocomplete="off"></label><br><button>Save setup</button></form>'
+            configured = secret_status(self.state.config_paths)["mcp_token_configured"]
+            body = f'<h2>First-run setup</h2><form method="post" action="/api/setup"><input type="hidden" name="csrf" value="{html.escape(self.state.csrf_token)}"><label>Workspace <input name="workspace" value="{html.escape(str(self.state.config.get("workspace", "")))}" size="70"></label><br><label>Profile <select name="profile">{"".join(f"<option>{name}</option>" for name in PROFILE_NAMES)}</select></label><br><label>Secure MCP Tunnel key (optional, never displayed again) <input type="password" name="control_plane_key" autocomplete="off"></label><br><button>Save setup</button></form><section><h3>MCP connector token</h3><p>{"Configured" if configured else "Will be generated when Setup is saved"}. Saving Setup does not rotate an existing token.</p><form method="post" action="/api/auth/rotate-mcp-token"><input type="hidden" name="csrf" value="{html.escape(self.state.csrf_token)}"><label>Type ROTATE to invalidate existing ChatGPT connections <input name="confirmation" autocomplete="off"></label><button>Rotate MCP token</button></form></section>'
             return _page("Setup", body, self.state)
         if route == "workspaces":
             roots = [str(item) for item in self.state.config.get("workspaces", [status["workspace"]])]
@@ -332,8 +400,8 @@ class UIHandler(http.server.BaseHTTPRequestHandler):
             return _page("Workspaces", body, self.state)
         if route == "approvals":
             pending = ApprovalEngine(self.state.config_paths.approvals_db).list_pending()
-            rows = "".join(f'<tr><td>{html.escape(str(item["id"]))}</td><td>{html.escape(str(item["command_or_action"]))}</td><td><form method="post" action="/api/approvals/{html.escape(str(item["id"]))}/approve"><input type="hidden" name="csrf" value="{html.escape(self.state.csrf_token)}"><button>Approve once</button></form></td><td><form method="post" action="/api/approvals/{html.escape(str(item["id"]))}/deny"><input type="hidden" name="csrf" value="{html.escape(self.state.csrf_token)}"><button>Deny</button></form></td></tr>' for item in pending)
-            return _page("Approvals", f"<h2>Pending approvals</h2><table><tr><th>ID</th><th>Operation</th><th></th><th></th></tr>{rows}</table>", self.state)
+            rows = "".join(f'<tr><td>{html.escape(str(item["id"]))}</td><td>{html.escape(str(item["command_or_action"]))}</td><td>{html.escape(str(item.get("risk_class", "")))}</td><td>{html.escape(str(item.get("expires_at", "")))}</td><td>{html.escape(", ".join(item.get("capabilities", [])))}</td><td><form method="post" action="/api/approvals/{html.escape(str(item["id"]))}/approve"><input type="hidden" name="csrf" value="{html.escape(self.state.csrf_token)}"><button>Approve once</button></form><form method="post" action="/api/approvals/{html.escape(str(item["id"]))}/approve-always"><input type="hidden" name="csrf" value="{html.escape(self.state.csrf_token)}"><input name="pattern" value="{html.escape(str(item["command_or_action"]))}" size="24"><button>Always Allow scoped</button></form></td><td><form method="post" action="/api/approvals/{html.escape(str(item["id"]))}/deny"><input type="hidden" name="csrf" value="{html.escape(self.state.csrf_token)}"><button>Deny</button></form></td></tr>' for item in pending)
+            return _page("Approvals", f"<h2>Pending approvals</h2><form method=\"post\" action=\"/api/approvals/clear-expired\"><input type=\"hidden\" name=\"csrf\" value=\"{html.escape(self.state.csrf_token)}\"><button>Prune expired approvals</button></form><table><tr><th>ID</th><th>Operation</th><th>Risk</th><th>Expires</th><th>Capabilities</th><th>Allow</th><th></th></tr>{rows}</table>", self.state)
         if route == "diagnostics":
             return _page("Diagnostics", "<h2>Diagnostics</h2>" + _table([("bwrap", status["sandbox_backend"]), ("secure", status["sandbox_secure"]), ("MCP token", status["auth"]["mcp_token_configured"]), ("Tunnel key", status["auth"]["control_plane_key_configured"])]), self.state)
         if route == "about":
@@ -343,7 +411,9 @@ class UIHandler(http.server.BaseHTTPRequestHandler):
             rows = "".join(f"<tr><td>{html.escape(str(item['id']))}</td><td>{html.escape(str(item['category']))}</td><td>{html.escape(str(item['executable']))}</td><td>{html.escape(str(item['network_requirement']))}</td><td>{html.escape(str(item['approval_class']))}</td></tr>" for item in tasks)
             return _page("Tasks", f"<h2>Task registry</h2><table><tr><th>ID</th><th>Category</th><th>Executable</th><th>Network</th><th>Policy</th></tr>{rows}</table>", self.state)
         if route == "services":
-            return _page("Services", "<h2>Services</h2>" + _table([("MCP", "inspect with devmcp status"), ("Tunnel", status["tunnel_state"])]), self.state)
+            body = "<h2>Services</h2>" + _table([("MCP process", status["mcp_service"]), ("Tunnel process", status["tunnel_process"]), ("Tunnel readiness", status["tunnel_state"])])
+            body += f'<form method="post" action="/api/services/start"><input type="hidden" name="csrf" value="{html.escape(self.state.csrf_token)}"><button>Start</button></form><form method="post" action="/api/services/stop"><input type="hidden" name="csrf" value="{html.escape(self.state.csrf_token)}"><button>Stop</button></form><form method="post" action="/api/services/restart"><input type="hidden" name="csrf" value="{html.escape(self.state.csrf_token)}"><button>Restart</button></form><p><a href="/api/services/logs">Open redacted service logs</a> · <code>devmcp logs</code></p>'
+            return _page("Services", body, self.state)
         if route == "audit":
             events = read_recent_events(self.state.config_paths.audit_log)
             rows = "".join(

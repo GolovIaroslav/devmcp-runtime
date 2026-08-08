@@ -6,13 +6,16 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
+from apps.devmcp import cli
 from apps.devmcp.ui import UIState
 from coding_tools_mcp.approval import ApprovalEngine
-from coding_tools_mcp.config import load_config, paths, redact_config, save_config
-from coding_tools_mcp.policy import CAPABILITIES, decision, profile_rules
-from coding_tools_mcp.server import Runtime
+from coding_tools_mcp.config import load_config, paths, redact_config, save_config, write_secret
+from coding_tools_mcp.errors import ToolFailure
+from coding_tools_mcp.policy import CAPABILITIES, UNIMPLEMENTED_CAPABILITIES, decision, profile_rules, validate_rules
+from coding_tools_mcp.server import Runtime, run_http
 
 
 class ReleaseConfigTests(unittest.TestCase):
@@ -27,11 +30,16 @@ class ReleaseConfigTests(unittest.TestCase):
                 save_config(config, selected)
                 self.assertTrue(selected.config_file.is_file())
 
-    def test_policy_profiles_keep_floor_and_custom_is_data(self) -> None:
+    def test_policy_profiles_cover_each_capability_and_custom_is_data(self) -> None:
         self.assertEqual(set(profile_rules("balanced")), set(CAPABILITIES))
+        self.assertEqual(len(CAPABILITIES), len(set(CAPABILITIES)))
+        rules = {name: "auto" for name in CAPABILITIES if name not in UNIMPLEMENTED_CAPABILITIES}
+        self.assertEqual(validate_rules(rules)["agent.delegate"], "deny")
+        with self.assertRaisesRegex(ValueError, "not implemented"):
+            validate_rules({name: "auto" for name in CAPABILITIES})
         self.assertEqual(decision("safe", "workspace.delete"), "ask")
         self.assertEqual(decision("safe", "git.branch"), "ask")
-        self.assertEqual(decision("power", "server.public"), "deny")
+        self.assertEqual(decision("power", "server.public"), "ask")
         self.assertEqual(decision("power", "workspace.delete"), "auto")
         self.assertEqual(decision("balanced", "workspace.delete"), "ask")
 
@@ -107,3 +115,221 @@ class ReleaseLifecycleTests(unittest.TestCase):
                 self.assertEqual(runtime.server_info_payload()["policy_rules"]["workspace.delete"], "auto")
             finally:
                 runtime.close()
+
+    def test_active_profile_controls_exec_and_network_not_legacy_safe_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = Runtime(Path(tmp), permission_mode="safe", policy_profile="power")
+            try:
+                self.assertEqual(runtime._policy_decision_for_capabilities({"exec.arbitrary", "network.public"}), "auto")
+                with patch.object(runtime, "_execute_command_legacy", return_value={"reached": True}) as execute:
+                    self.assertEqual(runtime.exec_command({"cmd": "curl https://example.invalid"}), {"reached": True})
+                executed_args = execute.call_args.args[0]
+                self.assertEqual(executed_args["_network_capability"], "network.public")
+                self.assertIn("network.public", executed_args["_approved_capabilities"])
+            finally:
+                runtime.close()
+
+    def test_custom_ask_requires_and_consumes_an_approval_before_execution(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"DEVMCP_CONFIG_DIR": tmp}, clear=False):
+            workspace = Path(tmp) / "workspace"
+            workspace.mkdir()
+            rules = {name: "auto" for name in CAPABILITIES}
+            rules["agent.delegate"] = "deny"
+            rules["exec.arbitrary"] = "ask"
+            runtime = Runtime(workspace, policy_profile="custom", policy_rules=rules, sandbox_backend="unsafe")
+            try:
+                command = "printf custom-policy-approved"
+                pending = runtime.exec_command({"cmd": command})
+                self.assertEqual(pending["status"], "approval_required")
+                ApprovalEngine().approve(pending["approval_id"])
+                completed = runtime.exec_command({"cmd": command, "approval_id": pending["approval_id"]})
+                self.assertTrue(completed["ok"])
+                self.assertEqual(completed["status"], "exited")
+                self.assertIn("custom-policy-approved", completed["stdout"])
+            finally:
+                runtime.close()
+
+    def test_custom_exec_deny_blocks_behavior_even_with_trusted_legacy_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = Runtime(
+                Path(tmp),
+                permission_mode="trusted",
+                policy_profile="custom",
+                policy_rules={"exec.arbitrary": "deny"},
+            )
+            try:
+                with self.assertRaisesRegex(ToolFailure, "disabled by the active policy profile"):
+                    runtime.exec_command({"cmd": "echo blocked"})
+            finally:
+                runtime.close()
+
+    def test_profile_exec_categories_produce_real_policy_decisions(self) -> None:
+        commands = {
+            "exec.registered": ("echo hello", "test.echo"),
+            "exec.arbitrary": ("printf policy", None),
+            "network.public": ("curl https://example.invalid", None),
+            "network.host_local": ("curl http://127.0.0.1:9", None),
+            "deps.install": ("npm install", None),
+            "db.migrate": ("alembic upgrade head", None),
+            "git.branch": ("git branch", None),
+            "git.commit": ("git commit -m policy", None),
+            "git.push": ("git push", None),
+            "env.sensitive": ("printf policy", None),
+        }
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"DEVMCP_CONFIG_DIR": tmp}, clear=False):
+            workspace = Path(tmp) / "workspace"
+            workspace.mkdir()
+            for capability, (command, task_id) in commands.items():
+                with self.subTest(capability=capability):
+                    rules = {name: "auto" for name in CAPABILITIES}
+                    rules["agent.delegate"] = "deny"
+                    rules[capability] = "deny"
+                    runtime = Runtime(workspace, policy_profile="custom", policy_rules=rules)
+                    try:
+                        args: dict[str, object] = {"cmd": command}
+                        if capability == "env.sensitive":
+                            args["env"] = {"EXAMPLE_API_KEY": "not-a-real-secret"}
+                        with self.assertRaises(ToolFailure) as raised:
+                            runtime.exec_command(args)
+                        self.assertIn(capability, raised.exception.details.get("capabilities", []))
+                    finally:
+                        runtime.close()
+
+    def test_workspace_capabilities_block_their_real_operations(self) -> None:
+        operations = {
+            "workspace.read": lambda runtime: runtime.read_files({"paths": ["existing.txt"]}),
+            "workspace.create": lambda runtime: runtime.apply_patch({"patch": "*** Begin Patch\n*** Add File: new.txt\n+new\n*** End Patch"}),
+            "workspace.patch_small": lambda runtime: runtime.apply_patch({"patch": "*** Begin Patch\n*** Update File: existing.txt\n@@\n-old\n+new\n*** End Patch"}),
+            "workspace.patch_destructive": lambda runtime: runtime.apply_patch({"patch": "*** Begin Patch\n*** Update File: existing.txt\n@@\n old\n-second\n*** End Patch"}),
+            "workspace.delete": lambda runtime: runtime.apply_patch({"patch": "*** Begin Patch\n*** Delete File: existing.txt\n*** End Patch"}),
+            "workspace.move": lambda runtime: runtime.apply_patch({"patch": "*** Begin Patch\n*** Move File: existing.txt to: moved.txt\n*** End Patch"}),
+        }
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"DEVMCP_CONFIG_DIR": tmp}, clear=False):
+            workspace = Path(tmp) / "workspace"
+            workspace.mkdir()
+            for capability, operation in operations.items():
+                with self.subTest(capability=capability):
+                    (workspace / "existing.txt").write_text(
+                        "old\nsecond\n" if capability == "workspace.patch_destructive" else "old\n",
+                        encoding="utf-8",
+                    )
+                    rules = {name: "auto" for name in CAPABILITIES}
+                    rules["agent.delegate"] = "deny"
+                    rules[capability] = "deny"
+                    runtime = Runtime(
+                        workspace,
+                        policy_profile="custom",
+                        policy_rules=rules,
+                        max_removed_lines=0 if capability == "workspace.patch_destructive" else 200,
+                    )
+                    try:
+                        with self.assertRaises(ToolFailure):
+                            operation(runtime)
+                    finally:
+                        runtime.close()
+
+    def test_server_capabilities_block_their_real_bind_operations(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"DEVMCP_CONFIG_DIR": tmp}, clear=False):
+            selected = paths()
+            config = load_config(selected, workspace=tmp)
+            config["profile"] = "custom"
+            config["policy"] = {"custom": {name: "auto" for name in CAPABILITIES}}
+            config["policy"]["custom"]["agent.delegate"] = "deny"
+            config["policy"]["custom"]["server.loopback"] = "deny"
+            config["policy"]["custom"]["server.public"] = "deny"
+            save_config(config, selected)
+            args = SimpleNamespace(
+                auth_token=None,
+                auth_token_file=None,
+                host="127.0.0.1",
+                policy_profile="custom",
+                permission_mode="trusted",
+                allow_network=True,
+                shell_env_inherit=None,
+                oauth_mode=False,
+            )
+            with patch.dict(os.environ, {"DEVMCP_POLICY_CONFIG_FILE": str(selected.config_file)}, clear=False):
+                self.assertEqual(run_http(args), 2)
+                args.host = "0.0.0.0"
+                self.assertEqual(run_http(args), 2)
+
+    def test_foreground_tunnel_status_uses_tunnel_client_health(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"DEVMCP_CONFIG_DIR": tmp}, clear=False):
+                selected = paths()
+                fake_client = Path(tmp) / "tunnel-client"
+                fake_client.touch()
+                response = subprocess.CompletedProcess(
+                    [], 0, '{"ready": true, "healthy": true}', ""
+                )
+                with patch.object(cli, "TUNNEL_BIN", fake_client), patch.object(cli.subprocess, "run", return_value=response) as run:
+                    self.assertEqual(cli._tunnel_status(selected), {"ready": True, "healthy": True})
+                command = run.call_args.args[0]
+                self.assertEqual(command[1], "health")
+                self.assertIn("--require-control-plane-poll", command)
+                self.assertIn(str(selected.tunnel_health_url), command)
+                self.assertNotIn("runtimes", command)
+
+    def test_foreground_tunnel_run_writes_a_loopback_health_url(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"DEVMCP_CONFIG_DIR": tmp}, clear=False):
+            selected = paths()
+            config = load_config(selected, workspace=tmp)
+            config["tunnel_id"] = "tunnel-fixture"
+            save_config(config, selected)
+            write_secret(selected.control_plane_key, "fixture-key")
+            fake_client = Path(tmp) / "tunnel-client"
+            fake_client.touch()
+            with patch.object(cli, "TUNNEL_BIN", fake_client), patch.object(
+                cli.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)
+            ) as run:
+                self.assertEqual(cli._tunnel_command(SimpleNamespace(tunnel_action="run")), 0)
+            command = run.call_args.args[0]
+            self.assertEqual(command[1:3], ["run", "--profile"])
+            self.assertIn(f"file:{selected.control_plane_key}", command)
+            self.assertIn("--health.listen-addr", command)
+            self.assertIn("127.0.0.1:0", command)
+            self.assertIn(str(selected.tunnel_health_url), command)
+
+    def test_service_units_use_config_launcher_not_a_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_root = root / "config with spaces"
+            home = root / "home with spaces"
+            workspace = root / "workspace with spaces"
+            workspace.mkdir()
+            with patch.dict(os.environ, {"DEVMCP_CONFIG_DIR": str(config_root), "HOME": str(home)}, clear=False):
+                selected = paths()
+                config = load_config(selected, workspace=str(workspace))
+                config["profile"] = "power"
+                config["mcp_port"] = 48999
+                save_config(config, selected)
+                completed = subprocess.CompletedProcess([], 0, "", "")
+                with patch.object(cli, "_systemctl", return_value=completed):
+                    self.assertEqual(cli._service_install(SimpleNamespace()), 0)
+                unit_dir = home / ".config" / "systemd" / "user"
+                mcp = (unit_dir / cli.MCP_SERVICE).read_text(encoding="utf-8")
+                tunnel = (unit_dir / cli.TUNNEL_SERVICE).read_text(encoding="utf-8")
+                self.assertIn("DEVMCP_CONFIG_DIR=", mcp)
+                self.assertIn("-m apps.devmcp.cli serve", mcp)
+                self.assertNotIn(str(workspace), mcp)
+                self.assertNotIn("--policy-profile", mcp)
+                self.assertIn("-m apps.devmcp.cli tunnel run", tunnel)
+                self.assertNotIn("runtimes connect", tunnel)
+
+    def test_serve_reads_the_current_config_on_every_start(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"DEVMCP_CONFIG_DIR": tmp}, clear=False):
+            selected = paths()
+            config = load_config(selected, workspace=tmp)
+            config["profile"] = "balanced"
+            config["mcp_port"] = 47157
+            save_config(config, selected)
+            with patch("coding_tools_mcp.server.main", return_value=0) as server_main:
+                self.assertEqual(cli._serve(SimpleNamespace()), 0)
+                config["profile"] = "power"
+                config["mcp_port"] = 48999
+                save_config(config, selected)
+                self.assertEqual(cli._serve(SimpleNamespace()), 0)
+            first, second = (list(call.args[0]) for call in server_main.call_args_list)
+            self.assertEqual(first[first.index("--policy-profile") + 1], "balanced")
+            self.assertEqual(second[second.index("--policy-profile") + 1], "power")
+            self.assertEqual(second[second.index("--port") + 1], "48999")

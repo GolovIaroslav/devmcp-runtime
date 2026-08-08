@@ -4,7 +4,7 @@ Linux is the supported beta platform. Install Python 3.11+, Git, bubblewrap,
 and optionally the official `tunnel-client` binary. Then:
 
 ```bash
-uv tool install devmcp-runtime
+uv tool install git+https://github.com/GolovIaroslav/test.git
 devmcp setup --workspace /absolute/path/to/repository
 ```
 

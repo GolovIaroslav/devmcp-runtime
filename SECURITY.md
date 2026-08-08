@@ -1,102 +1,44 @@
-# Security Policy
+# Security policy
 
-This project exposes local coding-runtime primitives over MCP. The intended boundary is one configured workspace root plus server-side policy, best-effort Linux Landlock filesystem confinement for `exec_command` when available, and external deployment sandboxing.
+DevMCP Runtime's beta Linux security boundary is **bubblewrap (`bwrap`)**.
+Normal execution creates a constrained sandbox; it is not ordinary unrestricted
+host-process execution. `unsafe` is an explicit, visible host mode and should
+be used only in an isolated VM or container that the operator controls.
 
-## Current Implementation Caution
+## Runtime boundary
 
-The current compliance suite covers workspace traversal, symlink escape, direct and interpreter-mediated outside reads, direct syscall outside reads and writes on Landlock-capable Linux hosts, risky environment variables, network-looking commands, destructive commands, shell-expansion gating, output caps, and session deadlines. Even so, `exec_command` must not be treated as a complete OS/container sandbox. It launches host processes and still relies on platform support plus command classification for non-filesystem risks.
+- A configured workspace and canonical, no-symlink path handling constrain file
+  and patch tools.
+- On Linux, `bwrap` is the primary execution boundary. Landlock is additional
+  defense in depth where the host supports it.
+- The default HTTP and local admin UI binds are loopback-only. A public bind
+  also requires authentication and an active `server.public` policy decision.
+- Tokens live in 0600 files outside the workspace. The UI masks secret values
+  and saving Setup never rotates the MCP connector token.
+- `safe`, `balanced`, `power`, and `custom` capability rules are authoritative
+  for runtime operations. `ask` creates a scoped, expiring approval; legacy
+  `safe`/`trusted`/`dangerous` flags are compatibility presets only when no
+  profile was selected.
 
-For production, expose the server only to trusted local clients, bind HTTP to loopback, and run it inside an external container or sandbox with no host secrets, no broad filesystem mounts, and network egress disabled by policy.
+## Residual risk and platform limits
 
-## Workspace Boundary
+Sandboxing does not make untrusted code harmless. Toolchains may contain their
+own interpreters and host integrations, and a profile that auto-allows network
+or arbitrary execution intentionally increases risk. Do not expose container
+sockets, privilege escalation tools, or unrelated home directories.
 
-- The workspace root is canonicalized once at startup.
-- Tool path inputs are workspace-relative.
-- Absolute paths, NUL bytes, `..`, and symlink escapes are rejected.
-- Write paths validate the nearest existing parent before creating new files.
-- `apply_patch` refuses symlink writes and stages changes before committing them.
+Non-Linux platforms do not have the bwrap boundary in this release. Treat them
+as requiring a separate VM/container security boundary for untrusted work.
+If bwrap is unavailable, execution fails rather than silently falling back to
+host execution unless the operator explicitly selects `unsafe` mode.
 
-## Command Execution
+## Report a vulnerability privately
 
-Commands run with:
+Before public release, the maintainer must enable **GitHub Private Vulnerability
+Reporting** for this repository. Report through the private advisory form:
 
-- Workspace-bound cwd.
-- Configurable shell environment inheritance with controlled external `HOME`, `TMPDIR`, and `cache_dir`.
-- Process group isolation for timeout and kill.
-- Best-effort Linux Landlock rules, when available, that allow workspace access, exact runtime-directory writes, and read/execute access to interpreter/runtime roots.
-- Optional operator-supplied read/execute roots from `CODING_TOOLS_MCP_EXEC_ALLOW_ROOTS` for toolchains installed outside standard system prefixes.
-- Policy denial for network-looking commands, destructive commands, shell expansion, inline interpreter/shell snippets, setuid/setgid executables, and outside-workspace path arguments.
+<https://github.com/GolovIaroslav/test/security/advisories/new>
 
-On hosts with Landlock support, commands must not read or write outside-workspace files indirectly through interpreters, nested shells, or direct syscalls. On Windows, macOS, or Linux hosts without Landlock, `exec_command` still runs after policy checks but returns a warning; use an external sandbox before running untrusted commands or untrusted project code. String checks are not a substitute for OS network isolation, so inline code forms such as `python -c`, `python -`, `node -e`, and `sh -c` require explicit permission by default.
-
-## Environment Scrubbing
-
-The runtime denies or drops secret-looking variables and values:
-
-- API keys and tokens.
-- Cloud credentials.
-- Shell startup injection variables.
-- Dynamic loader and interpreter path injection variables such as `LD_PRELOAD`, `LD_LIBRARY_PATH`, `DYLD_*`, `BASH_ENV`, `ENV`, `PYTHONPATH`, `RUBYLIB`, and `NODE_OPTIONS`.
-
-`CODING_TOOLS_MCP_SHELL_ENV_INHERIT=all` broadens compatibility for local toolchains, but still applies the default secret and startup-loader filters. Only combine `--permission-mode dangerous` with `inherit=all` when the workspace, client, and child processes are trusted enough to receive the full parent environment.
-
-Secret redaction is defense in depth and must not be treated as the primary protection.
-
-## Permission Model
-
-Risky capabilities return structured out-of-band approval records; the server
-never silently grants:
-
-- `network`
-- `destructive_command`
-- `long_timeout`
-- `sensitive_env`
-- `shell_expansion`
-- `inline_script`
-- `privileged_executable`
-- `write_generated_or_ignored`
-
-The model-facing catalog does not expose MCP elicitation. Operators approve
-locally with `devmcp approve <approval_id>`, and the model must retry the exact
-operation with that single-use ID. Safe registered tasks and small patches do
-not enter this workflow.
-
-Operators should choose one of three permission modes:
-
-- `safe`: default mode. Read-only inspection, preview, small Add/Update patches,
-  and registered non-network tasks are automatic. Unknown/network operations
-  return out-of-band approval records; Delete/Move patches, outside paths,
-  secrets, privileged commands, sandbox escape, and Docker/Podman socket access
-  are denied. `HOME`, `TMPDIR`, and `cache_dir` point under an external
-  server-owned runtime directory, secrets and loader/startup env are filtered,
-  and Landlock is enabled when available. Large updates require approval when
-  they remove more than 200 existing lines or more than 30% of an existing file.
-- `trusted`: local development mode. It allows network-looking commands, shell expansion, and inline scripts while still filtering secrets and blocking destructive commands and host-root writes. Runtime writes are scoped to the exact external runtime directory, not global `/tmp`.
-- `dangerous`: disables `exec_command` permission gates and Landlock. Use only inside an isolated container or VM. Workspace path boundaries for direct file and patch tools still apply.
-
-`--allow-network` remains a compatibility flag to open only the network-looking command gate. `--dangerously-skip-all-permissions` remains a compatibility alias for dangerous mode.
-
-## Session Lifecycle
-
-Persistent command sessions use opaque server-owned IDs. `write_stdin` requires a live session. `kill_session` terminates only server-managed process groups. Deadlines continue to apply even if the client stops polling, and output buffers are bounded with dropped-byte metadata.
-
-## HTTP Exposure
-
-HTTP is intended for local MCP clients:
-
-- Default bind remains `127.0.0.1`.
-- Non-loopback deployment requires external authentication and sandboxing.
-- Browser `Origin` is validated as defense in depth.
-- Logs and optional `CODING_TOOLS_MCP_TRACE=1` JSON traces go to stderr, not stdout.
-
-## Reporting Security Issues
-
-Report security issues privately to repository maintainers. Include the affected tool, minimal reproduction, expected and actual behavior, and whether the issue escapes the workspace, exposes credentials, permits network access, bypasses approval, or survives timeout/cancellation.
-
-## Residual Risks
-
-- Shell commands and test runners execute arbitrary project code.
-- Network denial is policy-based unless the operator supplies external egress controls.
-- Landlock is Linux-specific and best-effort; non-Linux platforms and Linux hosts without Landlock run `exec_command` with policy checks only and need an external sandbox for untrusted clients or workspaces.
-- Symlink race resistance still depends on platform support for anchored/no-follow file operations.
-- Secret redaction can miss transformed or fragmented secrets.
+Do not open a public issue with an exploit or live credential. Include the
+affected version, a minimal reproduction, impact, and whether the issue escapes
+the workspace, exposes a secret, bypasses an approval, or reaches the network.

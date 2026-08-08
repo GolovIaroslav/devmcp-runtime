@@ -78,7 +78,7 @@ from .protocol import (
     validate_rpc_envelope,
 )
 from .project_context import ProjectContext, load_project_context
-from .policy import PROFILE_NAMES, decision as policy_decision, effective_rules, validate_rules
+from .policy import PROFILE_NAMES, decision as policy_decision, effective_rules, legacy_profile, validate_rules
 from .telemetry import SessionTelemetry
 from .textutils import DEFAULT_MAX_LINES, TextTruncation, truncate_text_head
 from .tool_results import make_tool_result
@@ -325,7 +325,7 @@ class RuntimePolicy:
     shell_env_policy: ShellEnvPolicy
     allow_network: bool
     fake_readonly_annotations: bool = False
-    policy_profile: str = "safe"
+    policy_profile: str | None = None
 
 
 AUTO_ALLOW_POLICY = {
@@ -540,7 +540,11 @@ def fake_readonly_annotations_from_args(args: argparse.Namespace, permission_mod
 
 def runtime_policy_from_args(args: argparse.Namespace) -> RuntimePolicy:
     permission_mode = permission_mode_from_args(args)
-    allow_network = (
+    policy_profile = policy_profile_from_args(args)
+    # A legacy switch only affects a process that has not selected a profile.
+    # This preserves old command lines without making --permission-mode safe
+    # silently override a GUI-selected Power or Custom matrix.
+    allow_network = policy_profile is None and (
         PERMISSION_MODE_CAPABILITIES[permission_mode].network
         or bool(getattr(args, "allow_network", False))
         or truthy_env(os.environ.get(f"{ENV_PREFIX}_ALLOW_NETWORK"))
@@ -550,12 +554,14 @@ def runtime_policy_from_args(args: argparse.Namespace) -> RuntimePolicy:
         shell_env_policy=shell_env_policy_from_args(args),
         allow_network=allow_network,
         fake_readonly_annotations=fake_readonly_annotations_from_args(args, permission_mode),
-        policy_profile=policy_profile_from_args(args),
+        policy_profile=policy_profile,
     )
 
 
-def policy_profile_from_args(args: argparse.Namespace) -> str:
-    raw = getattr(args, "policy_profile", None) or os.environ.get("DEVMCP_POLICY_PROFILE") or "safe"
+def policy_profile_from_args(args: argparse.Namespace) -> str | None:
+    raw = getattr(args, "policy_profile", None) or os.environ.get("DEVMCP_POLICY_PROFILE")
+    if raw is None:
+        return None
     profile = str(raw).strip().lower()
     if profile not in PROFILE_NAMES:
         raise ValueError(f"policy profile must be one of: {', '.join(PROFILE_NAMES)}")
@@ -1217,7 +1223,7 @@ class Runtime:
         project_context: ProjectContext | None = None,
         fake_readonly_annotations: bool = False,
         transport: str = "stdio",
-        policy_profile: str = "safe",
+        policy_profile: str | None = None,
         sandbox_backend: str = "bwrap",
         max_removed_lines: int = 200,
         max_removed_percent: float = 30.0,
@@ -1243,6 +1249,9 @@ class Runtime:
                 details={"supported": list(PERMISSION_MODE_CHOICES)},
             )
         self.permission_mode = permission_mode
+        self._profile_managed = policy_profile is not None
+        if policy_profile is None:
+            policy_profile = legacy_profile(permission_mode)
         if policy_profile not in PROFILE_NAMES:
             raise ToolFailure(
                 "INVALID_ARGUMENT",
@@ -1258,7 +1267,9 @@ class Runtime:
         self.max_removed_lines = max_removed_lines
         self.max_removed_percent = max_removed_percent
         self.capabilities = PERMISSION_MODE_CAPABILITIES[permission_mode]
-        self.dangerously_skip_all_permissions = self.capabilities.skip_all_permissions
+        self.dangerously_skip_all_permissions = (
+            not self._profile_managed and self.capabilities.skip_all_permissions
+        )
         # Faking annotations is only defensible where the caller has already
         # asserted the workspace is disposable, so bind it to that assertion
         # instead of letting it be set orthogonally.
@@ -1278,7 +1289,11 @@ class Runtime:
                 category="validation",
                 details={"supported": list(SHELL_ENV_INHERIT_CHOICES)},
             )
-        self.allow_network = allow_network or self.capabilities.network
+        self.allow_network = (
+            allow_network or self.capabilities.network
+            if not self._profile_managed
+            else self._policy_decision_for_capabilities({"network.public"}) == "auto"
+        )
         self.auth_token = auth_token or None
         self.oauth_config = oauth_config
         self.server_instance_id = secrets.token_urlsafe(12)
@@ -1383,6 +1398,21 @@ class Runtime:
 
     def landlock_enabled(self) -> bool:
         return self.capabilities.landlock and self.sandbox_backend.name != "unsafe"
+
+    def _policy_decision_for_capabilities(self, required: set[str]) -> str:
+        """Return the strictest active profile decision for real operations."""
+
+        if not required:
+            return "auto"
+        decisions = {
+            policy_decision(self.policy_profile, capability, self.policy_rules)
+            for capability in required
+        }
+        if "deny" in decisions:
+            return "deny"
+        if "ask" in decisions:
+            return "ask"
+        return "auto"
 
     def landlock_write_roots(self) -> list[Path]:
         return [self.runtime_dir]
@@ -2165,6 +2195,7 @@ class Runtime:
         file_metrics: list[dict[str, Any]] = []
         diff_chunks: list[str] = []
         overall_risk = "ALLOW"
+        policy_capabilities: set[str] = set()
 
         for op in operations:
             self._validate_patch_path(op.path, require_existing=op.kind in {"update", "delete"})
@@ -2187,6 +2218,13 @@ class Runtime:
                 removed_existing_lines = 0
                 pct_rem = 0.0
                 file_risk = "ALLOW"
+                if self._profile_managed:
+                    required = {"workspace.create"}
+                    policy_capabilities.update(required)
+                    decision = self._policy_decision_for_capabilities(required)
+                    if decision == "deny":
+                        raise ToolFailure("ACCESS_DENIED", "Create is disabled by the active policy profile.", category="security")
+                    file_risk = "ASK" if decision == "ask" else "ALLOW"
 
                 diff_lines = list(difflib.unified_diff(
                     [],
@@ -2231,7 +2269,16 @@ class Runtime:
                 pct_rem = round((removed_existing_lines / orig_lines) * 100, 2) if orig_lines > 0 else 0.0
 
                 file_risk = "ALLOW"
-                if removed_existing_lines > self.max_removed_lines or pct_rem > self.max_removed_percent:
+                if self._profile_managed:
+                    required = {"workspace.patch_small"}
+                    if removed_existing_lines > self.max_removed_lines or pct_rem > self.max_removed_percent:
+                        required.add("workspace.patch_destructive")
+                    policy_capabilities.update(required)
+                    decision = self._policy_decision_for_capabilities(required)
+                    if decision == "deny":
+                        raise ToolFailure("ACCESS_DENIED", "Patch is disabled by the active policy profile.", category="security")
+                    file_risk = "ASK" if decision == "ask" else "ALLOW"
+                elif removed_existing_lines > self.max_removed_lines or pct_rem > self.max_removed_percent:
                     file_risk = "ASK"
 
                 staged[source.display] = StagedFile(source.display, source.path, updated_text, baseline, baseline.mode)
@@ -2243,6 +2290,7 @@ class Runtime:
                 if source.path.is_dir():
                     raise ToolFailure("PATCH_FAILED", "Cannot delete a directory with Delete File.", category="validation")
                 operation_decision = policy_decision(self.policy_profile, "workspace.delete", self.policy_rules)
+                policy_capabilities.add("workspace.delete")
                 if operation_decision == "deny":
                     raise ToolFailure("ACCESS_DENIED", "Delete is disabled by the active policy profile.", category="security")
                 baseline = FileBaseline.capture(source.path)
@@ -2273,6 +2321,7 @@ class Runtime:
                 if target.existed:
                     raise ToolFailure("PATCH_FAILED", "Move target already exists.", category="validation")
                 operation_decision = policy_decision(self.policy_profile, "workspace.move", self.policy_rules)
+                policy_capabilities.add("workspace.move")
                 if operation_decision == "deny":
                     raise ToolFailure("ACCESS_DENIED", "Move is disabled by the active policy profile.", category="security")
                 baseline = FileBaseline.capture(source.path)
@@ -2347,6 +2396,7 @@ class Runtime:
             "percentage_removed": total_pct_rem,
             "risk": overall_risk,
             "risk_class": "high" if overall_risk == "ASK" else "normal",
+            "policy_capabilities": sorted(policy_capabilities),
         }
 
     def apply_patch(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -2368,7 +2418,7 @@ class Runtime:
                         patch_text,
                         str(self.workspace.root),
                         sandbox_id=self.server_instance_id,
-                        capabilities=["high_risk_patch"],
+                        capabilities=analysis["policy_capabilities"] or ["high_risk_patch"],
                     )
                 else:
                     from .approval import ApprovalEngine
@@ -2380,7 +2430,7 @@ class Runtime:
                         risk="high_risk_patch",
                         network=False,
                         sandbox_id=self.server_instance_id,
-                        capabilities=["high_risk_patch"],
+                        capabilities=analysis["policy_capabilities"] or ["high_risk_patch"],
                     )
 
             if not dry_run:
@@ -2456,7 +2506,163 @@ class Runtime:
             required.add("network")
         return required
 
+    @staticmethod
+    def _network_capability(cmd: str, args: dict[str, Any]) -> str | None:
+        if not (
+            bool(args.get("network_required", False))
+            or (NETWORK_RE.search(cmd) and not is_literal_network_reference_command(cmd))
+        ):
+            return None
+        local_markers = ("localhost", "127.0.0.1", "[::1]", "::1")
+        return "network.host_local" if any(marker in cmd.lower() for marker in local_markers) else "network.public"
+
+    @staticmethod
+    def _command_domain_capabilities(cmd: str) -> set[str]:
+        """Classify the explicitly surfaced policy domains of an exec request."""
+
+        compact = " ".join(cmd.split()).lower()
+        required: set[str] = set()
+        if re.search(r"\b(?:npm|pnpm|yarn|bun|pip|uv|poetry|cargo|go)\s+(?:install|add|sync|tidy)\b", compact):
+            required.add("deps.install")
+        if re.search(r"\b(?:alembic\s+upgrade|prisma\s+db\s+(?:push|migrate)|\w*migrate\b)", compact):
+            required.add("db.migrate")
+        if re.search(r"\bgit\s+(?:branch|switch|checkout\s+-b)\b", compact):
+            required.add("git.branch")
+        if re.search(r"\bgit\s+commit\b", compact):
+            required.add("git.commit")
+        if re.search(r"\bgit\s+push\b", compact):
+            required.add("git.push")
+        return required
+
+    def _profile_command_capabilities(self, cmd: str, args: dict[str, Any], registered_task: Any = None) -> set[str]:
+        required = {"exec.registered" if registered_task is not None else "exec.arbitrary"}
+        required.update(self._command_domain_capabilities(cmd))
+        network = self._network_capability(cmd, args)
+        if network:
+            required.add(network)
+        env = args.get("env", {})
+        if isinstance(env, dict) and any(is_filtered_env_var(str(key), str(value)) for key, value in env.items()):
+            required.add("env.sensitive")
+        return required
+
+    def _profile_authorize_command(
+        self,
+        action: str | list[str],
+        args: dict[str, Any],
+        *,
+        registered_task: Any = None,
+        task_id: str = "",
+    ) -> set[str] | dict[str, Any]:
+        cmd = action if isinstance(action, str) else " ".join(action)
+        self._check_command_paths(cmd)
+        if self._contains_always_denied_command(cmd):
+            raise ToolFailure(
+                "ACCESS_DENIED",
+                "The requested executable is unconditionally denied by the runtime policy.",
+                category="security",
+            )
+        required = self._profile_command_capabilities(cmd, args, registered_task)
+        decision = self._policy_decision_for_capabilities(required)
+        if decision == "deny":
+            blocked = sorted(capability for capability in required if policy_decision(self.policy_profile, capability, self.policy_rules) == "deny")
+            raise ToolFailure(
+                "ACCESS_DENIED",
+                "Operation is disabled by the active policy profile.",
+                category="security",
+                details={"capabilities": blocked},
+            )
+        from .approval import ApprovalEngine
+
+        workdir = self._operation_workdir(args)
+        approval_engine = ApprovalEngine()
+        approval_id = args.get("approval_id")
+        if approval_id:
+            approved = set(
+                approval_engine.consume(
+                    str(approval_id),
+                    action,
+                    str(workdir.path),
+                    env=args.get("env", {}),
+                    task_id=task_id,
+                    network=any(capability.startswith("network.") for capability in required),
+                    sandbox=True,
+                    sandbox_id=self.server_instance_id,
+                )
+            )
+            return approved | required
+        if decision == "ask":
+            return approval_engine.request_approval(
+                action=action,
+                cwd=str(workdir.path),
+                reason="Permission required by the active policy profile.",
+                risk="high" if required & {"env.sensitive", "git.push", "db.migrate"} else "medium",
+                network=any(capability.startswith("network.") for capability in required),
+                env=args.get("env", {}),
+                task_id=task_id,
+                sandbox=True,
+                sandbox_id=self.server_instance_id,
+                capabilities=sorted(required),
+            )
+        return required
+
+    def _profile_authorize_operation(
+        self, capability: str, args: dict[str, Any], action: str
+    ) -> dict[str, Any] | None:
+        """Authorize a non-exec capability without routing through legacy modes."""
+
+        decision = self._policy_decision_for_capabilities({capability})
+        if decision == "deny":
+            raise ToolFailure(
+                "ACCESS_DENIED",
+                "Operation is disabled by the active policy profile.",
+                category="security",
+                details={"capabilities": [capability]},
+            )
+        if decision == "auto":
+            return None
+        from .approval import ApprovalEngine
+
+        approval_engine = ApprovalEngine()
+        approval_id = args.get("approval_id")
+        if approval_id:
+            approval_engine.consume(
+                str(approval_id), action, str(self.workspace.root), sandbox_id=self.server_instance_id, capabilities=[capability]
+            )
+            return None
+        return approval_engine.request_approval(
+            action=action,
+            cwd=str(self.workspace.root),
+            reason="Permission required by the active policy profile.",
+            risk="medium",
+            network=False,
+            sandbox_id=self.server_instance_id,
+            capabilities=[capability],
+        )
+
+    def _profile_exec_command(self, args: dict[str, Any]) -> dict[str, Any]:
+        cmd = args.get("cmd", "")
+        if not isinstance(cmd, str) or not cmd:
+            raise ToolFailure("INVALID_ARGUMENT", "cmd is required and must be a string.", category="validation")
+        registered_task = self._registered_direct_task(cmd)
+        authorized = self._profile_authorize_command(cmd, args, registered_task=registered_task, task_id=str(args.get("task_id", "")))
+        if isinstance(authorized, dict):
+            return authorized
+        internal_args = dict(args)
+        internal_args.pop("approval_id", None)
+        internal_args.update(
+            {
+                "approval_class": "ALLOW",
+                "_policy_authorized": True,
+                "_approved_capabilities": sorted(authorized),
+                "_resolved_workdir": self._operation_workdir(args).path,
+                "_network_capability": self._network_capability(cmd, args),
+            }
+        )
+        return self._execute_command_legacy(internal_args)
+
     def exec_command(self, args: dict[str, Any]) -> dict[str, Any]:
+        if self._profile_managed:
+            return self._profile_exec_command(args)
         cmd = args.get("cmd", "")
         if not isinstance(cmd, str) or not cmd:
             raise ToolFailure("INVALID_ARGUMENT", "cmd is required and must be a string.", category="validation")
@@ -2609,9 +2815,14 @@ class Runtime:
         max_output_bytes = int(args.get("max_output_bytes", 65536))
         tty = bool(args.get("tty", False))
         stdin_text = str(args.get("stdin", ""))
+        approved_capabilities = set(approved_caps)
         env = self._command_env(
             args.get("env", {}),
-            allow_sensitive="sensitive_env" in set(approved_caps),
+            allow_sensitive=(
+                "sensitive_env" in approved_capabilities
+                or "env.sensitive" in approved_capabilities
+                or (self._profile_managed and self._policy_decision_for_capabilities({"env.sensitive"}) == "auto")
+            ),
         )
         start = time.time()
         deadline = start + (timeout_ms / 1000.0)
@@ -2651,7 +2862,18 @@ class Runtime:
             # remain compatible with the trusted host execution contract.
             sandbox_workdir = workdir.path
             
-        allow_network = "network" in approved_caps or (network_required and "network" in approved_caps) or self.permission_mode == "trusted"
+        network_capability = args.get("_network_capability")
+        allow_network = (
+            "network" in approved_capabilities
+            or "network.public" in approved_capabilities
+            or "network.host_local" in approved_capabilities
+            or (
+                self._profile_managed
+                and isinstance(network_capability, str)
+                and self._policy_decision_for_capabilities({network_capability}) == "auto"
+            )
+            or (not self._profile_managed and self.permission_mode == "trusted")
+        )
         bwrap_args = self.sandbox.get_bwrap_args(allow_network=allow_network) if bwrap_available else []
         if isinstance(cmd, str):
             actual_cmd = (["cmd.exe", "/d", "/s", "/c", cmd] if os.name == "nt" else ["/bin/sh", "-c", cmd])
@@ -2790,6 +3012,12 @@ class Runtime:
         granted_capabilities: set[str] | None = None,
     ) -> None:
         granted = granted_capabilities or set()
+        if self._profile_managed:
+            # Profile decisions and approvals were resolved before command
+            # execution. Keep the non-negotiable path validation here, but do
+            # not reapply the retired safe/trusted/dangerous gates.
+            self._check_command_paths(cmd)
+            return
         if self.dangerously_skip_all_permissions:
             return
         self._check_command_paths(cmd)
@@ -3749,6 +3977,10 @@ class Runtime:
         return {"workspace": str(self.workspace.root)}
         
     def read_files(self, args: dict[str, Any]) -> dict[str, Any]:
+        if self._profile_managed:
+            approval = self._profile_authorize_operation("workspace.read", args, "read_files")
+            if approval is not None:
+                return approval
         raw_paths = args.get("paths", [])
         if not isinstance(raw_paths, list):
             raise ToolFailure("INVALID_ARGUMENT", "paths argument must be a list of path strings.", category="validation")
@@ -3798,6 +4030,36 @@ class Runtime:
         template = self.task_registry.get_task(task_id)
         if not template:
             raise ToolFailure("NOT_FOUND", f"Task '{task_id}' not found.", category="validation")
+        if self._profile_managed:
+            cwd = self._operation_workdir(args)
+            if template.cwd_policy == "workspace_root" and cwd.path != self.workspace.root:
+                raise ToolFailure("ACCESS_DENIED", f"Task '{task_id}' only runs at the workspace root.", category="security")
+            cmd_argv = self.task_registry.build_argv(template, args)
+            exec_args = {
+                "cwd": cwd.display,
+                "timeout_ms": args.get("timeout_ms", 30000),
+                "yield_time_ms": args.get("yield_time_ms", 10000),
+                "max_output_bytes": args.get("max_output_bytes", 65536),
+                "env": self._task_env(args.get("env", {})),
+                "approval_id": args.get("approval_id"),
+                "network_required": template.network_requirement,
+            }
+            authorized = self._profile_authorize_command(
+                cmd_argv,
+                exec_args,
+                registered_task=template,
+                task_id=task_id,
+            )
+            if isinstance(authorized, dict):
+                return authorized
+            exec_args.update(
+                {
+                    "_policy_authorized": True,
+                    "_approved_capabilities": sorted(authorized),
+                    "_network_capability": self._network_capability(" ".join(cmd_argv), exec_args),
+                }
+            )
+            return self._execute_task_argv(cmd_argv, exec_args, authorized)
         if template.approval_class == "DENY":
             raise ToolFailure("ACCESS_DENIED", f"Task '{task_id}' is unconditionally denied.", category="security")
         cwd = self._operation_workdir(args)
@@ -6036,6 +6298,20 @@ def run_http(args: argparse.Namespace) -> int:
         runtime_policy = runtime_policy_from_args(args)
     except ValueError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+    active_profile = runtime_policy.policy_profile or legacy_profile(runtime_policy.permission_mode)
+    server_capability = "server.loopback" if is_loopback_bind_host(str(args.host)) else "server.public"
+    server_decision = policy_decision(
+        active_profile,
+        server_capability,
+        policy_rules_from_config_file(os.environ.get("DEVMCP_POLICY_CONFIG_FILE"), active_profile),
+    )
+    if server_decision != "auto":
+        print(
+            f"ERROR: {server_capability} is {server_decision} in the active policy profile. "
+            "Select a profile or Custom rule that auto-allows this server bind.",
+            file=sys.stderr,
+        )
         return 2
 
     oauth_config: OAuthConfig | None = None

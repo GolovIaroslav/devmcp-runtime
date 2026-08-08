@@ -7,7 +7,7 @@ on:
         description: Docker image that contains coding-tools-mcp.
         required: false
         type: string
-        default: ghcr.io/xytom/coding-tools-mcp-sandbox:latest
+        default: ghcr.io/goloviaroslav/devmcp-runtime-sandbox:latest
       port:
         description: Local MCP port exposed on the GitHub Actions runner.
         required: false
@@ -61,7 +61,7 @@ on:
         description: Docker image that contains coding-tools-mcp.
         required: true
         type: string
-        default: ghcr.io/xytom/coding-tools-mcp-sandbox:latest
+        default: ghcr.io/goloviaroslav/devmcp-runtime-sandbox:latest
       port:
         description: Local MCP port exposed on the GitHub Actions runner.
         required: true

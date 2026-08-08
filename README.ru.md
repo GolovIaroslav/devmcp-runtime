@@ -22,12 +22,22 @@ DevMCP Runtime даёт MCP-клиенту локальное рабочее п�
 Нужны Python 3.11+, Git и bubblewrap (`bwrap`). Tunnel-клиент необязателен для
 локальной работы.
 
+До первой публикации в PyPI устанавливайте проект напрямую из текущего
+репозитория:
+
 ```bash
-uv tool install devmcp-runtime
+uv tool install git+https://github.com/GolovIaroslav/test.git
 devmcp setup --workspace /абсолютный/путь/к/проекту --no-tunnel
 devmcp doctor
 devmcp status
 devmcp ui
+```
+
+После намеренной публикации `devmcp-runtime` в PyPI с настроенным trusted
+publishing release-команда будет такой:
+
+```bash
+uv tool install devmcp-runtime
 ```
 
 Панель откроется на `http://127.0.0.1:47158`, локальный MCP-сервер использует

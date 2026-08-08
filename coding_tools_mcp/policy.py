@@ -1,8 +1,9 @@
 """Data-driven permission profiles for the public DevMCP Runtime surface.
 
 The low-level MCP runtime keeps its older ``safe``/``trusted`` execution modes
-for backwards compatibility.  This module is the stable, vendor-neutral
-policy vocabulary used by configuration, the CLI, and the local UI.
+as compatibility presets. This module is the authoritative, vendor-neutral
+policy vocabulary used by configuration, the CLI, the local UI, and runtime
+capability gates.
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ from typing import Any
 PROFILE_NAMES = ("safe", "balanced", "power", "custom")
 DECISIONS = ("auto", "ask", "deny")
 DEFAULT_PROFILE = "balanced"
+UNIMPLEMENTED_CAPABILITIES = frozenset({"agent.delegate"})
 
 CAPABILITIES = (
     "workspace.read",
@@ -31,7 +33,6 @@ CAPABILITIES = (
     "server.public",
     "git.branch",
     "git.commit",
-    "git.branch",
     "git.push",
     "env.sensitive",
     "agent.delegate",
@@ -46,11 +47,10 @@ def _profile(auto: set[str], ask: set[str], deny: set[str]) -> dict[str, str]:
     return result
 
 
-_FLOOR_DENY = {
-    "server.public",
-    "env.sensitive",
-    "agent.delegate",
-}
+# Profiles do not contain hidden product-policy denials. Real host-boundary
+# protections (auth, loopback defaults, bwrap, path validation, and environment
+# filtering) are enforced by the runtime independently of this matrix.
+_FLOOR_DENY: set[str] = set()
 
 _SAFE_AUTO = {
     "workspace.read",
@@ -100,7 +100,7 @@ _PROFILES: dict[str, dict[str, str]] = {
             "git.commit",
             "workspace.patch_destructive",
         },
-        {"git.push", "server.public"},
+        {"git.push", "server.public", "env.sensitive"},
         _FLOOR_DENY,
     ),
 }
@@ -125,8 +125,8 @@ def validate_rules(rules: dict[str, Any]) -> dict[str, str]:
         value = str(rules.get(capability, "deny")).lower()
         if value not in DECISIONS:
             raise ValueError(f"policy decision for {capability} must be auto, ask, or deny")
-        if capability in _FLOOR_DENY and value != "deny":
-            raise ValueError(f"minimum security floor denies {capability}")
+        if capability in UNIMPLEMENTED_CAPABILITIES and value != "deny":
+            raise ValueError(f"{capability} is not implemented in this runtime release")
         normalized[capability] = value
     unknown = sorted(set(rules) - set(CAPABILITIES))
     if unknown:
@@ -145,3 +145,18 @@ def decision(profile: str, capability: str, custom: dict[str, Any] | None = None
     if capability not in rules:
         raise ValueError(f"unknown policy capability: {capability}")
     return rules[capability]
+
+
+def legacy_profile(permission_mode: str) -> str:
+    """Map the retired execution modes to a profile when no profile was selected.
+
+    The mapping is deliberately used only as a compatibility default. An
+    explicitly selected profile always wins over a legacy command-line mode.
+    """
+
+    mode = permission_mode.strip().lower()
+    mapping = {"safe": "safe", "trusted": "power", "dangerous": "power"}
+    try:
+        return mapping[mode]
+    except KeyError as exc:
+        raise ValueError(f"unknown legacy permission mode: {permission_mode}") from exc

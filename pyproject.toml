@@ -12,7 +12,7 @@ dependencies = [
 ]
 readme = "README.md"
 license = { file = "LICENSE" }
-authors = [{ name = "Coding Tools MCP Contributors" }]
+authors = [{ name = "DevMCP Runtime Contributors" }]
 classifiers = [
   "License :: OSI Approved :: Apache Software License",
 ]
@@ -43,6 +43,9 @@ gui = [
 ]
 
 [project.scripts]
+devmcp-runtime = "coding_tools_mcp.server:main"
+devmcp-desktop = "mcp_desktop_client.app:main"
+# Compatibility launchers retained for existing local installations.
 coding-tools-mcp = "coding_tools_mcp.server:main"
 coding-tools-mcp-desktop = "mcp_desktop_client.app:main"
 devmcp = "apps.devmcp.cli:main"

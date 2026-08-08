@@ -1,6 +1,6 @@
 const JSON_CONTENT_TYPE = "application/json; charset=utf-8";
 const DEFAULT_WORKFLOW_ID = "start-sandbox.yml";
-const DEFAULT_IMAGE = "ghcr.io/xytom/coding-tools-mcp-sandbox:latest";
+const DEFAULT_IMAGE = "ghcr.io/goloviaroslav/devmcp-runtime-sandbox:latest";
 const DEFAULT_PORT = "8765";
 const DEFAULT_DURATION_MINUTES = "120";
 const DEFAULT_PERMISSION_MODE = "trusted";

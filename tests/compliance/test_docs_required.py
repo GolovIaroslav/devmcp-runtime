@@ -84,7 +84,7 @@ class RequiredDocsTests(unittest.TestCase):
     def test_docs_contain_required_operational_topics(self) -> None:
         expectations = {
             "README.md": ["Quickstart", "Safety Boundary", "Dogfood", "SWE-bench"],
-            "SECURITY.md": ["Linux Landlock", "Environment Scrubbing", "Session Lifecycle"],
+            "SECURITY.md": ["bubblewrap", "Residual risk", "GitHub Private Vulnerability"],
             "COMPLIANCE.md": ["make compliance", "required_tools", "not_measured"],
             "BENCHMARK.md": ["make dogfood-smoke", "make benchmark-latency", "PREFLIGHT_ONLY", "swebench-official-attempt"],
             "docs/ci-and-tests.md": ["make ci", "workflow", "swebench-lite"],
@@ -112,7 +112,6 @@ class RequiredDocsTests(unittest.TestCase):
             "make test",
             "make test-protocol",
             "make test-integration",
-            "make check-npm-launcher",
             "make dogfood-smoke",
             "make benchmark-latency",
             "make benchmark-smoke",
@@ -128,7 +127,7 @@ class RequiredDocsTests(unittest.TestCase):
                 self.assertIn(needle, swebench)
 
         docker_image = (ROOT / ".github/workflows/docker-image.yml").read_text(encoding="utf-8")
-        for needle in ("docker/build-push-action", "ghcr.io", "coding-tools-mcp-sandbox"):
+        for needle in ("docker/build-push-action", "ghcr.io", "devmcp-runtime-sandbox"):
             with self.subTest(workflow="docker-image", needle=needle):
                 self.assertIn(needle, docker_image)
 
@@ -141,14 +140,11 @@ class RequiredDocsTests(unittest.TestCase):
         for needle in (
             'tags: ["v*"]',
             "scripts/check_release_versions.py",
-            "./.github/workflows/compliance.yml",
-            "./.github/workflows/real-workloads.yml",
-            "./.github/workflows/swebench-lite.yml",
-            "Verify wheel contents and installation",
-            "pypa/gh-action-pypi-publish",
-            "npm@11.18.0",
-            "npm publish ./dist/*.tgz --access public --provenance",
-            "gh release create",
+            "workflow_dispatch",
+            "gitleaks/gitleaks-action@v3.0.0",
+            "Build source and wheel distributions",
+            "Verify a clean wheel installation",
+            "Upload release artifacts",
         ):
             with self.subTest(workflow="release", needle=needle):
                 self.assertIn(needle, release)

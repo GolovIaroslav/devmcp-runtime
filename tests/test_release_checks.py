@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -16,28 +15,18 @@ class ReleaseMetadataTests(unittest.TestCase):
         root: Path,
         *,
         project_version: str = "0.2.0",
-        module_version: str = "0.2.0",
-        npm_version: str = "0.1.0",
         changelog: str = "# Changelog\n\n## 0.2.0 - 2026-07-24\n",
     ) -> None:
-        (root / "coding_tools_mcp").mkdir(parents=True)
-        (root / "npm" / "coding-tools-mcp").mkdir(parents=True)
         (root / "pyproject.toml").write_text(
             f'[project]\nversion = "{project_version}"\n', encoding="utf-8"
         )
-        (root / "coding_tools_mcp" / "__init__.py").write_text(
-            f'__version__ = "{module_version}"\n', encoding="utf-8"
-        )
-        (root / "npm" / "coding-tools-mcp" / "package.json").write_text(
-            json.dumps({"version": npm_version}), encoding="utf-8"
-        )
         (root / "CHANGELOG.md").write_text(changelog, encoding="utf-8")
 
-    def test_release_metadata_accepts_matching_stable_versions(self) -> None:
+    def test_release_metadata_accepts_matching_python_version_without_npm_launcher(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             self._write_release_tree(root)
-            self.assertEqual(validate_release(root, "v0.2.0"), ("0.2.0", "0.1.0"))
+            self.assertEqual(validate_release(root, "v0.2.0"), "0.2.0")
 
     def test_release_metadata_rejects_unreleased_section(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -49,12 +38,15 @@ class ReleaseMetadataTests(unittest.TestCase):
             with self.assertRaisesRegex(SystemExit, "Unreleased"):
                 validate_release(root, "v0.2.0")
 
-    def test_release_metadata_rejects_prerelease_npm_version(self) -> None:
+    def test_release_metadata_does_not_require_or_inspect_an_old_npm_launcher(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            self._write_release_tree(root, npm_version="0.1.0-beta.1")
-            with self.assertRaisesRegex(SystemExit, "not stable"):
-                validate_release(root, "v0.2.0")
+            self._write_release_tree(root)
+            (root / "npm" / "coding-tools-mcp").mkdir(parents=True)
+            (root / "npm" / "coding-tools-mcp" / "package.json").write_text(
+                '{"name":"coding-tools-mcp","version":"0.1.0"}', encoding="utf-8"
+            )
+            self.assertEqual(validate_release(root, "v0.2.0"), "0.2.0")
 
 
 class FinalAuditTests(unittest.TestCase):

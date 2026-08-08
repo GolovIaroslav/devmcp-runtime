@@ -1,0 +1,10 @@
+# Reviewed historical false positives only. These fingerprints identify a
+# documented public PostHog write key and Docker smoke-test bearer fixture;
+# they do not suppress current-tree or future-history findings.
+18eed4bec74b11d632fdac3363a1c2da001a25fb:coding_tools_mcp/telemetry.py:generic-api-key:46
+5074e7d0598a519ad78a25ab2d9563d5f157c907:.github/workflows/docker-smoke.yml:curl-auth-header:38
+5074e7d0598a519ad78a25ab2d9563d5f157c907:.github/workflows/docker-smoke.yml:curl-auth-header:48
+# Same reviewed public PostHog write key in the current source and a locally
+# generated build copy; future keys have distinct fingerprints and still fail.
+coding_tools_mcp/telemetry.py:generic-api-key:46
+build/lib/coding_tools_mcp/telemetry.py:generic-api-key:46
