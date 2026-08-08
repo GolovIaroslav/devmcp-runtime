@@ -1,14 +1,16 @@
 from __future__ import annotations
 
+import concurrent.futures
 import os
-import pty
 import signal
 import subprocess
 import threading
 import time
-import concurrent.futures
 from dataclasses import dataclass, field
 from typing import Any, BinaryIO
+
+from .errors import ToolFailure
+from .textutils import DEFAULT_MAX_LINES, TextTruncation, truncate_text_tail
 
 subprocess._USE_POSIX_SPAWN = False
 
@@ -16,9 +18,6 @@ _spawner_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_
 
 def _do_spawn(*args: Any, **kwargs: Any) -> subprocess.Popen[bytes]:
     return subprocess.Popen(*args, **kwargs)
-
-from .errors import ToolFailure
-from .textutils import DEFAULT_MAX_LINES, TextTruncation, truncate_text_tail
 
 
 SESSION_BUFFER_BYTES = 524_288
