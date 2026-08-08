@@ -67,7 +67,7 @@ def _render_error(payload: dict[str, Any]) -> str:
 
 def _render_server_info(payload: dict[str, Any]) -> str:
     return (
-        f"{payload.get('server', 'coding-tools-mcp')} {payload.get('version', 'unknown')}\n"
+        f"{payload.get('server', 'devmcp-runtime')} {payload.get('version', 'unknown')}\n"
         f"Workspace: {payload.get('workspace', '.')}"
     )
 

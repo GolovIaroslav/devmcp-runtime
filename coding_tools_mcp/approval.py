@@ -14,6 +14,7 @@ from .errors import ToolFailure
 
 
 POLICY_VERSION = "v4"
+DEFAULT_EXPIRED_RETENTION_SECONDS = 7 * 24 * 60 * 60
 
 
 def _normalise_cwd(cwd: str | os.PathLike[str]) -> str:
@@ -143,10 +144,15 @@ class ApprovalEngine:
             self.db_path = db_path
             self.config_dir = db_path.parent
         else:
-            self.config_dir = Path.home() / ".config" / "chatgpt-dev-runtime"
-            self.db_path = self.config_dir / "approvals.db"
+            from .config import ensure_dirs, migrate_legacy, paths
+
+            selected = ensure_dirs(paths())
+            migrate_legacy(selected)
+            self.config_dir = selected.root
+            self.db_path = selected.approvals_db
         self.config_dir.mkdir(parents=True, exist_ok=True)
         self._init_db()
+        self.mark_expired()
 
     def _init_db(self) -> None:
         if not self.db_path.exists():
@@ -315,6 +321,7 @@ class ApprovalEngine:
             return status
 
     def list_pending(self) -> list[dict[str, Any]]:
+        self.mark_expired()
         with sqlite3.connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
@@ -330,6 +337,37 @@ class ApprovalEngine:
                     item["capabilities"] = []
                 result.append(item)
             return result
+
+    def mark_expired(self) -> int:
+        """Transition only expired pending/approved requests; never touch active ones."""
+
+        now = time.time()
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute(
+                "UPDATE requests SET status = 'expired' WHERE status IN ('pending', 'approved') AND expires_at < ?",
+                (now,),
+            )
+            return int(cursor.rowcount)
+
+    def prune_expired(self, *, older_than_seconds: float = DEFAULT_EXPIRED_RETENTION_SECONDS) -> int:
+        """Delete only expired history older than the requested retention window."""
+
+        cutoff = time.time() - max(0.0, float(older_than_seconds))
+        self.mark_expired()
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute(
+                "DELETE FROM requests WHERE status = 'expired' AND expires_at < ?",
+                (cutoff,),
+            )
+            return int(cursor.rowcount)
+
+    def clear_expired(self) -> int:
+        """Explicitly clear all expired records, leaving active records untouched."""
+
+        self.mark_expired()
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute("DELETE FROM requests WHERE status = 'expired'")
+            return int(cursor.rowcount)
 
     def approve(self, req_id: str, pattern: Optional[str] = None) -> None:
         now = time.time()

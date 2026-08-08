@@ -13,6 +13,31 @@ from pathlib import Path, PurePosixPath
 from .errors import ToolFailure
 
 
+@dataclass(frozen=True)
+class SandboxBackend:
+    """Describes a selectable execution backend without hiding its limits."""
+
+    name: str
+    secure: bool
+    available: bool
+    description: str
+
+
+def detect_sandbox_backend(preference: str = "bwrap") -> SandboxBackend:
+    """Return backend facts; never silently downgrade a requested backend."""
+
+    normalized = preference.strip().lower()
+    if normalized == "bwrap":
+        available = shutil.which("bwrap") is not None
+        return SandboxBackend("bwrap", True, available, "bubblewrap namespace and filesystem isolation")
+    if normalized == "podman":
+        available = shutil.which("podman") is not None
+        return SandboxBackend("podman", True, available, "optional rootless Podman backend; verify before enabling")
+    if normalized in {"unsafe", "host"}:
+        return SandboxBackend("unsafe", False, True, "UNSAFE HOST MODE: explicit local execution without sandbox isolation")
+    raise ToolFailure("INVALID_ARGUMENT", f"Unknown sandbox backend: {preference}", category="validation")
+
+
 def _relative_parts(raw_path: str) -> tuple[str, ...]:
     if not isinstance(raw_path, str) or not raw_path or "\x00" in raw_path:
         raise ToolFailure("INVALID_ARGUMENT", "Sandbox path must be a non-empty relative string.", category="validation")

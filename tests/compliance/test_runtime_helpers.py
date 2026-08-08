@@ -426,7 +426,7 @@ class RuntimeHelperTests(unittest.TestCase):
                 patch.object(server_module.os, "name", "nt"),
                 patch.dict(server_module.os.environ, host_env, clear=True),
             ):
-                env = runtime._command_env({"CUSTOM": "ok", "OPENAI_API_KEY": "sk-test-secret-value"})
+                env = runtime._command_env({"CUSTOM": "ok", "OPENAI_API_KEY": "fixture-openai-key-value"})
 
             self.assertEqual(env.get("Path"), host_env["Path"])
             self.assertEqual(env.get("PATHEXT"), host_env["PATHEXT"])
@@ -564,7 +564,7 @@ class RuntimeHelperTests(unittest.TestCase):
                 "LIBPATH": r"C:\VS\VC\Tools\MSVC\libpath",
                 "CUDA_PATH": "/opt/cuda",
                 "ONEAPI_ROOT": "/opt/intel/oneapi",
-                "OPENAI_API_KEY": "sk-test-secret-value",
+                "OPENAI_API_KEY": "fixture-openai-key-value",
                 "PYTHONPATH": "/tmp/injected",
                 "DYLD_LIBRARY_PATH": "/tmp/injected",
             }
@@ -588,13 +588,13 @@ class RuntimeHelperTests(unittest.TestCase):
                 shell_env_policy=ShellEnvPolicy(inherit="all"),
             )
             host_env = {
-                "OPENAI_API_KEY": "sk-test-secret-value",
+                "OPENAI_API_KEY": "fixture-openai-key-value",
                 "LD_PRELOAD": "/tmp/injected.so",
             }
             with patch.dict(server_module.os.environ, host_env, clear=True):
                 env = runtime._command_env({})
 
-            self.assertEqual(env.get("OPENAI_API_KEY"), "sk-test-secret-value")
+            self.assertEqual(env.get("OPENAI_API_KEY"), "fixture-openai-key-value")
             self.assertEqual(env.get("LD_PRELOAD"), "/tmp/injected.so")
 
     def test_runtime_root_stays_posix_tmp_when_process_tmpdir_is_workspace_local(self) -> None:
@@ -714,10 +714,10 @@ class RuntimeHelperTests(unittest.TestCase):
             dangerous_runtime = Runtime(workspace, permission_mode="dangerous")
             dangerous_runtime._check_command_policy("curl https://example.com", {})
 
-            filtered_env = default_runtime._command_env({"OPENAI_API_KEY": "sk-test-secret-value"})
-            dangerous_env = dangerous_runtime._command_env({"OPENAI_API_KEY": "sk-test-secret-value"})
+            filtered_env = default_runtime._command_env({"OPENAI_API_KEY": "fixture-openai-key-value"})
+            dangerous_env = dangerous_runtime._command_env({"OPENAI_API_KEY": "fixture-openai-key-value"})
             self.assertNotIn("OPENAI_API_KEY", filtered_env)
-            self.assertEqual(dangerous_env.get("OPENAI_API_KEY"), "sk-test-secret-value")
+            self.assertEqual(dangerous_env.get("OPENAI_API_KEY"), "fixture-openai-key-value")
 
     def test_landlock_device_access_includes_truncate_and_ioctl_bits(self) -> None:
         handled = server_module.landlock_handled_access(5)

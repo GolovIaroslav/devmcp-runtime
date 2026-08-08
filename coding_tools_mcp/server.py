@@ -24,6 +24,7 @@ import sys
 import tempfile
 import threading
 import time
+import tomllib
 import urllib.parse
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
@@ -32,6 +33,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, cast
 
 from . import __version__
+from .audit import append_tool_event
 from .envutils import ENV_PREFIX, truthy_env
 from .errors import JsonRpcError, ToolFailure
 from .landlock_exec import libc_syscall
@@ -76,6 +78,7 @@ from .protocol import (
     validate_rpc_envelope,
 )
 from .project_context import ProjectContext, load_project_context
+from .policy import PROFILE_NAMES, decision as policy_decision, effective_rules, validate_rules
 from .telemetry import SessionTelemetry
 from .textutils import DEFAULT_MAX_LINES, TextTruncation, truncate_text_head
 from .tool_results import make_tool_result
@@ -83,8 +86,9 @@ from .transport_http import HTTPSessionManager
 from .transport_stdio import serve_stdio
 
 
-SERVER_NAME = "coding-tools-mcp"
-SERVER_TITLE = "Coding Tools MCP"
+SERVER_NAME = "devmcp-runtime"
+SERVER_TITLE = "DevMCP Runtime"
+TOOL_SCHEMA_VERSION = "1.0"
 MCP_ENDPOINT_PATH = "/mcp"
 DEFAULT_EXCLUDED_NAMES = {
     ".git",
@@ -321,6 +325,7 @@ class RuntimePolicy:
     shell_env_policy: ShellEnvPolicy
     allow_network: bool
     fake_readonly_annotations: bool = False
+    policy_profile: str = "safe"
 
 
 AUTO_ALLOW_POLICY = {
@@ -545,7 +550,36 @@ def runtime_policy_from_args(args: argparse.Namespace) -> RuntimePolicy:
         shell_env_policy=shell_env_policy_from_args(args),
         allow_network=allow_network,
         fake_readonly_annotations=fake_readonly_annotations_from_args(args, permission_mode),
+        policy_profile=policy_profile_from_args(args),
     )
+
+
+def policy_profile_from_args(args: argparse.Namespace) -> str:
+    raw = getattr(args, "policy_profile", None) or os.environ.get("DEVMCP_POLICY_PROFILE") or "safe"
+    profile = str(raw).strip().lower()
+    if profile not in PROFILE_NAMES:
+        raise ValueError(f"policy profile must be one of: {', '.join(PROFILE_NAMES)}")
+    return profile
+
+
+def policy_rules_from_config_file(path: str | None, profile: str) -> dict[str, str] | None:
+    """Load only non-secret custom policy data for a configured server process."""
+
+    if profile != "custom" or not path:
+        return None
+    try:
+        with Path(path).expanduser().open("rb") as handle:
+            config = tomllib.load(handle)
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        raise ValueError(f"unable to read policy config file: {exc}") from exc
+    policy = config.get("policy", {})
+    custom = policy.get("custom", {}) if isinstance(policy, dict) else {}
+    if not isinstance(custom, dict):
+        raise ValueError("policy.custom must be a table")
+    try:
+        return validate_rules(custom)
+    except ValueError as exc:
+        raise ValueError(f"invalid custom policy: {exc}") from exc
 
 
 @dataclass(frozen=True)
@@ -717,7 +751,19 @@ def normalize_rel_display(path: Path, root: Path) -> str:
 
 
 def matches_any_glob(rel: str, patterns: list[str]) -> bool:
-    return any(fnmatch.fnmatch(rel, pattern) or PurePosixPath(rel).match(pattern) for pattern in patterns)
+    def matches(pattern: str) -> bool:
+        if pattern in {"**", "**/*"}:
+            return True
+        if fnmatch.fnmatch(rel, pattern) or PurePosixPath(rel).match(pattern):
+            return True
+        # Python's fnmatch does not treat **/ as an optional directory prefix,
+        # so a root-level file such as calc.py would be missed by **/*.py.
+        if pattern.startswith("**/"):
+            short = pattern.removeprefix("**/")
+            return fnmatch.fnmatch(rel, short) or PurePosixPath(rel).match(short)
+        return False
+
+    return any(matches(pattern) for pattern in patterns)
 
 
 def file_entry(path: Path, rel: str, path_stat: os.stat_result) -> dict[str, Any]:
@@ -1171,8 +1217,13 @@ class Runtime:
         project_context: ProjectContext | None = None,
         fake_readonly_annotations: bool = False,
         transport: str = "stdio",
+        policy_profile: str = "safe",
+        sandbox_backend: str = "bwrap",
+        max_removed_lines: int = 200,
+        max_removed_percent: float = 30.0,
+        policy_rules: dict[str, Any] | None = None,
     ) -> None:
-        from .sandbox import ExecutionSandbox
+        from .sandbox import ExecutionSandbox, detect_sandbox_backend
         from .tasks import TaskRegistry
         self.sandbox: ExecutionSandbox | None = None
         self.task_registry = TaskRegistry()
@@ -1192,6 +1243,20 @@ class Runtime:
                 details={"supported": list(PERMISSION_MODE_CHOICES)},
             )
         self.permission_mode = permission_mode
+        if policy_profile not in PROFILE_NAMES:
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                f"Unknown policy profile: {policy_profile}",
+                category="validation",
+                details={"supported": list(PROFILE_NAMES)},
+            )
+        self.policy_profile = policy_profile
+        self.policy_rules = validate_rules(policy_rules or {}) if policy_profile == "custom" else None
+        self.sandbox_backend = detect_sandbox_backend(sandbox_backend)
+        if max_removed_lines < 0 or max_removed_percent < 0:
+            raise ToolFailure("INVALID_ARGUMENT", "Patch risk thresholds cannot be negative.", category="validation")
+        self.max_removed_lines = max_removed_lines
+        self.max_removed_percent = max_removed_percent
         self.capabilities = PERMISSION_MODE_CAPABILITIES[permission_mode]
         self.dangerously_skip_all_permissions = self.capabilities.skip_all_permissions
         # Faking annotations is only defensible where the caller has already
@@ -1317,7 +1382,7 @@ class Runtime:
         return "enabled" if self.capabilities.secret_env_filter else "disabled"
 
     def landlock_enabled(self) -> bool:
-        return self.capabilities.landlock
+        return self.capabilities.landlock and self.sandbox_backend.name != "unsafe"
 
     def landlock_write_roots(self) -> list[Path]:
         return [self.runtime_dir]
@@ -1340,6 +1405,7 @@ class Runtime:
                 "name": SERVER_NAME,
                 "title": SERVER_TITLE,
                 "version": __version__,
+                "schemaVersion": TOOL_SCHEMA_VERSION,
             },
             "instructions": self.project_context.server_instructions(),
         }
@@ -1384,6 +1450,8 @@ class Runtime:
             "home": str(self.command_home_dir()),
             "tmpdir": str(self.command_tmp_dir()),
             "cache_dir": str(self.cache_dir),
+            "sandbox_backend": self.sandbox_backend.name,
+            "sandbox_secure": self.sandbox_backend.secure,
         }
 
     def _landlock_enforced(self, landlock: dict[str, Any]) -> bool:
@@ -1397,9 +1465,22 @@ class Runtime:
             "server": SERVER_NAME,
             "title": SERVER_TITLE,
             "version": __version__,
+            "schema_version": TOOL_SCHEMA_VERSION,
             "protocol_version": self.protocol_version,
             **self._exec_environment_summary(),
             "default_cwd": self.default_cwd_display(),
+            "policy_profile": self.policy_profile,
+            "policy_rules": effective_rules(self.policy_profile, self.policy_rules),
+            "patch_risk_thresholds": {
+                "max_removed_lines": self.max_removed_lines,
+                "max_removed_percent": self.max_removed_percent,
+            },
+            "sandbox_backend": {
+                "name": self.sandbox_backend.name,
+                "available": self.sandbox_backend.available,
+                "secure": self.sandbox_backend.secure,
+                "description": self.sandbox_backend.description,
+            },
             "auth_enabled": self.auth_enabled(),
             "dangerously_skip_all_permissions": self.dangerously_skip_all_permissions,
             "annotation_override": "fake_readonly" if self.fake_readonly_annotations else None,
@@ -1507,6 +1588,8 @@ class Runtime:
             warnings.append(
                 "tools/list annotations are faked as read-only; apply_patch and exec_command still mutate and execute"
             )
+        if self.sandbox_backend.name == "unsafe":
+            warnings.append("SANDBOX: UNSAFE HOST MODE")
         return {
             "ok": True,
             **self._exec_environment_summary(),
@@ -1542,6 +1625,13 @@ class Runtime:
             error_code=error.get("code"),
             duration_ms=duration_ms,
             truncated=bool(payload.get("truncated")),
+        )
+        append_tool_event(
+            name,
+            ok=bool(payload.get("ok")),
+            error_code=error.get("code"),
+            duration_ms=duration_ms,
+            policy_profile=self.policy_profile,
         )
         if os.environ.get(f"{ENV_PREFIX}_TRACE") != "1":
             return
@@ -2084,13 +2174,6 @@ class Runtime:
                 self._validate_patch_path(op.move_to, require_existing=False)
                 self.workspace.reject_write_symlink(op.move_to)
 
-            if op.kind == "delete":
-                overall_risk = "DENY"
-                raise ToolFailure("ACCESS_DENIED", "Delete file operations are unconditionally denied in patches.", category="security")
-            elif op.move_to or op.kind == "move":
-                overall_risk = "DENY"
-                raise ToolFailure("ACCESS_DENIED", "Move operations are unconditionally denied in patches.", category="security")
-
             if op.kind == "add":
                 target = self.workspace.resolve_for_write(op.path)
                 if target.existed:
@@ -2148,12 +2231,82 @@ class Runtime:
                 pct_rem = round((removed_existing_lines / orig_lines) * 100, 2) if orig_lines > 0 else 0.0
 
                 file_risk = "ALLOW"
-                if removed_existing_lines > 200 or pct_rem > 30.0:
+                if removed_existing_lines > self.max_removed_lines or pct_rem > self.max_removed_percent:
                     file_risk = "ASK"
 
                 staged[source.display] = StagedFile(source.display, source.path, updated_text, baseline, baseline.mode)
                 affected.append({"path": source.display, "operation": "update"})
                 summaries.append(f"M {source.display}")
+
+            elif op.kind == "delete":
+                source = self.workspace.resolve_existing(op.path)
+                if source.path.is_dir():
+                    raise ToolFailure("PATCH_FAILED", "Cannot delete a directory with Delete File.", category="validation")
+                operation_decision = policy_decision(self.policy_profile, "workspace.delete", self.policy_rules)
+                if operation_decision == "deny":
+                    raise ToolFailure("ACCESS_DENIED", "Delete is disabled by the active policy profile.", category="security")
+                baseline = FileBaseline.capture(source.path)
+                staged[source.display] = StagedFile(source.display, source.path, None, baseline, None)
+                original_text = (baseline.data or b"").decode("utf-8", errors="replace")
+                orig_lines = len(original_text.splitlines())
+                add_lines = 0
+                rem_lines = orig_lines
+                removed_existing_lines = orig_lines
+                pct_rem = 100.0 if orig_lines else 0.0
+                file_risk = "ASK" if operation_decision == "ask" else "ALLOW"
+                diff_chunks.append("".join(difflib.unified_diff(
+                    original_text.splitlines(keepends=True),
+                    [],
+                    fromfile="a/" + source.display,
+                    tofile="/dev/null",
+                )))
+                affected.append({"path": source.display, "operation": "delete"})
+                summaries.append(f"D {source.display}")
+
+            elif op.kind == "move":
+                if not op.move_to:
+                    raise ToolFailure("PATCH_FAILED", "Move target is required.", category="validation")
+                source = self.workspace.resolve_existing(op.path)
+                target = self.workspace.resolve_for_write(op.move_to)
+                if source.path.is_dir():
+                    raise ToolFailure("PATCH_FAILED", "Cannot move a directory with Move File.", category="validation")
+                if target.existed:
+                    raise ToolFailure("PATCH_FAILED", "Move target already exists.", category="validation")
+                operation_decision = policy_decision(self.policy_profile, "workspace.move", self.policy_rules)
+                if operation_decision == "deny":
+                    raise ToolFailure("ACCESS_DENIED", "Move is disabled by the active policy profile.", category="security")
+                baseline = FileBaseline.capture(source.path)
+                staged[source.display] = StagedFile(source.display, source.path, None, baseline, None)
+                staged[target.display] = StagedFile(
+                    target.display,
+                    target.path,
+                    baseline.text(source.display),
+                    FileBaseline.capture(target.path),
+                    baseline.mode,
+                )
+                orig_lines = len(baseline.text(source.display).splitlines())
+                add_lines = orig_lines
+                rem_lines = orig_lines
+                removed_existing_lines = 0
+                pct_rem = 0.0
+                file_risk = "ASK" if operation_decision == "ask" else "ALLOW"
+                diff_chunks.append("".join(difflib.unified_diff(
+                    baseline.text(source.display).splitlines(keepends=True),
+                    [],
+                    fromfile="a/" + source.display,
+                    tofile="/dev/null",
+                )))
+                diff_chunks.append("".join(difflib.unified_diff(
+                    [],
+                    baseline.text(source.display).splitlines(keepends=True),
+                    fromfile="/dev/null",
+                    tofile="b/" + target.display,
+                )))
+                affected.extend([
+                    {"path": source.display, "operation": "move_from"},
+                    {"path": target.display, "operation": "move_to"},
+                ])
+                summaries.append(f"M {source.display} -> {target.display}")
 
             total_additions += add_lines
             total_removals += rem_lines
@@ -2479,8 +2632,17 @@ class Runtime:
         # Windows has no bubblewrap. Permit process-only execution only when
         # the operator explicitly selected trusted mode; safe mode remains a
         # hard failure rather than silently losing the sandbox boundary.
-        bwrap_available = shutil.which("bwrap") is not None
-        if not bwrap_available and not (os.name == "nt" and self.permission_mode == "trusted"):
+        if self.sandbox_backend.name == "podman":
+            raise ToolFailure(
+                "SANDBOX_UNAVAILABLE",
+                "The optional Podman backend is detected but not implemented in this release.",
+                category="security",
+            )
+        bwrap_available = self.sandbox_backend.name == "bwrap" and shutil.which("bwrap") is not None
+        if self.sandbox_backend.name == "unsafe":
+            bwrap_available = False
+            sandbox_workdir = workdir.path
+        if self.sandbox_backend.name != "unsafe" and not bwrap_available and not (os.name == "nt" and self.permission_mode == "trusted"):
             raise ToolFailure("SANDBOX_UNAVAILABLE", "bwrap is required for execution sandbox but not found.", category="security")
         if not bwrap_available and os.name == "nt":
             # Windows has no bwrap equivalent in this runtime. This path is
@@ -5129,6 +5291,7 @@ def server_card_payload(runtime: Runtime, *, oauth_base_url: str | None = None) 
     mutating = [name for name in names if annotations[name].get("readOnlyHint") is not True]
     payload = {
         "protocolVersion": PROTOCOL_VERSION,
+        "schemaVersion": TOOL_SCHEMA_VERSION,
         "server": {
             "name": SERVER_NAME,
             "title": SERVER_TITLE,
@@ -5155,7 +5318,7 @@ def server_card_payload(runtime: Runtime, *, oauth_base_url: str | None = None) 
 
 
 class MCPHandler(http.server.BaseHTTPRequestHandler):
-    server_version = f"CodingToolsMCP/{__version__}"
+    server_version = f"DevMCPRuntime/{__version__}"
 
     @property
     def runtime(self) -> Runtime:
@@ -5233,6 +5396,9 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         normalized = posixpath.normpath(request_path)
         if normalized == "/.well-known/oauth-authorization-server":
             self.handle_oauth_as_metadata(head_only=head_only)
+            return
+        if normalized in {"/healthz", "/readyz"}:
+            self.send_json({"status": "ok", "ready": True, "version": __version__}, head_only=head_only)
             return
         if normalized == "/.well-known/oauth-protected-resource":
             self.handle_oauth_resource_metadata(head_only=head_only)
@@ -5430,9 +5596,9 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
     def send_unauthorized(self, *, head_only: bool = False) -> None:
         if self.runtime.oauth_config is not None:
             base = self.oauth_base_url()
-            www_auth = f'Bearer realm="coding-tools-mcp", resource_metadata="{base}/.well-known/oauth-protected-resource"'
+            www_auth = f'Bearer realm="devmcp-runtime", resource_metadata="{base}/.well-known/oauth-protected-resource"'
         else:
-            www_auth = 'Bearer realm="coding-tools-mcp"'
+            www_auth = 'Bearer realm="devmcp-runtime"'
         self.send_rpc_error(
             -32000,
             "Unauthorized",
@@ -5811,6 +5977,9 @@ def build_runtime(
     transport: str = "stdio",
 ) -> Runtime:
     workspace = Path(args.workspace or os.environ.get(f"{ENV_PREFIX}_WORKSPACE") or os.getcwd())
+    policy_rules = policy_rules_from_config_file(
+        os.environ.get("DEVMCP_POLICY_CONFIG_FILE"), runtime_policy.policy_profile
+    )
     runtime = Runtime(
         workspace,
         enable_view_image=args.enable_view_image,
@@ -5822,6 +5991,11 @@ def build_runtime(
         project_context=project_context,
         fake_readonly_annotations=runtime_policy.fake_readonly_annotations,
         transport=transport,
+        policy_profile=runtime_policy.policy_profile,
+        sandbox_backend=str(getattr(args, "sandbox_backend", "bwrap")),
+        max_removed_lines=int(getattr(args, "max_removed_lines", 200)),
+        max_removed_percent=float(getattr(args, "max_removed_percent", 30.0)),
+        policy_rules=policy_rules,
     )
     if emit_warning and runtime.capabilities.skip_all_permissions:
         print(
@@ -5848,6 +6022,16 @@ def run_http(args: argparse.Namespace) -> int:
         print(f"ERROR: {ENV_PREFIX}_AUTH_MODE must be one of: {supported}.", file=sys.stderr)
         return 2
     auth_token = args.auth_token or os.environ.get(f"{ENV_PREFIX}_AUTH_TOKEN") or None
+    token_file = getattr(args, "auth_token_file", None) or os.environ.get("DEVMCP_AUTH_TOKEN_FILE")
+    if not auth_token and token_file:
+        try:
+            auth_token = Path(token_file).expanduser().read_text(encoding="utf-8").strip() or None
+        except OSError as exc:
+            print(f"ERROR: unable to read MCP auth token file: {exc}", file=sys.stderr)
+            return 2
+        if not auth_token:
+            print("ERROR: MCP auth token file is empty.", file=sys.stderr)
+            return 2
     try:
         runtime_policy = runtime_policy_from_args(args)
     except ValueError as exc:
@@ -5948,7 +6132,11 @@ def run_http(args: argparse.Namespace) -> int:
         )
         return 2
 
-    runtime = build_runtime(args, runtime_policy, auth_token=auth_token, oauth_config=oauth_config, transport="http")
+    try:
+        runtime = build_runtime(args, runtime_policy, auth_token=auth_token, oauth_config=oauth_config, transport="http")
+    except (ToolFailure, ValueError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
 
     def runtime_factory() -> Runtime:
         return build_runtime(
@@ -5987,12 +6175,17 @@ def run_stdio(args: argparse.Namespace) -> int:
     except ValueError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
-    runtime = build_runtime(args, runtime_policy)
+    try:
+        runtime = build_runtime(args, runtime_policy)
+    except (ToolFailure, ValueError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
     return serve_stdio(runtime)
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Serve workspace-confined coding tools over MCP.")
+    parser.add_argument("--version", action="version", version=f"DevMCP Runtime {__version__}")
     parser.add_argument("--workspace", help="workspace root; defaults to CODING_TOOLS_MCP_WORKSPACE or cwd")
     parser.add_argument(
         "--host",
@@ -6010,6 +6203,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--auth-token",
         default=None,
         help=f"require Authorization: Bearer <token> on /mcp; defaults to {ENV_PREFIX}_AUTH_TOKEN",
+    )
+    parser.add_argument(
+        "--auth-token-file",
+        default=None,
+        help="read the bearer token from a 0600 file instead of exposing it in arguments or shell history",
     )
     parser.add_argument(
         "--oauth-mode",
@@ -6039,6 +6237,30 @@ def build_parser() -> argparse.ArgumentParser:
             "trusted allows local development network, shell expansion, and inline scripts; "
             "dangerous disables permission gates"
         ),
+    )
+    parser.add_argument(
+        "--policy-profile",
+        choices=PROFILE_NAMES,
+        default=None,
+        help="data-driven policy profile; defaults to DEVMCP_POLICY_PROFILE or safe for legacy direct launches",
+    )
+    parser.add_argument(
+        "--max-removed-lines",
+        type=int,
+        default=200,
+        help="existing lines removed before a patch requires approval",
+    )
+    parser.add_argument(
+        "--sandbox-backend",
+        choices=("bwrap", "podman", "unsafe"),
+        default="bwrap",
+        help="execution backend; bwrap is preferred, unsafe is explicit and visibly warned",
+    )
+    parser.add_argument(
+        "--max-removed-percent",
+        type=float,
+        default=30.0,
+        help="percentage of an existing file removed before a patch requires approval",
     )
     parser.add_argument(
         "--allow-network",

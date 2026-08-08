@@ -2,8 +2,8 @@ PYTHON ?= $(if $(wildcard .venv/bin/python),.venv/bin/python,python3)
 PROJECT_VERSION := $(shell $(PYTHON) -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
 RELEASE_TAG ?= v$(PROJECT_VERSION)
 COMPLIANCE_RUNNER := PYTHONDONTWRITEBYTECODE=1 $(PYTHON) -m tests.compliance.runner
-PYTHON_SOURCES := coding_tools_mcp apps/desktop-client/mcp_desktop_client tests benchmarks
-MYPY_TARGETS := coding_tools_mcp benchmarks/mcp_http.py benchmarks/runtime_latency.py benchmarks/swebench/run_smoke.py benchmarks/swebench/generate_reference_predictions.py benchmarks/real_workloads.py
+PYTHON_SOURCES := coding_tools_mcp apps/devmcp apps/desktop-client/mcp_desktop_client tests benchmarks
+MYPY_TARGETS := coding_tools_mcp apps/devmcp benchmarks/mcp_http.py benchmarks/runtime_latency.py benchmarks/swebench/run_smoke.py benchmarks/swebench/generate_reference_predictions.py benchmarks/real_workloads.py
 REPORT_FLAG ?= --report
 SWE_BENCH_ARGS ?=
 DOGFOOD_PORT ?= 18772
@@ -19,7 +19,7 @@ DESKTOP_PACKAGE := apps/desktop-client/mcp_desktop_client
 DESKTOP_TS := $(DESKTOP_PACKAGE)/locales/app_zh_CN.ts
 DESKTOP_QM := $(DESKTOP_PACKAGE)/locales/app_zh_CN.qm
 
-.PHONY: start lint typecheck test ci check-dispatch-inputs check-npm-launcher check-release compliance test-protocol test-integration test-mcp-contract test-tool-golden test-security test-e2e test-runtime-semantics test-docs-required test-schema-drift dogfood-mcp dogfood-runner dogfood-smoke benchmark-latency benchmark-smoke benchmark-real-workloads swebench-reference-predictions swebench-preflight swebench-evaluate desktop-i18n-update desktop-i18n-release desktop-i18n-check install-user publish-testpypi publish-pypi publish-all report
+.PHONY: start lint typecheck test ci check-dispatch-inputs check-npm-launcher check-release compliance test-protocol test-integration test-mcp-contract test-tool-golden test-security test-e2e test-runtime-semantics test-docs-required test-schema-drift test-release-prep test-gui secret-audit package-smoke dogfood-mcp dogfood-runner dogfood-smoke benchmark-latency benchmark-smoke benchmark-real-workloads swebench-reference-predictions swebench-preflight swebench-evaluate desktop-i18n-update desktop-i18n-release desktop-i18n-check install-user publish-testpypi publish-pypi publish-all report
 
 start:
 	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) -m coding_tools_mcp --workspace "$(MCP_WORKSPACE)" --host "$(MCP_HOST)" --port "$(MCP_PORT)" $(MCP_ARGS)
@@ -45,6 +45,27 @@ test:
 	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) -m unittest discover -s tests -p 'test_*.py'
 
 ci: lint typecheck test check-dispatch-inputs check-npm-launcher test-protocol test-integration test-docs-required test-schema-drift dogfood-smoke benchmark-latency benchmark-smoke
+
+test-release-prep:
+	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) -m unittest tests.test_release_prep
+
+test-gui:
+	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) -m pytest -q tests/gui
+
+secret-audit:
+	scripts/secret_audit.sh
+
+package-smoke:
+	set -euo pipefail; \
+	tmp_dir="$$(mktemp -d)"; \
+	trap 'rm -rf "$$tmp_dir"' EXIT; \
+	uv build --wheel --out-dir "$$tmp_dir"; \
+	uv venv "$$tmp_dir/venv"; \
+	wheel="$$(find "$$tmp_dir" -maxdepth 1 -name 'devmcp_runtime-*.whl' -print -quit)"; \
+	test -n "$$wheel"; \
+	uv pip install --python "$$tmp_dir/venv/bin/python" --no-deps "$$wheel"; \
+	"$$tmp_dir/venv/bin/devmcp" --version; \
+	"$$tmp_dir/venv/bin/python" -c 'import coding_tools_mcp; assert coding_tools_mcp.__version__ == "0.1.0-beta.1"'
 
 compliance:
 	$(COMPLIANCE_RUNNER) --suite all $(REPORT_FLAG)

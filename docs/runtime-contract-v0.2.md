@@ -256,7 +256,8 @@ Annotations: `{"title":"Apply patch","readOnlyHint":false,"destructiveHint":fals
 
 Supports `*** Add File` and `*** Update File` inside a
 `*** Begin Patch` / `*** End Patch` envelope. Delete and move operations are
-unconditionally denied. Preview returns a unified diff, line counts, removal
+parsed by the release policy layer: Safe and Balanced require local approval,
+while Power may allow them. Preview returns a unified diff, line counts, removal
 percentage, and risk classification. Small updates execute immediately; an
 update above either configured destructive threshold requires a single-use
 local out-of-band approval.

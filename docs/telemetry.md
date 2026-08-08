@@ -1,11 +1,17 @@
 # Telemetry
 
-coding-tools-mcp collects anonymous usage telemetry to answer two product
+DevMCP Runtime can collect anonymous usage telemetry to answer two product
 questions: how many installs are active, and which tools succeed, fail, or run
-slowly in the wild. Telemetry is enabled by default and can be disabled at any
-time; disabling it changes nothing else about the server.
+slowly in the wild. Telemetry is disabled by default and can be explicitly
+enabled with ``CODING_TOOLS_MCP_TELEMETRY=on``.
 
-## How to disable
+## How to enable or disable
+
+Opt in explicitly:
+
+```bash
+export CODING_TOOLS_MCP_TELEMETRY=on
+```
 
 Any one of the following turns telemetry off completely:
 

@@ -1,0 +1,19 @@
+name: Feature request
+description: Propose a user workflow or integration
+title: "[feature] "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: workflow
+    attributes:
+      label: User workflow
+      description: What should the user be able to do, and what policy should it require?
+    validations:
+      required: true
+  - type: textarea
+    id: security
+    attributes:
+      label: Security and compatibility impact
+      description: Explain workspace, sandbox, approval, migration, and MCP schema impact.
+    validations:
+      required: true

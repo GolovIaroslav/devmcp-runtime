@@ -67,7 +67,10 @@ def telemetry_mode() -> str:
         return "off"
     if truthy_env(os.environ.get("DO_NOT_TRACK")) or truthy_env(os.environ.get("CI")):
         return "off"
-    return "on"
+    if raw in {"1", "on", "true", "yes", "enable", "enabled"}:
+        return "on"
+    # Beta telemetry is explicitly opt-in.
+    return "off"
 
 
 def _label(value: Any) -> str | None:

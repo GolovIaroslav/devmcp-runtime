@@ -296,14 +296,19 @@ def parse_patch(patch: str) -> list[PatchOperation]:
             operations.append(PatchOperation("add", path, add_content="\n".join(content_lines) + "\n"))
             continue
         if line.startswith("*** Delete File: "):
-            raise ToolFailure("PATCH_FAILED", "*** Delete File is disabled in this environment.", category="validation")
+            operations.append(PatchOperation("delete", line.removeprefix("*** Delete File: ").strip()))
+            i += 1
+            continue
 
         if line.startswith("*** Update File: "):
             path = line.removeprefix("*** Update File: ").strip()
             i += 1
             move_to: str | None = None
             if i < len(lines) - 1 and lines[i].startswith("*** Move to: "):
-                raise ToolFailure("PATCH_FAILED", "*** Move to is disabled in this environment.", category="validation")
+                move_to = lines[i].removeprefix("*** Move to: ").strip()
+                i += 1
+                operations.append(PatchOperation("move", path, move_to=move_to))
+                continue
 
             hunks: list[list[str]] = []
             current: list[str] = []

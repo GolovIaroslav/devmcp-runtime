@@ -58,9 +58,9 @@ def _initialize(runtime: Runtime, client_name: str = "test-client") -> None:
 
 
 class TelemetryModeTests(unittest.TestCase):
-    def test_default_is_on(self) -> None:
+    def test_default_is_off(self) -> None:
         with scrubbed_env():
-            self.assertEqual(telemetry.telemetry_mode(), "on")
+            self.assertEqual(telemetry.telemetry_mode(), "off")
 
     def test_env_switch_disables(self) -> None:
         for value in ("off", "0", "false", "no", "disabled"):
@@ -115,10 +115,14 @@ class OffMeansOffTests(unittest.TestCase):
         self.assertIn("telemetry (not sent):", output)
         self.assertIn("session_start", output)
 
+    def test_explicit_opt_in_is_on(self) -> None:
+        with scrubbed_env(CODING_TOOLS_MCP_TELEMETRY="on"):
+            self.assertEqual(telemetry.telemetry_mode(), "on")
+
 
 def _run_probe_session() -> _CapturingSender:
     sender = _CapturingSender()
-    with scrubbed_env(), patch.object(telemetry, "_get_sender", lambda: sender):
+    with scrubbed_env(CODING_TOOLS_MCP_TELEMETRY="on"), patch.object(telemetry, "_get_sender", lambda: sender):
         with tempfile.TemporaryDirectory() as tmp:
             marker = "leakprobe-a8f3"
             workspace = Path(tmp) / marker
@@ -184,7 +188,7 @@ class SessionEventTests(unittest.TestCase):
 
     def test_sessions_without_initialize_emit_nothing(self) -> None:
         sender = _CapturingSender()
-        with scrubbed_env(), patch.object(telemetry, "_get_sender", lambda: sender):
+        with scrubbed_env(CODING_TOOLS_MCP_TELEMETRY="on"), patch.object(telemetry, "_get_sender", lambda: sender):
             with tempfile.TemporaryDirectory() as tmp:
                 runtime = Runtime(Path(tmp))
                 runtime.call_tool("get_default_cwd", {})
@@ -194,7 +198,7 @@ class SessionEventTests(unittest.TestCase):
 
     def test_error_events_are_capped_and_drops_are_counted(self) -> None:
         sender = _CapturingSender()
-        with scrubbed_env(), patch.object(telemetry, "_get_sender", lambda: sender):
+        with scrubbed_env(CODING_TOOLS_MCP_TELEMETRY="on"), patch.object(telemetry, "_get_sender", lambda: sender):
             session = SessionTelemetry(permission_mode="safe")
             session.record_session_start({"name": "cap"}, "2025-11-25")
             for _ in range(ERROR_EVENTS_PER_SESSION + 5):
@@ -211,7 +215,7 @@ class SessionEventTests(unittest.TestCase):
 
     def test_duration_buckets_and_finish_is_idempotent(self) -> None:
         sender = _CapturingSender()
-        with scrubbed_env(), patch.object(telemetry, "_get_sender", lambda: sender):
+        with scrubbed_env(CODING_TOOLS_MCP_TELEMETRY="on"), patch.object(telemetry, "_get_sender", lambda: sender):
             session = SessionTelemetry(permission_mode="safe")
             session.record_session_start(None, "2025-11-25")
             for duration in (50, 500, 5_000, 50_000):

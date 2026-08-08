@@ -1,0 +1,32 @@
+name: Bug report
+description: Report a reproducible runtime problem
+title: "[bug] "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Do not include tokens, private keys, or secret file contents.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of devmcp --version
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Commands, expected result, actual result, and redacted diagnostics
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - Linux
+        - macOS experimental
+        - Windows experimental
+    validations:
+      required: true

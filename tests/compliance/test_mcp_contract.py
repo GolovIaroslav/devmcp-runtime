@@ -354,7 +354,7 @@ class MCPContractTests(ComplianceTestCase):
                 with urllib.request.urlopen(request, timeout=5) as response:
                     body = json.loads(response.read().decode("utf-8"))
                 self.assertEqual(body.get("protocolVersion"), "2025-11-25")
-                self.assertEqual(body.get("server", {}).get("name"), "coding-tools-mcp")
+                self.assertEqual(body.get("server", {}).get("name"), "devmcp-runtime")
                 self.assertEqual(body.get("transport", {}).get("endpoint"), "/mcp")
                 self.assertEqual(body.get("auth", {}).get("type"), "none")
                 self.assertIn("tools", body)

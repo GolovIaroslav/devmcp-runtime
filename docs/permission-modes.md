@@ -17,9 +17,10 @@ Default mode. Commands run with the coding-agent policy:
 - Landlock enabled when available
 
 The same policy auto-allows read-only workspace and Git inspection, patch
-preview, and small safe Add/Update patches. Delete/Move patches, paths outside
-the authoritative workspace, secrets, sandbox escape, privileged commands, and
-Docker/Podman socket exposure are always denied. Large updates (more than 200
+preview, and small safe Add/Update patches. Delete/Move patches require the
+active data-policy approval (Safe and Balanced ask; Power can allow them).
+Paths outside the authoritative workspace, secrets, sandbox escape, privileged
+commands, and Docker/Podman socket exposure are always denied. Large updates (more than 200
 removed existing lines or more than 30% of an existing file) require local
 ApprovalEngine approval.
 

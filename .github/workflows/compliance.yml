@@ -133,3 +133,40 @@ jobs:
           call "%VCVARSALL%" x64
           where cl.exe
           python -m unittest tests.compliance.test_windows_msvc_smoke
+
+  public-beta-linux:
+    name: Public beta gates (Python ${{ matrix.python-version }})
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v6.0.2
+      - uses: actions/setup-python@v6.2.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install Linux sandbox and runtime
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y bubblewrap
+          sudo chmod u+s "$(command -v bwrap)"
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev,gui]"
+          python -m playwright install --with-deps chromium
+      - name: Run release-prep tests
+        run: |
+          make test-release-prep
+          python -m unittest tests.compliance.test_docs_required
+          python -m pytest -q tests/gui
+      - name: Build and clean-install wheel
+        run: |
+          python -m pip install build
+          python -m build
+          clean_env="$(mktemp -d)"
+          python -m venv "$clean_env/venv"
+          "$clean_env/venv/bin/python" -m pip install dist/*.whl
+          "$clean_env/venv/bin/devmcp" --help
+      - name: Secret and history audit
+        run: scripts/secret_audit.sh

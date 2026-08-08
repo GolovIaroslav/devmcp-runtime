@@ -191,7 +191,7 @@ class ApplyPatchGoldenTests(ComplianceTestCase):
 """
         result = self.client.call_tool("apply_patch", {"patch": move})
         self.assertTrue(result.get("isError", False), f"expected tool error, got {result!r}")
-        self.assertIn("disabled", str(result))
+        self.assertIn("approval", str(result).lower())
 
     def test_apply_patch_rejects_absolute_traversal_and_symlink_escape(self) -> None:
         absolute = f"""*** Begin Patch

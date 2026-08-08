@@ -4,6 +4,11 @@ The normative behavior is [runtime-contract-v0.2.md](runtime-contract-v0.2.md).
 Live JSON Schemas come from `tools/list`; CI compares their names, input
 properties, annotations, and error codes with the contract.
 
+The server metadata exposes tool schema version `1.0`. Additive optional fields
+are preferred. A breaking tool name, required-input, or annotation change must
+be documented as requiring a ChatGPT Developer Mode app **Refresh** while the
+app remains a draft.
+
 ## Fixed inventory
 
 The default catalog contains exactly 32 tools:
@@ -69,7 +74,8 @@ count, dimensions, resize metadata, and warnings, but no base64 or data URL.
 ## Patch behavior
 
 `apply_patch` accepts the standard envelope. Preview and small Add/Update
-patches are automatic; Delete and Move are always denied. An Update is routed
+patches are automatic. Delete and Move are controlled by the active data policy:
+Safe and Balanced ask, and Power can allow them. An Update is routed
 to local out-of-band approval only when it removes more than 200 existing lines
 or more than 30% of an existing file. Unique context, baseline/hash protection,
 atomic writes, rollback, and symlink defenses apply to every patch.

@@ -1,1 +1,1 @@
-"""Local operator controls for the ChatGPT Dev Runtime."""
+"""Local operator controls for DevMCP Runtime."""

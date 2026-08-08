@@ -50,3 +50,12 @@ approvals.json
 /tmp/chatgpt-dev-sandbox-*
 *.log
 .chatgpt-dev-runtime/
+
+# Release-prep scratch and generated local artifacts
+debug_*
+patch_*
+v3.patch
+strace_wrapper.sh
+runtime-*.db
+reports/**/*.tmp
+reports/**/raw/*.log

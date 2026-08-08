@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 RUNTIME_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd -P)"
 WORKSPACE=""
 PYTHON="${RUNTIME_DIR}/.venv/bin/python3"
-TOKEN_FILE="${HOME}/.config/chatgpt-dev-runtime/mcp-token"
+TOKEN_FILE="${HOME}/.config/devmcp-runtime/secrets/mcp-token"
 
 while (($#)); do
   case "$1" in
@@ -38,20 +38,13 @@ case "${WORKSPACE_REAL}/" in
   "${RUNTIME_REAL}/"*) echo "authoritative workspace must be separate from runtime source" >&2; exit 2 ;;
 esac
 
-TOKEN="$(<"${TOKEN_FILE}")"
-TOKEN="${TOKEN//$'\r'/}"
-TOKEN="${TOKEN//$'\n'/}"
-if [[ -z "${TOKEN}" ]]; then
-  echo "MCP bearer file is empty" >&2
-  exit 2
-fi
-
 umask 077
 cd -- "${RUNTIME_DIR}"
-exec env CODING_TOOLS_MCP_AUTH_TOKEN="${TOKEN}" \
-  "${PYTHON}" -m coding_tools_mcp \
+exec "${PYTHON}" -m coding_tools_mcp \
   --workspace "${WORKSPACE_REAL}" \
   --host 127.0.0.1 \
   --port "${CODING_TOOLS_MCP_PORT:-47157}" \
+  --auth-token-file "${TOKEN_FILE}" \
+  --policy-profile "${DEVMCP_POLICY_PROFILE:-balanced}" \
   --permission-mode safe \
   --shell-env-inherit core
