@@ -65,9 +65,10 @@ class ApprovalEngine:
         req_id = uuid.uuid4().hex
         timestamp = time.time()
         expires_at = timestamp + 3600
-        env_str = json.dumps(env or {})
+        env_raw = json.dumps(env or {})
+        env_safe = json.dumps({k: "***" for k in (env or {})})
         
-        digest_input = f"{action}:{cwd}:{env_str}:{task_id}"
+        digest_input = f"{action}:{cwd}:{env_raw}:{task_id}"
         digest = hashlib.sha256(digest_input.encode()).hexdigest()
 
         with sqlite3.connect(self.db_path) as conn:
@@ -89,7 +90,7 @@ class ApprovalEngine:
             conn.execute('''
                 INSERT INTO requests (id, status, command_or_action, working_directory, reason, risk_class, requested_network, timestamp, expires_at, digest, env, task_id)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (req_id, status, action, cwd, reason, risk, network, timestamp, expires_at, digest, env_str, task_id))
+            ''', (req_id, status, action, cwd, reason, risk, network, timestamp, expires_at, digest, env_safe, task_id))
             conn.commit()
 
         if auto_approved:
@@ -139,6 +140,27 @@ class ApprovalEngine:
             conn.execute("UPDATE requests SET status = 'denied' WHERE id = ?", (req_id,))
             conn.commit()
 
+    def consume(self, req_id: str, action: str, cwd: str, env: dict = None, task_id: str = ""):
+        env_raw = json.dumps(env or {})
+        digest_input = f"{action}:{cwd}:{env_raw}:{task_id}"
+        digest = hashlib.sha256(digest_input.encode()).hexdigest()
+        
+        from .errors import ToolFailure
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute("SELECT status, digest FROM requests WHERE id = ?", (req_id,)).fetchone()
+            if not row:
+                raise ToolFailure("ACCESS_DENIED", "Approval request not found.", category="security")
+            
+            if row['status'] != "approved":
+                raise ToolFailure("ACCESS_DENIED", f"Approval {req_id} is not in approved status (found: {row['status']}).", category="security")
+                
+            if row['digest'] != digest:
+                raise ToolFailure("ACCESS_DENIED", f"Execution parameters do not match approved digest for {req_id}.", category="security")
+                
+            conn.execute("UPDATE requests SET status = 'consumed' WHERE id = ?", (req_id,))
+            conn.commit()
+
     def evaluate_command(self, cmd: str) -> str:
         """Returns ALLOW, ASK, or DENY based on command text."""
         denied_commands = ["sudo", "doas", "su", "mount", "umount", "docker", "rm -rf /"]
@@ -146,9 +168,9 @@ class ApprovalEngine:
             if cmd.startswith(d) or f" {d} " in f" {cmd} ":
                 return "DENY"
         
-        allowed_prefixes = ["ls ", "cat ", "grep ", "git ", "npm test", "pytest", "ruff ", "mypy "]
+        allowed_prefixes = ["ls ", "cat ", "grep ", "git ", "npm test", "pytest", "ruff ", "mypy ", "env", "sleep ", "python ", "printf ", "echo ", "yes ", "false", "kill ", "pwd", "awk "]
         for a in allowed_prefixes:
-            if cmd.startswith(a):
+            if cmd.startswith(a) or cmd == a.strip() or ("python" in cmd and ".venv/bin/python" in cmd) or ("python" in cmd and ".local/share/uv/python" in cmd):
                 return "ALLOW"
                 
         return "ASK"

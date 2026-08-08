@@ -110,7 +110,7 @@ Tool failures keep the same envelope with `isError: true`, a readable error in
 Known tool error codes include:
 
 ```json
-["ABSOLUTE_PATH_DENIED", "ACCESS_DENIED", "BINARY_FILE", "ELICITATION_UNSUPPORTED", "GIT_ERROR", "INTERNAL_ERROR", "INVALID_ARGUMENT", "IS_DIRECTORY", "NOT_A_DIRECTORY", "NOT_FOUND", "OUTPUT_TOO_LARGE", "PATCH_CONFLICT", "PATCH_CONTEXT_AMBIGUOUS", "PATCH_CONTEXT_NOT_FOUND", "PATCH_FAILED", "PATCH_HUNKS_OVERLAP", "PATCH_ROLLBACK_FAILED", "PATH_OUTSIDE_WORKSPACE", "PERMISSION_REQUIRED", "RUNTIME_DIR_UNWRITABLE", "SANDBOX_FAILED", "SANDBOX_UNAVAILABLE", "SESSION_CLOSED", "SESSION_LIMIT_REACHED", "SESSION_NOT_FOUND", "SYMLINK_ESCAPE", "TTY_UNSUPPORTED", "UNSUPPORTED_ENCODING"]
+["ABSOLUTE_PATH_DENIED", "ACCESS_DENIED", "BINARY_FILE", "ELICITATION_UNSUPPORTED", "GIT_ERROR", "INTERNAL_ERROR", "INVALID_ARGUMENT", "IS_DIRECTORY", "NOT_A_DIRECTORY", "NOT_FOUND", "NOT_IMPLEMENTED", "OUTPUT_TOO_LARGE", "PATCH_CONFLICT", "PATCH_CONTEXT_AMBIGUOUS", "PATCH_CONTEXT_NOT_FOUND", "PATCH_FAILED", "PATCH_HUNKS_OVERLAP", "PATCH_ROLLBACK_FAILED", "PATH_OUTSIDE_WORKSPACE", "PERMISSION_REQUIRED", "RUNTIME_DIR_UNWRITABLE", "SANDBOX_FAILED", "SANDBOX_UNAVAILABLE", "SESSION_CLOSED", "SESSION_LIMIT_REACHED", "SESSION_NOT_FOUND", "SYMLINK_ESCAPE", "TTY_UNSUPPORTED", "UNSUPPORTED_ENCODING"]
 ```
 
 Error categories are `validation`, `security`, `permission`, `runtime`,
@@ -249,7 +249,7 @@ Supports `*** Add File`, `*** Update File`, `*** Delete File`, and
 
 ### exec_command
 
-Inputs: `"cmd"`, `"cwd"`, `"workdir"`, `"timeout_ms"`, `"yield_time_ms"`, `"env"`, `"max_bytes"`, `"max_output_bytes"`.
+Inputs: `"cmd"`, `"cwd"`, `"workdir"`, `"timeout_ms"`, `"yield_time_ms"`, `"env"`, `"max_bytes"`, `"max_output_bytes"`, `"preview_bytes"`, `"tty"`, `"stdin"`, `"verbosity"`.
 
 Annotations: `{"title":"Exec command","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
 
@@ -311,7 +311,7 @@ Annotations: `{"title":"Git blame","readOnlyHint":true,"destructiveHint":false,"
 
 ### request_permissions
 
-Inputs: `"tools"`, `"reason"`.
+Inputs: `"tool_name"`, `"tools"`, `"arguments"`, `"reason"`, `"permission"`, `"scope"`, `"ttl_seconds"`.
 
 Annotations: `{"title":"Request permissions","readOnlyHint":true,"destructiveHint":false,"idempotentHint":false,"openWorldHint":false}`.
 

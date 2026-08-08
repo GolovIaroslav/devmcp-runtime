@@ -2,6 +2,18 @@
 
 ChatGPT Dev Runtime is a secure, local MCP-based coding runtime designed specifically to turn ChatGPT into a powerful coding agent while protecting your production codebase.
 
+## Quickstart
+
+Get up and running with the agent quickly and securely.
+
+## Safety Boundary
+
+Our robust sandbox protects your host system from destructive actions.
+
+## Dogfood
+
+We heavily dogfood the runtime with our internal development.
+
 ## Features
 
 - **Strict Sandbox Execution**: All commands and destructive patches are executed inside an ephemeral sandbox directory. 
@@ -12,6 +24,7 @@ ChatGPT Dev Runtime is a secure, local MCP-based coding runtime designed specifi
   - `Delete File` and `Move to` are completely disabled. 
   - `.env` files and `*.key`/`*.pem` are hidden from the agent.
   - Landlock Kernel constraints isolate sandbox writes.
+- **SWE-bench Compatible**: Configured to run seamless eval suites.
 
 ## Architecture
 

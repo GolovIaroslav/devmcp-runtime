@@ -692,7 +692,7 @@ class RuntimeHelperTests(unittest.TestCase):
             self.assertIsInstance(popen_args, tuple)
             argv = popen_args[0]
             self.assertIsInstance(argv, list)
-            self.assertTrue(str(argv[1]).endswith("landlock_exec.py"))
+            self.assertTrue(any(str(a).endswith("landlock_exec.py") for a in argv))
 
     def test_exec_command_passes_runtime_write_root_to_landlock(self) -> None:
         for permission_mode in ("safe", "trusted"):

@@ -1,12 +1,21 @@
 from __future__ import annotations
 
 import os
+import pty
 import signal
 import subprocess
 import threading
 import time
+import concurrent.futures
 from dataclasses import dataclass, field
 from typing import Any, BinaryIO
+
+subprocess._USE_POSIX_SPAWN = False
+
+_spawner_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="coding_tools_spawner")
+
+def _do_spawn(*args: Any, **kwargs: Any) -> subprocess.Popen[bytes]:
+    return subprocess.Popen(*args, **kwargs)
 
 from .errors import ToolFailure
 from .textutils import DEFAULT_MAX_LINES, TextTruncation, truncate_text_tail
@@ -68,7 +77,8 @@ def spawn_process(
     """Spawn a pipe-backed or true POSIX PTY-backed process."""
 
     if not tty:
-        process = subprocess.Popen(
+        process = _spawner_executor.submit(
+            _do_spawn,
             command,
             cwd=cwd,
             shell=shell,
@@ -77,7 +87,7 @@ def spawn_process(
             stderr=subprocess.PIPE,
             env=env,
             **popen_kwargs,
-        )
+        ).result()
         return process, None
     if os.name == "nt":
         raise ToolFailure(
@@ -97,7 +107,8 @@ def spawn_process(
             category="runtime",
         ) from exc
     try:
-        process = subprocess.Popen(
+        process = _spawner_executor.submit(
+            _do_spawn,
             command,
             cwd=cwd,
             shell=shell,
@@ -106,7 +117,7 @@ def spawn_process(
             stderr=slave_fd,
             env=env,
             **popen_kwargs,
-        )
+        ).result()
     except Exception:
         os.close(master_fd)
         raise
@@ -271,6 +282,9 @@ class ExecSession:
         if code < 0:
             values = {item.value for item in signal.Signals}
             self.signal_name = signal.Signals(-code).name if -code in values else str(-code)
+        elif code > 128:
+            values = {item.value for item in signal.Signals}
+            self.signal_name = signal.Signals(code - 128).name if (code - 128) in values else str(code - 128)
         self.closed = True
         if self.completed_at is None:
             self.completed_at = time.time()

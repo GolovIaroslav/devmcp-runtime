@@ -1,6 +1,7 @@
 import os
 import shutil
 import tempfile
+import sys
 import subprocess
 from pathlib import Path
 from dataclasses import dataclass
@@ -102,5 +103,21 @@ class ExecutionSandbox:
             "--tmpfs", "/tmp",
             "--bind", str(self.sandbox_dir), str(self.sandbox_dir),
         ])
+        
+        # Bind the Python environment if it's not in /usr or /bin
+        python_dir = str(Path(sys.executable).parent.parent)
+        if not python_dir.startswith(("/usr", "/bin", "/lib")):
+            args.extend(["--ro-bind", python_dir, python_dir])
+            
+        python_real_dir = str(Path(os.path.realpath(sys.executable)).parent.parent)
+        if python_real_dir != python_dir and not python_real_dir.startswith(("/usr", "/bin", "/lib")):
+            args.extend(["--ro-bind", python_real_dir, python_real_dir])
+            
+        uv_python = Path.home() / ".local" / "share" / "uv"
+        if uv_python.exists():
+            args.extend(["--ro-bind", str(uv_python), str(uv_python)])
+            
+        mcp_pkg = Path(__file__).parent
+        args.extend(["--ro-bind", str(mcp_pkg), str(mcp_pkg)])
         
         return args

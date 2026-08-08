@@ -125,11 +125,11 @@ class ApplyPatchGoldenTests(ComplianceTestCase):
         self.assertIn("return a + b", self.tool_text(self.client.call_tool("read_file", {"path": "src/math.js"})))
 
         delete = """*** Begin Patch
-*** Delete File: TODO.md
-*** End Patch
-"""
-        self.assert_tool_success(self.client.call_tool("apply_patch", {"patch": delete}))
-        self.assert_tool_error("read_file", {"path": "TODO.md"})
+    *** Delete File: TODO.md
+    *** End Patch
+    """
+        self.assert_tool_error("apply_patch", {"patch": delete})
+        self.assert_tool_success(self.client.call_tool("read_file", {"path": "TODO.md"}))
 
         with self.session_for_fixture("tiny-js-project") as (_workspace, client):
             move = """*** Begin Patch
@@ -137,9 +137,8 @@ class ApplyPatchGoldenTests(ComplianceTestCase):
 *** Move to: docs/TODO.md
 *** End Patch
 """
-            self.assert_tool_success(client.call_tool("apply_patch", {"patch": move}))
-            moved = client.call_tool("read_file", {"path": "docs/TODO.md"})
-            self.assertIn("Keep this file available", self.tool_text(moved))
+            self.assert_tool_error("apply_patch", {"patch": move})
+            self.assert_tool_error("read_file", {"path": "docs/TODO.md"})
 
         mismatch = """*** Begin Patch
 *** Update File: src/math.js
@@ -191,10 +190,9 @@ class ApplyPatchGoldenTests(ComplianceTestCase):
 *** Move to: bin/run.sh
 *** End Patch
 """
-        self.assert_tool_success(self.client.call_tool("apply_patch", {"patch": move}))
-        destination = self.workspace.root / "bin" / "run.sh"
-        self.assertFalse(source.exists())
-        self.assertEqual(stat.S_IMODE(destination.stat().st_mode), 0o755)
+        result = self.client.call_tool("apply_patch", {"patch": move})
+        self.assertTrue(result.get("isError", False), f"expected tool error, got {result!r}")
+        self.assertIn("disabled", str(result))
 
     def test_apply_patch_rejects_absolute_traversal_and_symlink_escape(self) -> None:
         absolute = f"""*** Begin Patch

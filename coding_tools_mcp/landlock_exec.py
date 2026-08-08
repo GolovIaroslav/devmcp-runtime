@@ -34,13 +34,13 @@ def main(argv: list[str] | None = None) -> int:
     if sys.platform != "linux":
         return fail("landlock_exec is only supported on Linux")
     args = list(sys.argv[1:] if argv is None else argv)
-    if len(args) != 2:
-        return fail("landlock_exec requires: <ruleset-fd> <command>")
+    if len(args) < 2:
+        return fail("landlock_exec requires: <ruleset-fd> <command> [args...]")
     try:
         ruleset_fd = int(args[0])
     except ValueError:
         return fail("landlock_exec received an invalid ruleset fd")
-    cmd = args[1]
+    cmd = args[1:]
 
     rc = int(landlock_libc().prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0))
     if rc != 0:
@@ -55,8 +55,11 @@ def main(argv: list[str] | None = None) -> int:
     except OSError:
         pass
 
-    shell = os.environ.get("SHELL") or shutil.which("sh") or "/bin/sh"
-    os.execvpe(shell, [shell, "-c", cmd], os.environ)
+    if len(cmd) == 1:
+        shell = os.environ.get("SHELL") or shutil.which("sh") or "/bin/sh"
+        os.execvpe(shell, [shell, "-c", cmd[0]], os.environ)
+    else:
+        os.execvpe(cmd[0], cmd, os.environ)
     return 127
 
 

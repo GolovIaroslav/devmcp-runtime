@@ -303,8 +303,7 @@ def parse_patch(patch: str) -> list[PatchOperation]:
             i += 1
             move_to: str | None = None
             if i < len(lines) - 1 and lines[i].startswith("*** Move to: "):
-                move_to = lines[i].removeprefix("*** Move to: ").strip()
-                i += 1
+                raise ToolFailure("PATCH_FAILED", "*** Move to is disabled in this environment.", category="validation")
 
             hunks: list[list[str]] = []
             current: list[str] = []

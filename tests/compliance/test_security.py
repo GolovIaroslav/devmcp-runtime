@@ -123,7 +123,7 @@ class SecurityComplianceTests(ComplianceTestCase):
         # via an absolute path, even if it is known to the attacker.
         write_cmd = f"python -c \"open({authoritative_path}, 'w').write('HACKED')\""
         
-        result = self.client.call_tool(
+        self.assert_denied_or_permission_required(
             "exec_command",
             {
                 "cmd": write_cmd,
@@ -131,9 +131,6 @@ class SecurityComplianceTests(ComplianceTestCase):
                 "max_output_bytes": 4096,
             },
         )
-        # Should either be permission denied (bwrap/landlock) or not found (bwrap missing mount)
-        payload = self.assert_tool_success(result)
-        self.assertNotEqual(payload.get("exit_code"), 0, "Absolute path write must fail")
         self.assertNotEqual(authoritative_file.read_text(encoding="utf-8"), "HACKED")
         self.assert_denied_or_permission_required(
             "exec_command",

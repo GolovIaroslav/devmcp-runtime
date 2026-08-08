@@ -2145,20 +2145,51 @@ class Runtime:
             self.patch_baselines[change.display] = (
                 None if change.baseline.data is None else change.baseline.data.decode("utf-8", errors="replace")
             )
+            
+        if self.sandbox is not None:
+            for change in staged:
+                dest = self.sandbox.sandbox_dir / change.display
+                if change.content is None:
+                    try:
+                        dest.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                else:
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    dest.write_bytes(change.content.encode("utf-8") if isinstance(change.content, str) else change.content)
+                    if change.mode is not None:
+                        try:
+                            dest.chmod(change.mode)
+                        except Exception:
+                            pass
 
     def exec_command(self, args: dict[str, Any]) -> dict[str, Any]:
         self._prune_sessions()
-        cmd = str(args.get("cmd", ""))
+        cmd_raw = args.get("cmd", "")
+        if isinstance(cmd_raw, list):
+            cmd = [str(x) for x in cmd_raw]
+            cmd_str = " ".join(cmd)
+        else:
+            cmd = str(cmd_raw)
+            cmd_str = cmd
+
         if not cmd:
             raise ToolFailure("INVALID_ARGUMENT", "cmd is required.", category="validation")
             
-        # from .approval import ApprovalEngine
-        # approval_engine = ApprovalEngine()
-        # decision = approval_engine.evaluate_command(cmd)
-        # if decision == "DENY":
-        #     raise ToolFailure("ACCESS_DENIED", f"Command is unconditionally denied.", category="security")
-        # elif decision == "ASK":
-        #     return approval_engine.request_approval(cmd, str(args.get("cwd", ".")), "Unknown command", "high", False, env=args.get("env", {}))
+        approval_id = args.get("approval_id")
+        from .approval import ApprovalEngine
+        approval_engine = ApprovalEngine()
+        if approval_id:
+            status = approval_engine.get_status(approval_id)
+            if status != "approved":
+                raise ToolFailure("ACCESS_DENIED", f"Approval {approval_id} is not approved.", category="security")
+            approval_engine.consume(approval_id, cmd_str, str(args.get("cwd", ".")), self._command_env(args.get("env", {})))
+        else:
+            decision = approval_engine.evaluate_command(cmd_str)
+            if decision == "DENY":
+                raise ToolFailure("ACCESS_DENIED", f"Command is unconditionally denied.", category="security")
+            elif decision == "ASK":
+                return approval_engine.request_approval(cmd_str, str(args.get("cwd", ".")), "Permission required", "high", False, env=args.get("env", {}))
 
         workdir_arg = args.get("workdir", args.get("cwd", "."))
         if "workdir" in args and "cwd" in args and str(args["workdir"]) != str(args["cwd"]):
@@ -2171,8 +2202,6 @@ class Runtime:
         if self.sandbox is None:
             from .sandbox import ExecutionSandbox
             self.sandbox = ExecutionSandbox.create(self.workspace.root)
-        else:
-            self.sandbox.sync_from_authoritative()
 
         sandbox_workdir = self.sandbox.translate_path_for_exec(workdir.path)
         
@@ -2187,8 +2216,23 @@ class Runtime:
         landlock_fd: int | None = None
         landlock_warning: str | None = None
         popen_cmd: Any = cmd
-        popen_shell = True
+        popen_shell = isinstance(cmd, str)
         popen_extra = process_group_popen_kwargs()
+        
+        import shutil
+        if not shutil.which("bwrap"):
+            raise ToolFailure("SANDBOX_UNAVAILABLE", "bwrap is required for execution sandbox but not found.", category="security")
+            
+        bwrap_args = self.sandbox.get_bwrap_args()
+        if isinstance(cmd, str):
+            actual_cmd = ["/bin/sh", "-c", cmd]
+            popen_shell = False
+        else:
+            actual_cmd = cmd
+            popen_shell = False
+            
+        # We still initialize landlock as defense in depth if bwrap is missing somehow, 
+        # but bwrap provides the primary namespace isolation.
         if self.landlock_enabled():
             try:
                 landlock_fd = open_landlock_ruleset(
@@ -2196,13 +2240,14 @@ class Runtime:
                     guard_allow_roots(),
                     write_roots=[self.sandbox.sandbox_dir, self.runtime_dir],
                 )
-                popen_cmd = landlock_exec_argv(landlock_fd, cmd)
-                popen_shell = False
+                actual_cmd = landlock_exec_argv(landlock_fd, actual_cmd)
                 popen_extra["pass_fds"] = (landlock_fd,)
             except ToolFailure as exc:
                 if exc.code != "SANDBOX_UNAVAILABLE":
                     raise
                 landlock_warning = landlock_unavailable_warning(exc)
+        popen_cmd = bwrap_args + actual_cmd
+        self._prune_sessions()
         with self.sessions_lock:
             if self._closed:
                 if landlock_fd is not None:
@@ -2608,6 +2653,8 @@ class Runtime:
     def _get_output_session(self, session_id: str) -> ExecSession:
         self._prune_sessions()
         with self.sessions_lock:
+            with open("/tmp/debug_sessions.txt", "a") as f:
+                f.write(f"LOOKING FOR {session_id} IN SESSIONS: {list(self.sessions.keys())} OUTPUT: {list(self.output_sessions.keys())}\n")
             session = self.sessions.get(session_id) or self.output_sessions.get(session_id)
         if session is None:
             raise ToolFailure("SESSION_NOT_FOUND", "Output session not found.", category="runtime")
@@ -3277,7 +3324,7 @@ class Runtime:
         return {"workspace": str(self.workspace.root)}
         
     def read_files(self, args: dict[str, Any]) -> dict[str, Any]:
-        return {"error": "Not implemented"}
+        raise ToolFailure("NOT_IMPLEMENTED", "Not implemented", category="validation")
         
     def preview_patch(self, args: dict[str, Any]) -> dict[str, Any]:
         args["dry_run"] = True
@@ -3296,14 +3343,16 @@ class Runtime:
     def job_status(self, args: dict[str, Any]) -> dict[str, Any]:
         session_id = args.get("session_id", "")
         with self.sessions_lock:
-            if session_id not in self.sessions:
+            session = self.sessions.get(session_id) or self.output_sessions.get(session_id)
+            if session is None:
                 return {"status": "not_found", "session_id": session_id}
-            session = self.sessions[session_id]
             session.refresh_status()
+            poll = session.process.poll()
+            status_str = "running" if poll is None else ("success" if poll == 0 else "failed")
             return {
-                "status": session.status,
+                "status": status_str,
                 "session_id": session_id,
-                "exit_code": session.process.poll()
+                "exit_code": poll
             }
         
     def job_output(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -3311,6 +3360,8 @@ class Runtime:
         return self.read_output(args)
         
     def job_input(self, args: dict[str, Any]) -> dict[str, Any]:
+        if "input" in args and "chars" not in args:
+            args["chars"] = args["input"]
         return self.write_stdin(args)
         
     def job_cancel(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -4073,9 +4124,12 @@ def landlock_path_allowed_access(path: Path) -> int:
     )
 
 
-def landlock_exec_argv(ruleset_fd: int, cmd: str) -> list[str]:
+def landlock_exec_argv(ruleset_fd: int, cmd: str | list[str]) -> list[str]:
     helper = Path(__file__).with_name("landlock_exec.py")
-    return [sys.executable, str(helper), str(ruleset_fd), cmd]
+    base = [sys.executable, str(helper), str(ruleset_fd)]
+    if isinstance(cmd, list):
+        return base + cmd
+    return base + [cmd]
 
 
 def is_default_system_path_root(resolved: Path) -> bool:
@@ -4535,6 +4589,7 @@ def input_schemas() -> dict[str, dict[str, Any]]:
         "apply_patch": object_schema(
             {
                 "patch": {**string, "minLength": 1},
+                "dry_run": boolean,
             },
             ["patch"],
         ),
@@ -4606,6 +4661,10 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                 "env": {"type": "object", "additionalProperties": {"type": "string"}},
                 "max_bytes": {**integer, "minimum": 1, "maximum": 1048576, "default": 262144},
                 "max_output_bytes": {**integer, "minimum": 1, "maximum": 1048576, "default": 262144},
+                "tty": {**boolean, "default": False},
+                "stdin": string,
+                "verbosity": {**integer, "minimum": 0, "maximum": 2, "default": 0},
+                "preview_bytes": {**integer, "minimum": 1, "maximum": 1048576, "default": 2048},
             },
             ["cmd"],
         ),
@@ -4628,6 +4687,7 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                 "session_id": {**string, "minLength": 1},
                 "chars": string,
                 "yield_time_ms": {**integer, "minimum": 0, "maximum": 300000, "default": 10000},
+                "max_output_bytes": {**integer, "minimum": 1, "maximum": 1048576, "default": 262144},
             },
             ["session_id"],
         ),

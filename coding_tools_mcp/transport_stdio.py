@@ -60,4 +60,4 @@ def serve_stdio(
                 sink.flush()
     finally:
         runtime.close()
-    return 0
+    open("/tmp/debug_exit.txt", "a").write("serve_stdio RETURNED\n"); return 0
