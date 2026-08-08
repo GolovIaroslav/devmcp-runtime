@@ -2416,13 +2416,17 @@ class Runtime:
                 category="runtime",
                 details={"platform": os.name, "retry_hint": "Run the command without tty=true."},
             )
-        if not shutil.which("bwrap"):
+        # Windows has no bubblewrap. Permit process-only execution only when
+        # the operator explicitly selected trusted mode; safe mode remains a
+        # hard failure rather than silently losing the sandbox boundary.
+        bwrap_available = shutil.which("bwrap") is not None
+        if not bwrap_available and not (os.name == "nt" and self.permission_mode == "trusted"):
             raise ToolFailure("SANDBOX_UNAVAILABLE", "bwrap is required for execution sandbox but not found.", category="security")
             
         allow_network = "network" in approved_caps or (network_required and "network" in approved_caps) or self.permission_mode == "trusted"
-        bwrap_args = self.sandbox.get_bwrap_args(allow_network=allow_network)
+        bwrap_args = self.sandbox.get_bwrap_args(allow_network=allow_network) if bwrap_available else []
         if isinstance(cmd, str):
-            actual_cmd = ["/bin/sh", "-c", cmd]
+            actual_cmd = (["cmd.exe", "/d", "/s", "/c", cmd] if os.name == "nt" else ["/bin/sh", "-c", cmd])
             popen_shell = False
         else:
             actual_cmd = cmd
