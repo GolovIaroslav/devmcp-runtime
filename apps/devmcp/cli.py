@@ -41,10 +41,11 @@ def main():
             print(f"{k}: {v}")
         
     elif args.command == "approve":
-        engine.approve(args.id)
-        print(f"Approved {args.id}")
+        engine.approve(args.id, pattern=args.pattern)
         if args.pattern:
-            print(f"Pattern saving not yet fully implemented: {args.pattern}")
+            print(f"Approved {args.id} and saved pattern: {args.pattern}")
+        else:
+            print(f"Approved {args.id} (once)")
         
     elif args.command == "deny":
         engine.deny(args.id)

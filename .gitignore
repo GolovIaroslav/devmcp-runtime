@@ -48,4 +48,5 @@ docs/specs/
 # ChatGPT Dev Runtime State & Sandboxes
 approvals.json
 /tmp/chatgpt-dev-sandbox-*
-
+*.log
+.chatgpt-dev-runtime/

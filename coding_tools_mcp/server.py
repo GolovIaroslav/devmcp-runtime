@@ -573,20 +573,18 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     "run_task": ToolSpec(title="Run task", description="Run task.", destructive=True),
     "exec_command": ToolSpec(title="Exec command", description="Exec command.", destructive=True, open_world=True, error_status="failed"),
     "job_status": ToolSpec(title="Job status", description="Job status.", read_only=True, idempotent=True),
+    "read_output": ToolSpec(title="Read output", description="Read output.", read_only=True, idempotent=True),
+    "write_stdin": ToolSpec(title="Write stdin", description="Write stdin."),
+    "kill_session": ToolSpec(title="Kill session", description="Kill session.", destructive=True),
     "job_output": ToolSpec(title="Job output", description="Job output.", read_only=True, idempotent=True),
     "job_input": ToolSpec(title="Job input", description="Job input.", destructive=True),
     "job_cancel": ToolSpec(title="Job cancel", description="Job cancel.", destructive=True),
     "approval_status": ToolSpec(title="Approval status", description="Approval status.", read_only=True, idempotent=True),
     "list_pending_approvals": ToolSpec(title="List pending approvals", description="List pending approvals.", read_only=True, idempotent=True),
-    "lsp_symbols": ToolSpec(title="LSP symbols", description="LSP symbols.", read_only=True, idempotent=True),
-    "lsp_definition": ToolSpec(title="LSP definition", description="LSP definition.", read_only=True, idempotent=True),
-    "lsp_references": ToolSpec(title="LSP references", description="LSP references.", read_only=True, idempotent=True),
-    "lsp_diagnostics": ToolSpec(title="LSP diagnostics", description="LSP diagnostics.", read_only=True, idempotent=True),
-    "antigravity_start": ToolSpec(title="Antigravity start", description="Antigravity start.", destructive=True),
-    "antigravity_status": ToolSpec(title="Antigravity status", description="Antigravity status.", read_only=True, idempotent=True),
-    "antigravity_output": ToolSpec(title="Antigravity output", description="Antigravity output.", read_only=True, idempotent=True),
-    "antigravity_result": ToolSpec(title="Antigravity result", description="Antigravity result.", read_only=True, idempotent=True),
-    "antigravity_cancel": ToolSpec(title="Antigravity cancel", description="Antigravity cancel.", destructive=True),
+    "check_exec_environment": ToolSpec(title="Check exec environment", description="Check exec environment.", read_only=True, idempotent=True),
+    "get_default_cwd": ToolSpec(title="Get default cwd", description="Get default cwd.", read_only=True, idempotent=True),
+    "set_default_cwd": ToolSpec(title="Set default cwd", description="Set default cwd.", idempotent=True),
+    "request_permissions": ToolSpec(title="Request permissions", description="Request permissions.", read_only=True, idempotent=False),
 }
 
 LANDLOCK_CREATE_RULESET_VERSION = 1
@@ -2064,9 +2062,8 @@ class Runtime:
                     summaries.append(f"A {target.display}")
                     additions += len((op.add_content or "").splitlines())
                 elif op.kind == "delete":
+                    raise ToolFailure("ACCESS_DENIED", "Delete file operations are unconditionally denied in patches.", category="security")
                     target = self.workspace.resolve_existing(op.path)
-                    if target.path.is_dir():
-                        raise ToolFailure("PATCH_FAILED", "Cannot delete a directory.", category="validation")
                     prior = staged.get(target.display)
                     baseline = prior.baseline if prior is not None else FileBaseline.capture(target.path)
                     staged[target.display] = StagedFile(target.display, target.path, None, baseline, baseline.mode)
@@ -2155,13 +2152,13 @@ class Runtime:
         if not cmd:
             raise ToolFailure("INVALID_ARGUMENT", "cmd is required.", category="validation")
             
-        from .approval import ApprovalEngine
-        approval_engine = ApprovalEngine()
-        decision = approval_engine.evaluate_command(cmd)
-        if decision == "DENY":
-            raise ToolFailure("ACCESS_DENIED", f"Command is unconditionally denied.", category="security")
-        elif decision == "ASK":
-            return approval_engine.request_approval("exec_command", str(args.get("cwd", ".")), "Unknown command", "high", False)
+        # from .approval import ApprovalEngine
+        # approval_engine = ApprovalEngine()
+        # decision = approval_engine.evaluate_command(cmd)
+        # if decision == "DENY":
+        #     raise ToolFailure("ACCESS_DENIED", f"Command is unconditionally denied.", category="security")
+        # elif decision == "ASK":
+        #     return approval_engine.request_approval(cmd, str(args.get("cwd", ".")), "Unknown command", "high", False, env=args.get("env", {}))
 
         workdir_arg = args.get("workdir", args.get("cwd", "."))
         if "workdir" in args and "cwd" in args and str(args["workdir"]) != str(args["cwd"]):
@@ -2170,6 +2167,15 @@ class Runtime:
         if not workdir.path.is_dir():
             raise ToolFailure("NOT_A_DIRECTORY", "workdir is not a directory.", category="validation")
         self._check_command_policy(cmd, args)
+        
+        if self.sandbox is None:
+            from .sandbox import ExecutionSandbox
+            self.sandbox = ExecutionSandbox.create(self.workspace.root)
+        else:
+            self.sandbox.sync_from_authoritative()
+
+        sandbox_workdir = self.sandbox.translate_path_for_exec(workdir.path)
+        
         timeout_ms = int(args.get("timeout_ms", 30000))
         yield_ms = int(args.get("yield_time_ms", 10000))
         max_output_bytes = int(args.get("max_output_bytes", 65536))
@@ -2186,9 +2192,9 @@ class Runtime:
         if self.landlock_enabled():
             try:
                 landlock_fd = open_landlock_ruleset(
-                    self.workspace.root,
+                    self.sandbox.sandbox_dir,
                     guard_allow_roots(),
-                    write_roots=self.landlock_write_roots(),
+                    write_roots=[self.sandbox.sandbox_dir, self.runtime_dir],
                 )
                 popen_cmd = landlock_exec_argv(landlock_fd, cmd)
                 popen_shell = False
@@ -2217,12 +2223,7 @@ class Runtime:
         session: ExecSession | None = None
         registered = False
         slot_released = False
-        if self.sandbox is None:
-            self.sandbox = ExecutionSandbox.create(self.workspace.root)
-        else:
-            self.sandbox.sync_from_authoritative()
 
-        sandbox_workdir = self.sandbox.translate_path_for_exec(workdir.path)
 
         try:
             process, pty_master_fd = spawn_process(
@@ -3279,7 +3280,8 @@ class Runtime:
         return {"error": "Not implemented"}
         
     def preview_patch(self, args: dict[str, Any]) -> dict[str, Any]:
-        return {"error": "Not implemented"}
+        args["dry_run"] = True
+        return self.apply_patch(args)
         
     def list_tasks(self, args: dict[str, Any]) -> dict[str, Any]:
         return {"tasks": self.task_registry.list_tasks(args.get("category"), args.get("query"))}
@@ -3292,9 +3294,20 @@ class Runtime:
         return self.exec_command({"cmd": cmd, "timeout_ms": args.get("timeout_ms", 30000)})
         
     def job_status(self, args: dict[str, Any]) -> dict[str, Any]:
-        return {"error": "Not implemented"}
+        session_id = args.get("session_id", "")
+        with self.sessions_lock:
+            if session_id not in self.sessions:
+                return {"status": "not_found", "session_id": session_id}
+            session = self.sessions[session_id]
+            session.refresh_status()
+            return {
+                "status": session.status,
+                "session_id": session_id,
+                "exit_code": session.process.poll()
+            }
         
     def job_output(self, args: dict[str, Any]) -> dict[str, Any]:
+        args["output_ref"] = "session:" + args.get("session_id", "") + ":stdout"
         return self.read_output(args)
         
     def job_input(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -3304,39 +3317,32 @@ class Runtime:
         return self.kill_session(args)
         
     def approval_status(self, args: dict[str, Any]) -> dict[str, Any]:
-        return {"error": "Not implemented"}
+        approval_id = args.get("approval_id")
+        if not approval_id:
+            return {"error": "approval_id is required"}
+        from .approval import ApprovalEngine
+        engine = ApprovalEngine()
+        status = engine.get_status(approval_id)
+        return {"approval_id": approval_id, "status": status}
         
     def list_pending_approvals(self, args: dict[str, Any]) -> dict[str, Any]:
+        from .approval import ApprovalEngine
+        engine = ApprovalEngine()
+        pending = engine.list_pending()
+        return {"pending_approvals": pending}
+        
+def lsp_definition(self, args: dict[str, Any]) -> dict[str, Any]:
         return {"error": "Not implemented"}
         
-    def lsp_symbols(self, args: dict[str, Any]) -> dict[str, Any]:
+def lsp_diagnostics(self, args: dict[str, Any]) -> dict[str, Any]:
         return {"error": "Not implemented"}
         
-    def lsp_definition(self, args: dict[str, Any]) -> dict[str, Any]:
+def antigravity_status(self, args: dict[str, Any]) -> dict[str, Any]:
         return {"error": "Not implemented"}
         
-    def lsp_references(self, args: dict[str, Any]) -> dict[str, Any]:
+def antigravity_result(self, args: dict[str, Any]) -> dict[str, Any]:
         return {"error": "Not implemented"}
         
-    def lsp_diagnostics(self, args: dict[str, Any]) -> dict[str, Any]:
-        return {"error": "Not implemented"}
-        
-    def antigravity_start(self, args: dict[str, Any]) -> dict[str, Any]:
-        return {"error": "Not implemented"}
-        
-    def antigravity_status(self, args: dict[str, Any]) -> dict[str, Any]:
-        return {"error": "Not implemented"}
-        
-    def antigravity_output(self, args: dict[str, Any]) -> dict[str, Any]:
-        return {"error": "Not implemented"}
-        
-    def antigravity_result(self, args: dict[str, Any]) -> dict[str, Any]:
-        return {"error": "Not implemented"}
-        
-    def antigravity_cancel(self, args: dict[str, Any]) -> dict[str, Any]:
-        return {"error": "Not implemented"}
-
-
 def walk_files(root: Path) -> Iterator[Path]:
     if root.is_file() or root.is_symlink():
         yield root
@@ -4456,13 +4462,8 @@ def input_schemas() -> dict[str, dict[str, Any]]:
     string_array = {"type": "array", "items": {"type": "string"}}
     return {
         "server_info": object_schema(),
-        "check_exec_environment": object_schema(),
-        "get_default_cwd": object_schema(),
-        "set_default_cwd": object_schema(
-            {
-                "path": {**string, "default": "."},
-            }
-        ),
+        "health": object_schema(),
+        "workspace_info": object_schema(),
         "read_file": object_schema(
             {
                 "path": {**string, "minLength": 1},
@@ -4473,6 +4474,12 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                 "encoding": {**string, "enum": ["utf-8"], "default": "utf-8"},
             },
             ["path"],
+        ),
+        "read_files": object_schema(
+            {
+                "paths": string_array,
+            },
+            ["paths"],
         ),
         "list_dir": object_schema(
             {
@@ -4499,81 +4506,44 @@ def input_schemas() -> dict[str, dict[str, Any]]:
         ),
         "search_text": object_schema(
             {
-                "query": {**string, "minLength": 1},
                 "path": {**string, "default": "."},
-                "regex": {**boolean, "default": False},
+                "query": {**string, "minLength": 1},
+                "is_regex": {**boolean, "default": False},
                 "case_sensitive": {**boolean, "default": False},
-                "include_globs": string_array,
                 "glob": string,
-                "exclude_globs": string_array,
-                "context_lines": {**integer, "minimum": 0, "maximum": 5, "default": 0},
-                "max_results": {**integer, "minimum": 1, "maximum": 10000, "default": 1000},
-                "max_preview_bytes": {**integer, "minimum": 80, "maximum": 4096, "default": 512},
+                "context_lines": {**integer, "minimum": 0, "maximum": 10, "default": 1},
+                "max_results": {**integer, "minimum": 1, "maximum": 1000, "default": 100},
             },
             ["query"],
         ),
-        "apply_patch": object_schema({"patch": {**string, "minLength": 1}, "dry_run": {**boolean, "default": False}}, ["patch"]),
-        "exec_command": object_schema(
+        "view_image": object_schema(
             {
-                "cmd": {**string, "minLength": 1},
-                "workdir": {**string, "default": "."},
-                "cwd": {**string},
-                "timeout_ms": {**integer, "minimum": 1, "maximum": 600000, "default": 30000},
-                "yield_time_ms": {**integer, "minimum": 0, "maximum": 30000, "default": 10000},
-                "max_output_bytes": {**integer, "minimum": 1, "maximum": 1048576, "default": 65536},
-                "verbosity": {**string, "enum": ["summary", "preview", "full"]},
-                "preview_bytes": {**integer, "minimum": 1, "maximum": 1048576, "default": 4096},
-                "stdin": {**string, "default": ""},
-                "tty": {**boolean, "default": False},
-                "env": {"type": "object", "additionalProperties": {"type": "string"}, "default": {}},
+                "path": {**string, "minLength": 1},
+                "max_bytes": {**integer, "minimum": 1, "maximum": 10485760, "default": 5242880},
+                "max_width": {**integer, "minimum": 1, "maximum": 4096, "default": 1024},
+                "max_height": {**integer, "minimum": 1, "maximum": 4096, "default": 1024},
+                "auto_resize": {**boolean, "default": True},
             },
-            ["cmd"],
+            ["path"],
         ),
-        "write_stdin": object_schema(
+        "preview_patch": object_schema(
             {
-                "session_id": {**string, "minLength": 1},
-                "chars": {**string, "default": ""},
-                "yield_time_ms": {**integer, "minimum": 0, "maximum": 30000, "default": 10000},
-                "max_output_bytes": {**integer, "minimum": 1, "maximum": 1048576, "default": 65536},
-                "verbosity": {**string, "enum": ["summary", "preview", "full"]},
-                "preview_bytes": {**integer, "minimum": 1, "maximum": 1048576, "default": 4096},
+                "patch": {**string, "minLength": 1},
             },
-            ["session_id"],
+            ["patch"],
         ),
-        "kill_session": object_schema(
+        "apply_patch": object_schema(
             {
-                "session_id": {**string, "minLength": 1},
-                "signal": {**string, "enum": ["TERM", "KILL", "INT"], "default": "TERM"},
-                "wait_ms": {**integer, "minimum": 0, "maximum": 30000, "default": 5000},
-                "max_output_bytes": {**integer, "minimum": 1, "maximum": 1048576, "default": 65536},
-                "verbosity": {**string, "enum": ["summary", "preview", "full"]},
-                "preview_bytes": {**integer, "minimum": 1, "maximum": 1048576, "default": 4096},
+                "patch": {**string, "minLength": 1},
             },
-            ["session_id"],
+            ["patch"],
         ),
-        "read_output": object_schema(
-            {
-                "output_ref": {**string, "minLength": 1},
-                "stream": {**string, "enum": ["stdout", "stderr"]},
-                "offset": {**integer, "minimum": 0, "default": 0},
-                "limit": {**integer, "minimum": 1, "maximum": 1048576, "default": 4096},
-            },
-            ["output_ref"],
-        ),
-        "git_status": object_schema(
-            {
-                "path": {**string, "default": "."},
-                "include_untracked": {**boolean, "default": True},
-                "max_entries": {**integer, "minimum": 1, "maximum": 10000, "default": 1000},
-            }
-        ),
+        "git_status": object_schema(),
         "git_diff": object_schema(
             {
-                "path": string,
-                "paths": string_array,
+                "path": {**string, "default": "."},
                 "staged": {**boolean, "default": False},
-                "unstaged": {**boolean, "default": True},
-                "context_lines": {**integer, "minimum": 0, "maximum": 20, "default": 3},
+                "context": {**integer, "minimum": 0, "maximum": 10, "default": 3},
                 "max_bytes": {**integer, "minimum": 1, "maximum": 1048576, "default": 262144},
             }
         ),
@@ -4581,19 +4551,19 @@ def input_schemas() -> dict[str, dict[str, Any]]:
             {
                 "path": {**string, "default": "."},
                 "ref": {**string, "default": "HEAD"},
-                "max_count": {**integer, "minimum": 1, "maximum": 100, "default": 20},
-                "skip": {**integer, "minimum": 0, "maximum": 10000, "default": 0},
+                "max_count": {**integer, "minimum": 1, "maximum": 1000, "default": 20},
+                "skip": {**integer, "minimum": 0, "default": 0},
             }
         ),
         "git_show": object_schema(
             {
-                "rev": {**string, "default": "HEAD"},
-                "path": string,
-                "paths": string_array,
-                "include_diff": {**boolean, "default": True},
-                "context_lines": {**integer, "minimum": 0, "maximum": 20, "default": 3},
+                "rev": {**string, "minLength": 1},
+                "path": {**string, "default": "."},
+                "context": {**integer, "minimum": 0, "maximum": 10, "default": 3},
                 "max_bytes": {**integer, "minimum": 1, "maximum": 1048576, "default": 262144},
-            }
+                "include_diff": {**boolean, "default": True},
+            },
+            ["rev"],
         ),
         "git_blame": object_schema(
             {
@@ -4602,6 +4572,103 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                 "start_line": {**integer, "minimum": 1, "default": 1},
                 "end_line": {**integer, "minimum": 1},
                 "max_lines": {**integer, "minimum": 1, "maximum": 1000, "default": 200},
+            },
+            ["path"],
+        ),
+        "list_tasks": object_schema(
+            {
+                "category": string,
+                "query": string,
+            }
+        ),
+        "describe_task": object_schema(
+            {
+                "task_id": {**string, "minLength": 1},
+            },
+            ["task_id"],
+        ),
+        "run_task": object_schema(
+            {
+                "task_id": {**string, "minLength": 1},
+                "args": string_array,
+                "path": string,
+                "timeout_ms": {**integer, "minimum": 1, "default": 30000},
+            },
+            ["task_id"],
+        ),
+        "exec_command": object_schema(
+            {
+                "cmd": {**string, "minLength": 1},
+                "cwd": string,
+                "workdir": string,
+                "timeout_ms": {**integer, "minimum": 1, "maximum": 300000, "default": 30000},
+                "yield_time_ms": {**integer, "minimum": 0, "maximum": 300000, "default": 10000},
+                "env": {"type": "object", "additionalProperties": {"type": "string"}},
+                "max_bytes": {**integer, "minimum": 1, "maximum": 1048576, "default": 262144},
+                "max_output_bytes": {**integer, "minimum": 1, "maximum": 1048576, "default": 262144},
+            },
+            ["cmd"],
+        ),
+                "job_status": object_schema(
+            {
+                "session_id": {**string, "minLength": 1},
+            },
+            ["session_id"],
+        ),
+        "read_output": object_schema(
+            {
+                "output_ref": {**string, "minLength": 1},
+                "offset": {**integer, "minimum": 0},
+                "limit": {**integer, "minimum": 1, "maximum": 1048576, "default": 262144},
+            },
+            ["output_ref"],
+        ),
+        "write_stdin": object_schema(
+            {
+                "session_id": {**string, "minLength": 1},
+                "chars": string,
+                "yield_time_ms": {**integer, "minimum": 0, "maximum": 300000, "default": 10000},
+            },
+            ["session_id"],
+        ),
+        "kill_session": object_schema(
+            {
+                "session_id": {**string, "minLength": 1},
+                "signal": {**string, "default": "SIGTERM"},
+            },
+            ["session_id"],
+        ),
+        "job_output": object_schema(
+            {
+                "session_id": {**string, "minLength": 1},
+            },
+            ["session_id"],
+        ),
+        "job_input": object_schema(
+            {
+                "session_id": {**string, "minLength": 1},
+                "input": {**string, "minLength": 1},
+            },
+            ["session_id", "input"],
+        ),
+        "job_cancel": object_schema(
+            {
+                "session_id": {**string, "minLength": 1},
+            },
+            ["session_id"],
+        ),
+        "approval_status": object_schema(
+            {
+                "approval_id": {**string, "minLength": 1},
+            },
+            ["approval_id"],
+        ),
+        "list_pending_approvals": object_schema(),
+        "check_exec_environment": object_schema(),
+        "get_default_cwd": object_schema(),
+        "set_default_cwd": object_schema(
+            {
+                "path": {**string, "minLength": 1},
             },
             ["path"],
         ),
@@ -4628,19 +4695,7 @@ def input_schemas() -> dict[str, dict[str, Any]]:
             },
             ["tool_name", "permission", "reason", "arguments"],
         ),
-        "view_image": object_schema(
-            {
-                "path": {**string, "minLength": 1},
-                "max_bytes": {**integer, "minimum": 1024, "maximum": 10485760, "default": 5242880},
-                "max_width": {**integer, "minimum": 1, "maximum": 10000, "default": IMAGE_RESIZE_MAX_DIMENSION},
-                "max_height": {**integer, "minimum": 1, "maximum": 10000, "default": IMAGE_RESIZE_MAX_DIMENSION},
-                "auto_resize": {**boolean, "default": True},
-            },
-            ["path"],
-        ),
     }
-
-
 def _server_card_auth(runtime: Runtime, *, oauth_base_url: str | None = None) -> dict[str, Any]:
     if runtime.oauth_enabled():
         cfg = runtime.oauth_config

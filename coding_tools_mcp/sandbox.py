@@ -41,13 +41,15 @@ class ExecutionSandbox:
         # Prefer rsync for efficiency if available
         if shutil.which("rsync"):
             try:
-                subprocess.run([
+                process = subprocess.Popen([
                     "rsync", "-a", "--delete", "--exclude=.git",
                     str(source) + "/",
                     str(dest) + "/"
-                ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                return
-            except subprocess.SubprocessError:
+                ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                process.wait()
+                if process.returncode == 0:
+                    return
+            except Exception:
                 pass # Fallback to shutil
 
         # Fallback to shutil.copytree
@@ -72,10 +74,33 @@ class ExecutionSandbox:
             rel = raw_cwd.resolve().relative_to(self.original_workspace.resolve())
             return self.sandbox_dir.joinpath(rel)
         except ValueError:
-            # If it's not relative to the workspace, fallback to sandbox root or reject
-            # Since the framework already validates cwd, this shouldn't happen unless requested.
             return self.sandbox_dir
 
     def resolve_sandbox_path(self, raw_path: str) -> Path:
         """Resolve a path string relative to the sandbox directory."""
         return self.sandbox_dir.joinpath(raw_path).resolve()
+
+    def get_bwrap_args(self) -> list[str]:
+        """Constructs the bwrap arguments for sandbox execution."""
+        args = [
+            "bwrap",
+            "--unshare-all",
+            "--cap-drop", "ALL",
+            "--new-session",
+            "--die-with-parent",
+        ]
+        
+        # Mount minimal host read-only, explicitly excluding /home and /root
+        for bind_dir in ["/usr", "/lib", "/lib64", "/bin", "/sbin", "/etc"]:
+            if os.path.exists(bind_dir):
+                args.extend(["--ro-bind", bind_dir, bind_dir])
+                
+        # Required special files
+        args.extend([
+            "--proc", "/proc",
+            "--dev", "/dev",
+            "--tmpfs", "/tmp",
+            "--bind", str(self.sandbox_dir), str(self.sandbox_dir),
+        ])
+        
+        return args

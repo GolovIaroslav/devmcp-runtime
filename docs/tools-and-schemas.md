@@ -6,30 +6,41 @@ properties, annotations, and error codes with the contract.
 
 ## Fixed inventory
 
-The default catalog contains exactly 20 tools:
+The default catalog contains exactly 33 tools:
 
-- `server_info`: server, workspace, automatic project context, policy, runtime,
-  auth, protocol, and fixed-catalog metadata.
-- `check_exec_environment`: lightweight execution policy and Landlock status.
-- `get_default_cwd`: inspect this MCP runtime's relative-path base.
-- `set_default_cwd`: change this MCP runtime's relative-path base.
-- `read_file`: stream a bounded UTF-8 range without loading the whole file.
-- `list_dir`: list immediate or bounded-recursive directory entries.
-- `list_files`: iterate files with glob, ignore, hidden-file, sort, and cap
-  controls.
-- `search_text`: literal or regex search; ripgrep stops after the result cap.
-- `apply_patch`: stage and atomically commit add/update/delete/move envelopes.
-- `exec_command`: run a bounded command and wait up to 10 seconds by default.
-- `write_stdin`: poll or interact with a running command session.
-- `kill_session`: terminate one runtime-owned command session.
-- `read_output`: page retained stdout or stderr using absolute byte offsets.
-- `git_status`: structured working-tree status.
-- `git_diff`: bounded unified staged/unstaged diff.
-- `git_log`: structured bounded commit history.
-- `git_show`: bounded revision metadata/content/diff.
-- `git_blame`: structured bounded line attribution.
-- `request_permissions`: report elicitation status without silently granting.
-- `view_image`: one MCP image content block plus structured metadata.
+- `server_info`: Server info.
+- `health`: Health check.
+- `workspace_info`: Workspace info.
+- `read_file`: Read file.
+- `read_files`: Read multiple files.
+- `list_dir`: List directory.
+- `list_files`: List files.
+- `search_text`: Search text.
+- `view_image`: View image.
+- `preview_patch`: Preview patch.
+- `apply_patch`: Apply patch.
+- `git_status`: Git status.
+- `git_diff`: Git diff.
+- `git_log`: Git log.
+- `git_show`: Git show.
+- `git_blame`: Git blame.
+- `list_tasks`: List tasks.
+- `describe_task`: Describe task.
+- `run_task`: Run task.
+- `exec_command`: Exec command.
+- `job_status`: Job status.
+- `read_output`: Read output.
+- `write_stdin`: Write stdin.
+- `kill_session`: Kill session.
+- `job_output`: Job output.
+- `job_input`: Job input.
+- `job_cancel`: Job cancel.
+- `approval_status`: Approval status.
+- `list_pending_approvals`: List pending approvals.
+- `check_exec_environment`: Check exec environment.
+- `get_default_cwd`: Get default cwd.
+- `set_default_cwd`: Set default cwd.
+- `request_permissions`: Request permissions.
 
 `view_image` may be disabled when an installation cannot accept binary image
 content. That capability gate is not a tool profile. The other 19 tools are

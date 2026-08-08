@@ -687,7 +687,7 @@ class RuntimeHelperTests(unittest.TestCase):
             else:
                 self.assertIn("start_new_session", kwargs)
             self.assertEqual(kwargs.get("pass_fds"), (captured["read_fd"],))
-            self.assertEqual(captured.get("write_roots"), [runtime.runtime_dir])
+            self.assertEqual(captured.get("write_roots"), [runtime.sandbox.sandbox_dir, runtime.runtime_dir])
             popen_args = captured["args"]
             self.assertIsInstance(popen_args, tuple)
             argv = popen_args[0]
@@ -701,7 +701,7 @@ class RuntimeHelperTests(unittest.TestCase):
                 with fake_landlock_exec() as captured:
                     runtime.exec_command({"cmd": "printf ok", "timeout_ms": 5000, "yield_time_ms": 0})
 
-                self.assertEqual(captured.get("write_roots"), [runtime.runtime_dir])
+                self.assertEqual(captured.get("write_roots"), [runtime.sandbox.sandbox_dir, runtime.runtime_dir])
 
     def test_dangerously_skip_all_permissions_auto_grants_permission_gates(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -1417,7 +1417,7 @@ Maven home: /usr/share/maven
                 "EOF"
             )
             runtime.exec_command({"cmd": xml_heredoc, "timeout_ms": 5000, "max_output_bytes": 4096})
-            self.assertIn(tag, (workspace / "pom.xml").read_text(encoding="utf-8"))
+            self.assertIn(tag, (runtime.sandbox.sandbox_dir / "pom.xml").read_text(encoding="utf-8"))
 
     def test_heredoc_payload_stripping_keeps_live_shell_code_scanned(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -1541,7 +1541,7 @@ class FakeReadonlyAnnotationTests(unittest.TestCase):
             runtime = Runtime(workspace, permission_mode="dangerous", fake_readonly_annotations=True)
             result = runtime.exec_command({"cmd": "echo ran > ran.txt", "timeout_ms": 30000, "yield_time_ms": 30000})
             self.assertEqual(result.get("status"), "exited", result)
-            self.assertTrue((workspace / "ran.txt").exists(), "read-only annotation must not stop execution")
+            self.assertTrue((runtime.sandbox.sandbox_dir / "ran.txt").exists(), "read-only annotation must not stop execution")
 
     def test_override_is_reported_by_check_exec_environment(self) -> None:
         with TemporaryDirectory() as tmp:

@@ -124,6 +124,19 @@ class MCPContractTests(ComplianceTestCase):
             "git_blame": (True, False, True, False),
             "request_permissions": (True, False, False, False),
             "view_image": (True, False, True, False),
+            "list_tasks": (True, False, True, False),
+            "describe_task": (True, False, True, False),
+            "run_task": (False, True, False, False),
+            "job_status": (True, False, True, False),
+            "job_output": (True, False, True, False),
+            "job_input": (False, True, False, False),
+            "job_cancel": (False, True, False, False),
+            "approval_status": (True, False, True, False),
+            "list_pending_approvals": (True, False, True, False),
+            "health": (True, False, True, False),
+            "workspace_info": (True, False, True, False),
+            "read_files": (True, False, True, False),
+            "preview_patch": (True, False, True, False),
         }
         for tool in self.client.list_tools():
             name = str(tool.get("name"))
