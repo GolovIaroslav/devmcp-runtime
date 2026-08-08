@@ -37,3 +37,15 @@ CLAUDE.md
 docs/project-context.md
 docs/project-context/
 docs/specs/
+
+# Environment and Credentials
+.env
+.env.*
+*.key
+*.pem
+*.token
+
+# ChatGPT Dev Runtime State & Sandboxes
+approvals.json
+/tmp/chatgpt-dev-sandbox-*
+

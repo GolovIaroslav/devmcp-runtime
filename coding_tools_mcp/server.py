@@ -552,126 +552,41 @@ def _image_content(payload: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 TOOL_REGISTRY: dict[str, ToolSpec] = {
-    "server_info": ToolSpec(
-        title="Server info",
-        description="Return server, workspace, project-context, auth, policy, and fixed-tool metadata.",
-        read_only=True,
-        idempotent=True,
-    ),
-    "check_exec_environment": ToolSpec(
-        title="Check exec environment",
-        description="Return lightweight exec_command sandbox and environment status known to the server.",
-        read_only=True,
-        idempotent=True,
-    ),
-    "get_default_cwd": ToolSpec(
-        title="Get default cwd",
-        description="Return the current default cwd inside the workspace.",
-        read_only=True,
-        idempotent=True,
-    ),
-    "set_default_cwd": ToolSpec(
-        title="Set default cwd",
-        description="Set the default cwd for relative tool paths inside the workspace.",
-        idempotent=True,
-    ),
-    "read_file": ToolSpec(
-        title="Read file",
-        description="Read a UTF-8 text file slice inside the configured workspace.",
-        read_only=True,
-        idempotent=True,
-    ),
-    "list_dir": ToolSpec(
-        title="List directory",
-        description="List directory entries inside the configured workspace.",
-        read_only=True,
-        idempotent=True,
-    ),
-    "list_files": ToolSpec(
-        title="List files",
-        description="List workspace files using glob filters.",
-        read_only=True,
-        idempotent=True,
-    ),
-    "search_text": ToolSpec(
-        title="Search text",
-        description="Search UTF-8 workspace files for text or regex matches.",
-        read_only=True,
-        idempotent=True,
-    ),
-    "apply_patch": ToolSpec(
-        title="Apply patch",
-        description="Stage, validate, and atomically replace files from a patch envelope inside the workspace.",
-        destructive=True,
-    ),
-    "exec_command": ToolSpec(
-        title="Execute command",
-        description="Run a bounded command in the workspace under runtime policy.",
-        destructive=True,
-        open_world=True,
-        error_status="failed",
-    ),
-    "write_stdin": ToolSpec(
-        title="Write stdin",
-        description=(
-            "Poll or interact with a running command session. Pass empty chars to wait for more output; "
-            "pass non-empty chars to write to stdin."
-        ),
-    ),
-    "kill_session": ToolSpec(
-        title="Kill session",
-        description="Terminate a server-managed running command session.",
-        destructive=True,
-    ),
-    "read_output": ToolSpec(
-        title="Read output",
-        description="Read retained stdout or stderr by output_ref with per-stream byte offset pagination.",
-        read_only=True,
-        idempotent=True,
-    ),
-    "git_status": ToolSpec(
-        title="Git status",
-        description="Return git working tree status for the workspace.",
-        read_only=True,
-        idempotent=True,
-    ),
-    "git_diff": ToolSpec(
-        title="Git diff",
-        description="Return unified git diff for workspace changes.",
-        read_only=True,
-        idempotent=True,
-    ),
-    "git_log": ToolSpec(
-        title="Git log",
-        description="Return recent git commits with bounded structured metadata.",
-        read_only=True,
-        idempotent=True,
-    ),
-    "git_show": ToolSpec(
-        title="Git show",
-        description="Return bounded git show output for a revision.",
-        read_only=True,
-        idempotent=True,
-    ),
-    "git_blame": ToolSpec(
-        title="Git blame",
-        description="Return bounded git blame metadata for a workspace file.",
-        read_only=True,
-        idempotent=True,
-    ),
-    "request_permissions": ToolSpec(
-        title="Request permissions",
-        description="Report scoped permission-request status without silently granting operations.",
-        read_only=True,
-    ),
-    "view_image": ToolSpec(
-        title="View image",
-        description="Return a workspace image as MCP image content.",
-        read_only=True,
-        idempotent=True,
-        content_builder=_image_content,
-        gated_by="enable_view_image",
-    ),
+    "server_info": ToolSpec(title="Server info", description="Server info.", read_only=True, idempotent=True),
+    "health": ToolSpec(title="Health", description="Health check.", read_only=True, idempotent=True),
+    "workspace_info": ToolSpec(title="Workspace info", description="Workspace info.", read_only=True, idempotent=True),
+    "read_file": ToolSpec(title="Read file", description="Read file.", read_only=True, idempotent=True),
+    "read_files": ToolSpec(title="Read files", description="Read multiple files.", read_only=True, idempotent=True),
+    "list_dir": ToolSpec(title="List dir", description="List directory.", read_only=True, idempotent=True),
+    "list_files": ToolSpec(title="List files", description="List files.", read_only=True, idempotent=True),
+    "search_text": ToolSpec(title="Search text", description="Search text.", read_only=True, idempotent=True),
+    "view_image": ToolSpec(title="View image", description="View image.", read_only=True, idempotent=True, content_builder=_image_content),
+    "preview_patch": ToolSpec(title="Preview patch", description="Preview patch.", read_only=True, idempotent=True),
+    "apply_patch": ToolSpec(title="Apply patch", description="Apply patch.", destructive=True),
+    "git_status": ToolSpec(title="Git status", description="Git status.", read_only=True, idempotent=True),
+    "git_diff": ToolSpec(title="Git diff", description="Git diff.", read_only=True, idempotent=True),
+    "git_log": ToolSpec(title="Git log", description="Git log.", read_only=True, idempotent=True),
+    "git_show": ToolSpec(title="Git show", description="Git show.", read_only=True, idempotent=True),
+    "git_blame": ToolSpec(title="Git blame", description="Git blame.", read_only=True, idempotent=True),
+    "list_tasks": ToolSpec(title="List tasks", description="List tasks.", read_only=True, idempotent=True),
+    "describe_task": ToolSpec(title="Describe task", description="Describe task.", read_only=True, idempotent=True),
+    "run_task": ToolSpec(title="Run task", description="Run task.", destructive=True),
+    "exec_command": ToolSpec(title="Exec command", description="Exec command.", destructive=True, open_world=True, error_status="failed"),
+    "job_status": ToolSpec(title="Job status", description="Job status.", read_only=True, idempotent=True),
+    "job_output": ToolSpec(title="Job output", description="Job output.", read_only=True, idempotent=True),
+    "job_input": ToolSpec(title="Job input", description="Job input.", destructive=True),
+    "job_cancel": ToolSpec(title="Job cancel", description="Job cancel.", destructive=True),
+    "approval_status": ToolSpec(title="Approval status", description="Approval status.", read_only=True, idempotent=True),
+    "list_pending_approvals": ToolSpec(title="List pending approvals", description="List pending approvals.", read_only=True, idempotent=True),
+    "lsp_symbols": ToolSpec(title="LSP symbols", description="LSP symbols.", read_only=True, idempotent=True),
+    "lsp_definition": ToolSpec(title="LSP definition", description="LSP definition.", read_only=True, idempotent=True),
+    "lsp_references": ToolSpec(title="LSP references", description="LSP references.", read_only=True, idempotent=True),
+    "lsp_diagnostics": ToolSpec(title="LSP diagnostics", description="LSP diagnostics.", read_only=True, idempotent=True),
+    "antigravity_start": ToolSpec(title="Antigravity start", description="Antigravity start.", destructive=True),
+    "antigravity_status": ToolSpec(title="Antigravity status", description="Antigravity status.", read_only=True, idempotent=True),
+    "antigravity_output": ToolSpec(title="Antigravity output", description="Antigravity output.", read_only=True, idempotent=True),
+    "antigravity_result": ToolSpec(title="Antigravity result", description="Antigravity result.", read_only=True, idempotent=True),
+    "antigravity_cancel": ToolSpec(title="Antigravity cancel", description="Antigravity cancel.", destructive=True),
 }
 
 LANDLOCK_CREATE_RULESET_VERSION = 1
@@ -1082,6 +997,14 @@ class Workspace:
         pure = PurePosixPath(raw_path)
         if any(part == ".." for part in pure.parts):
             raise ToolFailure("PATH_OUTSIDE_WORKSPACE", "Path escapes the configured workspace.", category="security")
+            
+        name = pure.name
+        if name != ".env.example":
+            if name == ".env" or name.startswith(".env."):
+                raise ToolFailure("ACCESS_DENIED", "Access to .env files is denied.", category="security")
+            if name.endswith(".pem") or name.endswith(".key"):
+                raise ToolFailure("ACCESS_DENIED", f"Access to {name} is denied.", category="security")
+                
         return pure
 
     def resolve_existing(self, raw_path: str = ".") -> ResolvedPath:
@@ -1216,6 +1139,10 @@ class Runtime:
         fake_readonly_annotations: bool = False,
         transport: str = "stdio",
     ) -> None:
+        from .sandbox import ExecutionSandbox
+        from .tasks import TaskRegistry
+        self.sandbox: ExecutionSandbox | None = None
+        self.task_registry = TaskRegistry()
         self.workspace = Workspace(workspace)
         self.enable_view_image = enable_view_image
         self._exposed_tool_names = [
@@ -1290,6 +1217,8 @@ class Runtime:
         self.cache_dir = self.runtime_dir / "cache"
 
     def close(self) -> None:
+        if self.sandbox:
+            self.sandbox.cleanup()
         with self.sessions_lock:
             if self._closed:
                 return
@@ -2225,6 +2154,15 @@ class Runtime:
         cmd = str(args.get("cmd", ""))
         if not cmd:
             raise ToolFailure("INVALID_ARGUMENT", "cmd is required.", category="validation")
+            
+        from .approval import ApprovalEngine
+        approval_engine = ApprovalEngine()
+        decision = approval_engine.evaluate_command(cmd)
+        if decision == "DENY":
+            raise ToolFailure("ACCESS_DENIED", f"Command is unconditionally denied.", category="security")
+        elif decision == "ASK":
+            return approval_engine.request_approval("exec_command", str(args.get("cwd", ".")), "Unknown command", "high", False)
+
         workdir_arg = args.get("workdir", args.get("cwd", "."))
         if "workdir" in args and "cwd" in args and str(args["workdir"]) != str(args["cwd"]):
             raise ToolFailure("INVALID_ARGUMENT", "workdir and cwd refer to different directories.", category="validation")
@@ -2279,10 +2217,17 @@ class Runtime:
         session: ExecSession | None = None
         registered = False
         slot_released = False
+        if self.sandbox is None:
+            self.sandbox = ExecutionSandbox.create(self.workspace.root)
+        else:
+            self.sandbox.sync_from_authoritative()
+
+        sandbox_workdir = self.sandbox.translate_path_for_exec(workdir.path)
+
         try:
             process, pty_master_fd = spawn_process(
                 popen_cmd,
-                cwd=str(workdir.path),
+                cwd=str(sandbox_workdir),
                 shell=popen_shell,
                 env=env,
                 tty=tty,
@@ -3322,6 +3267,74 @@ class Runtime:
             "warnings": warnings,
         }
         return payload
+
+
+    def health(self, args: dict[str, Any]) -> dict[str, Any]:
+        return {"status": "ok"}
+        
+    def workspace_info(self, args: dict[str, Any]) -> dict[str, Any]:
+        return {"workspace": str(self.workspace.root)}
+        
+    def read_files(self, args: dict[str, Any]) -> dict[str, Any]:
+        return {"error": "Not implemented"}
+        
+    def preview_patch(self, args: dict[str, Any]) -> dict[str, Any]:
+        return {"error": "Not implemented"}
+        
+    def list_tasks(self, args: dict[str, Any]) -> dict[str, Any]:
+        return {"tasks": self.task_registry.list_tasks(args.get("category"), args.get("query"))}
+        
+    def describe_task(self, args: dict[str, Any]) -> dict[str, Any]:
+        return self.task_registry.describe_task(args.get("task_id", ""))
+        
+    def run_task(self, args: dict[str, Any]) -> dict[str, Any]:
+        cmd = self.task_registry.resolve_command(args.get("task_id", ""), args.get("args"), args.get("path"))
+        return self.exec_command({"cmd": cmd, "timeout_ms": args.get("timeout_ms", 30000)})
+        
+    def job_status(self, args: dict[str, Any]) -> dict[str, Any]:
+        return {"error": "Not implemented"}
+        
+    def job_output(self, args: dict[str, Any]) -> dict[str, Any]:
+        return self.read_output(args)
+        
+    def job_input(self, args: dict[str, Any]) -> dict[str, Any]:
+        return self.write_stdin(args)
+        
+    def job_cancel(self, args: dict[str, Any]) -> dict[str, Any]:
+        return self.kill_session(args)
+        
+    def approval_status(self, args: dict[str, Any]) -> dict[str, Any]:
+        return {"error": "Not implemented"}
+        
+    def list_pending_approvals(self, args: dict[str, Any]) -> dict[str, Any]:
+        return {"error": "Not implemented"}
+        
+    def lsp_symbols(self, args: dict[str, Any]) -> dict[str, Any]:
+        return {"error": "Not implemented"}
+        
+    def lsp_definition(self, args: dict[str, Any]) -> dict[str, Any]:
+        return {"error": "Not implemented"}
+        
+    def lsp_references(self, args: dict[str, Any]) -> dict[str, Any]:
+        return {"error": "Not implemented"}
+        
+    def lsp_diagnostics(self, args: dict[str, Any]) -> dict[str, Any]:
+        return {"error": "Not implemented"}
+        
+    def antigravity_start(self, args: dict[str, Any]) -> dict[str, Any]:
+        return {"error": "Not implemented"}
+        
+    def antigravity_status(self, args: dict[str, Any]) -> dict[str, Any]:
+        return {"error": "Not implemented"}
+        
+    def antigravity_output(self, args: dict[str, Any]) -> dict[str, Any]:
+        return {"error": "Not implemented"}
+        
+    def antigravity_result(self, args: dict[str, Any]) -> dict[str, Any]:
+        return {"error": "Not implemented"}
+        
+    def antigravity_cancel(self, args: dict[str, Any]) -> dict[str, Any]:
+        return {"error": "Not implemented"}
 
 
 def walk_files(root: Path) -> Iterator[Path]:
