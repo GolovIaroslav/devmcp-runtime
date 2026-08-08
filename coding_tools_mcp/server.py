@@ -2267,7 +2267,10 @@ class Runtime:
         network_required = bool(args.get("network_required", False))
         operation_cwd = str(workdir.path)
         required_caps = self._required_command_capabilities(cmd, args)
-        decision = "ALLOW" if self.dangerously_skip_all_permissions else str(args.get("approval_class") or approval_engine.evaluate_command(cmd))
+        if self.dangerously_skip_all_permissions or self.permission_mode == "trusted":
+            decision = "ALLOW"
+        else:
+            decision = str(args.get("approval_class") or approval_engine.evaluate_command(cmd))
         if decision == "DENY":
             raise ToolFailure("ACCESS_DENIED", "Command is unconditionally denied.", category="security")
 
@@ -2306,6 +2309,7 @@ class Runtime:
                     capabilities=sorted(requested),
                 )
             self._check_command_policy(cmd, args)
+        internal_args["approval_class"] = "ALLOW" if decision == "ALLOW" else decision
         internal_args["_resolved_workdir"] = workdir.path
         return self._execute_command_legacy(internal_args)
 
@@ -2405,6 +2409,13 @@ class Runtime:
         popen_extra = process_group_popen_kwargs()
         
         import shutil
+        if tty and os.name == "nt":
+            raise ToolFailure(
+                "TTY_UNSUPPORTED",
+                "tty=true requires ConPTY support, which is not available in this build.",
+                category="runtime",
+                details={"platform": os.name, "retry_hint": "Run the command without tty=true."},
+            )
         if not shutil.which("bwrap"):
             raise ToolFailure("SANDBOX_UNAVAILABLE", "bwrap is required for execution sandbox but not found.", category="security")
             
@@ -3523,7 +3534,10 @@ class Runtime:
         files = []
         for raw_path in raw_paths:
             res = self.workspace.resolve_existing(str(raw_path))
-            content = self.workspace.read_text(str(raw_path))
+            try:
+                content = res.path.read_text(encoding="utf-8")
+            except UnicodeDecodeError as exc:
+                raise ToolFailure("UNSUPPORTED_ENCODING", "File is not valid utf-8.", category="validation") from exc
             files.append({
                 "path": res.display,
                 "content": content,

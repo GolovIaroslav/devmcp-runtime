@@ -204,6 +204,20 @@ class AuditV4SecurityTests(ComplianceTestCase):
         with self.assertRaises(ToolFailure):
             registry.build_argv(template, {"count": "7"})
 
+    def test_read_files_is_implemented_and_trusted_mode_runs_unknown_commands(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "one.txt").write_text("one\n", encoding="utf-8")
+            (root / "two.txt").write_text("two\n", encoding="utf-8")
+            runtime = Runtime(root, permission_mode="trusted")
+            try:
+                files = runtime.read_files({"paths": ["one.txt", "two.txt"]})
+                self.assertEqual([item["content"] for item in files["files"]], ["one\n", "two\n"])
+                result = runtime.exec_command({"cmd": "command-that-is-not-in-the-safe-prefix", "timeout_ms": 5000})
+                self.assertNotEqual(result.get("status"), "approval_required", result)
+            finally:
+                runtime.close()
+
 
 class ApprovalV4Tests(unittest.TestCase):
     def test_canonical_operation_digest_uses_raw_env_and_is_single_use(self) -> None:

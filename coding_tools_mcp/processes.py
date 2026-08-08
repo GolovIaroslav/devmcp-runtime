@@ -12,7 +12,7 @@ from typing import Any, BinaryIO
 from .errors import ToolFailure
 from .textutils import DEFAULT_MAX_LINES, TextTruncation, truncate_text_tail
 
-subprocess._USE_POSIX_SPAWN = False
+setattr(subprocess, "_USE_POSIX_SPAWN", False)
 
 _spawner_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="coding_tools_spawner")
 
