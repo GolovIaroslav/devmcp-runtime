@@ -2,7 +2,7 @@ name: compliance
 
 on:
   push:
-    branches: [main, "recover-*"]
+    branches: [main, "recover-*", "audit-fix-v4"]
   pull_request:
     branches: [main]
   workflow_dispatch:

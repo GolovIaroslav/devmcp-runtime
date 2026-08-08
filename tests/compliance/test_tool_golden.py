@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import stat
 from typing import Any
 
 from tests.compliance.mcp_client import MCPError
@@ -151,7 +150,7 @@ class ApplyPatchGoldenTests(ComplianceTestCase):
 
     def test_apply_patch_preserves_bom_crlf_and_rejects_ambiguous_context(self) -> None:
         crlf_file = self.workspace.root / "src" / "crlf.txt"
-        crlf_file.write_bytes("\ufeffalpha\r\nold\r\nomega\r\n".encode("utf-8"))
+        crlf_file.write_bytes("\ufeffalpha\r\nold\r\nomega\r\ntail\r\n".encode("utf-8"))
         patch = """*** Begin Patch
 *** Update File: src/crlf.txt
 @@

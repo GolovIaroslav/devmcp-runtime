@@ -1,5 +1,4 @@
 from __future__ import annotations
-import os
 from tests.compliance.test_support import ComplianceTestCase
 
 class PatchSafetyTests(ComplianceTestCase):
@@ -24,27 +23,49 @@ class PatchSafetyTests(ComplianceTestCase):
         self.assertIn('"version": "0.0.0"', content)
 
     def test_5000_line_byte_preservation(self) -> None:
-        # Create a 5000-line file
         test_file = self.workspace.root / "5000_lines.txt"
         original_lines = [f"Line {i}: Some content that must be perfectly preserved." for i in range(5000)]
-        test_file.write_text("\n".join(original_lines) + "\n")
-        
-        # Patch the middle of the file
+        test_file.write_bytes(("\n".join(original_lines) + "\n").encode())
+
         patch = """*** Begin Patch
 *** Update File: 5000_lines.txt
-@@ -2499,3 +2499,3 @@
- Line 2498: Some content that must be perfectly preserved.
--Line 2499: Some content that must be perfectly preserved.
-+Line 2499: MODIFIED CONTENT.
- Line 2500: Some content that must be perfectly preserved.
+@@
+ Line 99: Some content that must be perfectly preserved.
+-Line 100: Some content that must be perfectly preserved.
++Line 100: MODIFIED REGION ONE.
+ Line 101: Some content that must be perfectly preserved.
+@@
+ Line 2499: Some content that must be perfectly preserved.
+-Line 2500: Some content that must be perfectly preserved.
++Line 2500: MODIFIED REGION TWO.
+ Line 2501: Some content that must be perfectly preserved.
+@@
+ Line 3999: Some content that must be perfectly preserved.
+-Line 4000: Some content that must be perfectly preserved.
++Line 4000: MODIFIED REGION THREE.
+ Line 4001: Some content that must be perfectly preserved.
 *** End Patch
 """
-        res = self.client.call_tool("apply_patch", {"patch": patch})
-        self.assert_tool_success(res)
-        
-        # Verify preservation
+        self.assert_tool_success(self.client.call_tool("apply_patch", {"patch": patch}))
+
         modified_lines = test_file.read_text().splitlines()
-        self.assertEqual(len(modified_lines), 5000)
-        self.assertEqual(modified_lines[0], "Line 0: Some content that must be perfectly preserved.")
-        self.assertEqual(modified_lines[-1], "Line 4999: Some content that must be perfectly preserved.")
-        self.assertEqual(modified_lines[2499], "Line 2499: MODIFIED CONTENT.")
+        self.assertEqual(modified_lines[100], "Line 100: MODIFIED REGION ONE.")
+        self.assertEqual(modified_lines[2500], "Line 2500: MODIFIED REGION TWO.")
+        self.assertEqual(modified_lines[4000], "Line 4000: MODIFIED REGION THREE.")
+        for index, value in enumerate(modified_lines):
+            if index not in {100, 2500, 4000}:
+                self.assertEqual(value, original_lines[index], f"unrelated line {index} changed")
+
+        destructive_patch = (
+            "*** Begin Patch\n*** Update File: 5000_lines.txt\n@@\n"
+            + "".join(f"-{line}\n" for line in modified_lines)
+            + "".join(f"+{line}\n" for line in original_lines[:100])
+            + "*** End Patch\n"
+        )
+        preview = self.client.call_tool("preview_patch", {"patch": destructive_patch})
+        preview_payload = self.assert_tool_success(preview)
+        self.assertGreater(preview_payload.get("removals", 0), 4800)
+        approval = self.client.call_tool("apply_patch", {"patch": destructive_patch})
+        approval_payload = approval.get("structuredContent", {})
+        self.assertEqual(approval_payload.get("status"), "approval_required", approval)
+        self.assertEqual(test_file.read_bytes(), ("\n".join(modified_lines) + "\n").encode())

@@ -110,7 +110,7 @@ Tool failures keep the same envelope with `isError: true`, a readable error in
 Known tool error codes include:
 
 ```json
-["ABSOLUTE_PATH_DENIED", "ACCESS_DENIED", "BINARY_FILE", "ELICITATION_UNSUPPORTED", "GIT_ERROR", "INTERNAL_ERROR", "INVALID_ARGUMENT", "IS_DIRECTORY", "NOT_A_DIRECTORY", "NOT_FOUND", "NOT_IMPLEMENTED", "OUTPUT_TOO_LARGE", "PATCH_CONFLICT", "PATCH_CONTEXT_AMBIGUOUS", "PATCH_CONTEXT_NOT_FOUND", "PATCH_FAILED", "PATCH_HUNKS_OVERLAP", "PATCH_ROLLBACK_FAILED", "PATH_OUTSIDE_WORKSPACE", "PERMISSION_REQUIRED", "RUNTIME_DIR_UNWRITABLE", "SANDBOX_FAILED", "SANDBOX_UNAVAILABLE", "SESSION_CLOSED", "SESSION_LIMIT_REACHED", "SESSION_NOT_FOUND", "SYMLINK_ESCAPE", "TTY_UNSUPPORTED", "UNSUPPORTED_ENCODING"]
+["ABSOLUTE_PATH_DENIED", "ACCESS_DENIED", "BINARY_FILE", "ELICITATION_UNSUPPORTED", "GIT_ERROR", "INTERNAL_ERROR", "INVALID_ARGUMENT", "INVALID_STATE", "IS_DIRECTORY", "NOT_A_DIRECTORY", "NOT_FOUND", "NOT_IMPLEMENTED", "OUTPUT_TOO_LARGE", "PATCH_CONFLICT", "PATCH_CONTEXT_AMBIGUOUS", "PATCH_CONTEXT_NOT_FOUND", "PATCH_FAILED", "PATCH_HUNKS_OVERLAP", "PATCH_ROLLBACK_FAILED", "PATH_OUTSIDE_WORKSPACE", "PERMISSION_REQUIRED", "RUNTIME_DIR_UNWRITABLE", "SANDBOX_FAILED", "SANDBOX_UNAVAILABLE", "SESSION_CLOSED", "SESSION_LIMIT_REACHED", "SESSION_NOT_FOUND", "SYMLINK_ESCAPE", "TTY_UNSUPPORTED", "UNSUPPORTED_ENCODING"]
 ```
 
 Error categories are `validation`, `security`, `permission`, `runtime`,
@@ -215,6 +215,15 @@ Annotations: `{"title":"Read file","readOnlyHint":true,"destructiveHint":false,"
 Reads UTF-8 ranges as a stream, reports full file line/byte metadata, rejects
 binary content, and returns continuation metadata when bounded.
 
+### read_files
+
+Inputs: `"paths"`.
+
+Annotations: `{"title":"Read files","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}`.
+
+Reads a bounded list of UTF-8 workspace-relative files without following
+symlinks outside the workspace.
+
 ### list_dir
 
 Inputs: `"path"`, `"recursive"`, `"max_depth"`, `"max_entries"`, `"include_hidden"`, `"include_ignored"`, `"sort"`.
@@ -240,22 +249,40 @@ cap is known to be exceeded. `context_lines=0` does not reread matching files.
 
 ### apply_patch
 
-Inputs: `"patch"`, `"dry_run"`.
+Inputs: `"patch"`, `"dry_run"`, `"approval_id"`.
 
 Annotations: `{"title":"Apply patch","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":false}`.
 
-Supports `*** Add File`, `*** Update File`, `*** Delete File`, and
-`*** Move to` inside a `*** Begin Patch` / `*** End Patch` envelope.
+Supports `*** Add File` and `*** Update File` inside a
+`*** Begin Patch` / `*** End Patch` envelope. Delete and move operations are
+unconditionally denied. Preview returns a unified diff, line counts, removal
+percentage, and risk classification; large destructive updates require a
+single-use approval.
 
 ### exec_command
 
-Inputs: `"cmd"`, `"cwd"`, `"workdir"`, `"timeout_ms"`, `"yield_time_ms"`, `"env"`, `"max_bytes"`, `"max_output_bytes"`, `"preview_bytes"`, `"tty"`, `"stdin"`, `"verbosity"`.
+Inputs: `"cmd"`, `"cwd"`, `"workdir"`, `"timeout_ms"`, `"yield_time_ms"`, `"env"`, `"max_bytes"`, `"max_output_bytes"`, `"preview_bytes"`, `"tty"`, `"stdin"`, `"verbosity"`, `"network_required"`, `"task_id"`, `"approval_id"`.
 
 Annotations: `{"title":"Exec command","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
 
 Statuses are `exited`, `running`, `timeout`, `terminated`, or `failed`.
 Launch/policy failures use the error envelope with `status: "failed"`; signal
 exits use `terminated`. Ordinary non-zero exit codes still use `exited`.
+
+`approval_id` consumes one immutable approval for the exact command, normalized
+cwd, raw environment delta, task/session identity, network capability, and
+policy version. Approved capabilities are applied to the corresponding policy
+gates only.
+
+### run_task
+
+Inputs: `"task_id"`, `"args"`, `"path"`, `"cwd"`, `"env"`, `"timeout_ms"`, `"yield_time_ms"`, `"max_output_bytes"`, `"approval_id"`.
+
+Annotations: `{"title":"Run task","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":false}`.
+
+Tasks use validated templates and an argv-only subprocess path. Network and
+other approval-class capabilities are granted per operation and are never
+inherited from an unrelated command.
 
 ### write_stdin
 
@@ -287,7 +314,7 @@ Annotations: `{"title":"Git status","readOnlyHint":true,"destructiveHint":false,
 
 ### git_diff
 
-Inputs: `"path"`, `"staged"`, `"context"`, `"max_bytes"`.
+Inputs: `"path"`, `"staged"`, `"context_lines"`, `"max_bytes"`.
 
 Annotations: `{"title":"Git diff","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}`.
 
