@@ -54,8 +54,60 @@ def _open_parent(root: Path, parts: tuple[str, ...], *, create: bool) -> int:
         raise
 
 
+def _portable_parent(root: Path, parts: tuple[str, ...], *, create: bool) -> Path:
+    """Walk a directory without resolving symlinks on platforms without dirfd APIs."""
+    current = root
+    if current.is_symlink() or not current.is_dir():
+        raise ToolFailure("SANDBOX_FAILED", "Sandbox root is not a regular directory.", category="security")
+    for part in parts:
+        current /= part
+        if current.is_symlink():
+            if not create:
+                raise ToolFailure("SANDBOX_FAILED", "Sandbox path contains a symlink.", category="security")
+            current.unlink()
+        if current.exists() and not current.is_dir():
+            raise ToolFailure("SANDBOX_FAILED", "Sandbox path component is not a directory.", category="security")
+        if create:
+            current.mkdir(mode=0o755, exist_ok=True)
+        elif not current.exists():
+            raise FileNotFoundError(current)
+    return current
+
+
+def _portable_write_relative(root: Path, parts: tuple[str, ...], data: bytes, mode: int | None) -> None:
+    parent = _portable_parent(root, parts[:-1], create=True)
+    target = parent / parts[-1]
+    if target.is_symlink():
+        # os.replace below would replace the link too, but unlinking it first
+        # makes the intended handling explicit and keeps directory targets
+        # from being mistaken for regular files.
+        target.unlink()
+    if target.exists() and target.is_dir():
+        raise ToolFailure("SANDBOX_FAILED", f"Sandbox target is a directory: {'/'.join(parts)}", category="security")
+
+    fd, temp_name = tempfile.mkstemp(prefix=".mcp-write-", dir=str(parent))
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        # Replacing a directory entry does not follow a malicious final
+        # symlink. The parent was walked component-by-component above.
+        os.replace(temp_name, target)
+        if mode is not None:
+            os.chmod(target, stat.S_IMODE(mode), follow_symlinks=False)
+    finally:
+        try:
+            os.unlink(temp_name)
+        except FileNotFoundError:
+            pass
+
+
 def _safe_write_relative(root: Path, raw_path: str, data: bytes, mode: int | None) -> None:
     parts = _relative_parts(raw_path)
+    if os.name == "nt":
+        _portable_write_relative(root, parts, data, mode)
+        return
     parent_fd = _open_parent(root, parts[:-1], create=True)
     try:
         flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
@@ -87,6 +139,19 @@ def _safe_write_relative(root: Path, raw_path: str, data: bytes, mode: int | Non
 
 def _safe_unlink_relative(root: Path, raw_path: str) -> None:
     parts = _relative_parts(raw_path)
+    if os.name == "nt":
+        try:
+            parent = _portable_parent(root, parts[:-1], create=False)
+        except FileNotFoundError:
+            return
+        target = parent / parts[-1]
+        if target.is_symlink():
+            target.unlink()
+        elif target.exists():
+            if target.is_dir():
+                raise ToolFailure("SANDBOX_FAILED", f"Sandbox target is a directory: {raw_path}", category="security")
+            target.unlink()
+        return
     try:
         parent_fd = _open_parent(root, parts[:-1], create=False)
     except FileNotFoundError:
@@ -157,8 +222,11 @@ class ExecutionSandbox:
                 continue
             child_rel = relative + (entry.name,)
             if entry.is_dir(follow_symlinks=False):
-                fd = _open_parent(dest, child_rel, create=True)
-                os.close(fd)
+                if os.name == "nt":
+                    _portable_parent(dest, child_rel, create=True)
+                else:
+                    fd = _open_parent(dest, child_rel, create=True)
+                    os.close(fd)
                 cls._copy_tree(Path(entry.path), dest, child_rel)
                 continue
             if not entry.is_file(follow_symlinks=False):

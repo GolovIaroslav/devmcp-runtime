@@ -2422,6 +2422,12 @@ class Runtime:
         bwrap_available = shutil.which("bwrap") is not None
         if not bwrap_available and not (os.name == "nt" and self.permission_mode == "trusted"):
             raise ToolFailure("SANDBOX_UNAVAILABLE", "bwrap is required for execution sandbox but not found.", category="security")
+        if not bwrap_available and os.name == "nt":
+            # Windows has no bwrap equivalent in this runtime. This path is
+            # intentionally available only in explicit trusted mode; use the
+            # requested workspace so compiler outputs and process semantics
+            # remain compatible with the trusted host execution contract.
+            sandbox_workdir = workdir.path
             
         allow_network = "network" in approved_caps or (network_required and "network" in approved_caps) or self.permission_mode == "trusted"
         bwrap_args = self.sandbox.get_bwrap_args(allow_network=allow_network) if bwrap_available else []
@@ -4999,6 +5005,8 @@ def input_schemas() -> dict[str, dict[str, Any]]:
             {
                 "session_id": {**string, "minLength": 1},
                 "signal": {**string, "default": "SIGTERM"},
+                "wait_ms": {**integer, "minimum": 0, "maximum": 300000, "default": 5000},
+                "kill_wait_ms": {**integer, "minimum": 0, "maximum": 300000, "default": 2000},
             },
             ["session_id"],
         ),

@@ -294,7 +294,7 @@ Poll or interact with a command session. Pass empty `chars` to wait for output.
 
 ### kill_session
 
-Inputs: `"session_id"`, `"signal"`, `"wait_ms"`, `"max_output_bytes"`, `"verbosity"`, `"preview_bytes"`.
+Inputs: `"session_id"`, `"signal"`, `"wait_ms"`, `"kill_wait_ms"`, `"max_output_bytes"`, `"verbosity"`, `"preview_bytes"`.
 
 Annotations: `{"title":"Kill session","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":false}`.
 
