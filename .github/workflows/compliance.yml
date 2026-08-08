@@ -21,6 +21,9 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Install Linux execution sandbox
+        run: sudo apt-get update -qq && sudo apt-get install -y bubblewrap
+
       - name: Set up Node
         uses: actions/setup-node@v6
         with:
@@ -120,6 +123,8 @@ jobs:
 
       - name: Run MSVC environment inheritance smoke
         shell: cmd
+        env:
+          CODING_TOOLS_MCP_PERMISSION_MODE: trusted
         run: |
           call "%VCVARSALL%" x64
           where cl.exe
