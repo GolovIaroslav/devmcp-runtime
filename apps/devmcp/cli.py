@@ -24,6 +24,7 @@ from coding_tools_mcp import __version__
 from coding_tools_mcp.approval import ApprovalEngine
 from coding_tools_mcp.config import (
     ConfigPaths,
+    ensure_mcp_authorization_header,
     generate_mcp_token,
     get_key,
     load_config,
@@ -163,11 +164,22 @@ def _find_bool(value: Any, keys: set[str]) -> bool:
     return False
 
 
+def _tunnel_health_flags(tunnel: dict[str, Any]) -> tuple[bool, bool]:
+    healthy = _find_bool(tunnel, {"healthy", "health_ok"})
+    ready = _find_bool(tunnel, {"ready", "readiness"})
+    healthz = tunnel.get("healthz")
+    readyz = tunnel.get("readyz")
+    if isinstance(healthz, dict):
+        healthy = healthy or healthz.get("ok") is True
+    if isinstance(readyz, dict):
+        ready = ready or readyz.get("ok") is True
+    return healthy, ready
+
+
 def _status(_: argparse.Namespace) -> int:
     selected, config = _config()
     tunnel = _tunnel_status(selected)
-    healthy = _find_bool(tunnel, {"healthy", "health_ok"})
-    ready = _find_bool(tunnel, {"ready", "readiness"})
+    healthy, ready = _tunnel_health_flags(tunnel)
     pending = len(ApprovalEngine(selected.approvals_db).list_pending())
     print(f"DevMCP Runtime {__version__}")
     print(f"MCP process: {'running' if _active(MCP_SERVICE) else 'stopped'}")
@@ -414,8 +426,14 @@ def _tunnel_command(args: argparse.Namespace) -> int:
         return 1
     if args.tunnel_action == "run":
         tunnel_id = str(config.get("tunnel_id", "")).strip()
-        if not tunnel_id or not secret_status(selected)["control_plane_key_configured"]:
-            print("tunnel id and control-plane key must be configured before starting the tunnel", file=sys.stderr)
+        auth = secret_status(selected)
+        if not tunnel_id or not auth["control_plane_key_configured"] or not auth["mcp_token_configured"]:
+            print("tunnel id, control-plane key, and MCP token must be configured before starting the tunnel", file=sys.stderr)
+            return 2
+        try:
+            mcp_authorization_header = ensure_mcp_authorization_header(selected)
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
             return 2
         command = [
             str(TUNNEL_BIN),
@@ -428,6 +446,8 @@ def _tunnel_command(args: argparse.Namespace) -> int:
             f"file:{selected.control_plane_key}",
             "--mcp.server-url",
             f"http://{config.get('mcp_host', '127.0.0.1')}:{int(config.get('mcp_port', 47157))}/mcp",
+            "--mcp.extra-headers",
+            f"Authorization: file:{mcp_authorization_header}",
             "--health.listen-addr",
             "127.0.0.1:0",
             "--health.url-file",

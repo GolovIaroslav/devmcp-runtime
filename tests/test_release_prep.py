@@ -306,6 +306,7 @@ class ReleaseLifecycleTests(unittest.TestCase):
             config = load_config(selected, workspace=tmp)
             config["tunnel_id"] = "tunnel-fixture"
             save_config(config, selected)
+            write_secret(selected.mcp_token, "fixture-token")
             write_secret(selected.control_plane_key, "fixture-key")
             fake_client = Path(tmp) / "tunnel-client"
             fake_client.touch()
@@ -319,6 +320,36 @@ class ReleaseLifecycleTests(unittest.TestCase):
             self.assertIn("--health.listen-addr", command)
             self.assertIn("127.0.0.1:0", command)
             self.assertIn(str(selected.tunnel_health_url), command)
+
+    def test_foreground_tunnel_run_passes_mcp_authorization_from_private_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"DEVMCP_CONFIG_DIR": tmp}, clear=False):
+            selected = paths()
+            config = load_config(selected, workspace=tmp)
+            config["tunnel_id"] = "tunnel-fixture"
+            save_config(config, selected)
+            write_secret(selected.mcp_token, "fixture-token")
+            write_secret(selected.control_plane_key, "fixture-key")
+            fake_client = Path(tmp) / "tunnel-client"
+            fake_client.touch()
+            with patch.object(cli, "TUNNEL_BIN", fake_client), patch.object(
+                cli.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)
+            ) as run:
+                self.assertEqual(cli._tunnel_command(SimpleNamespace(tunnel_action="run")), 0)
+            command = run.call_args.args[0]
+            header_index = command.index("--mcp.extra-headers")
+            self.assertEqual(
+                command[header_index + 1],
+                f"Authorization: file:{selected.mcp_authorization_header}",
+            )
+            self.assertEqual(selected.mcp_authorization_header.read_text(encoding="utf-8"), "Bearer fixture-token\n")
+            self.assertEqual(selected.mcp_authorization_header.stat().st_mode & 0o777, 0o600)
+
+    def test_status_accepts_tunnel_health_endpoint_shape(self) -> None:
+        healthy, ready = cli._tunnel_health_flags(
+            {"healthz": {"ok": True}, "readyz": {"ok": True}}
+        )
+        self.assertTrue(healthy)
+        self.assertTrue(ready)
 
     def test_service_units_use_config_launcher_not_a_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

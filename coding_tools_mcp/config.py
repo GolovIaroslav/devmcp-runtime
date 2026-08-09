@@ -34,6 +34,7 @@ class ConfigPaths:
     config_file: Path
     secrets_dir: Path
     mcp_token: Path
+    mcp_authorization_header: Path
     control_plane_key: Path
     tunnel_health_url: Path
     approvals_db: Path
@@ -53,6 +54,7 @@ def paths() -> ConfigPaths:
         config_file=root / "config.toml",
         secrets_dir=secrets_dir,
         mcp_token=secrets_dir / "mcp-token",
+        mcp_authorization_header=secrets_dir / "mcp-authorization-header",
         control_plane_key=secrets_dir / "control-plane-api-key",
         tunnel_health_url=root / "tunnel-health.url",
         approvals_db=root / "approvals.db",
@@ -270,9 +272,21 @@ def write_secret(path: Path, value: str) -> None:
     _atomic_write(path, (value.strip() + "\n").encode("utf-8"), mode=0o600)
 
 
+def ensure_mcp_authorization_header(target: ConfigPaths | None = None) -> Path:
+    """Materialize the MCP bearer header for tunnel-client's file reference."""
+
+    selected = ensure_dirs(target)
+    token = read_secret(selected.mcp_token)
+    if not token:
+        raise ValueError("MCP bearer file is empty")
+    write_secret(selected.mcp_authorization_header, f"Bearer {token}")
+    return selected.mcp_authorization_header
+
+
 def generate_mcp_token(target: ConfigPaths | None = None) -> Path:
     selected = ensure_dirs(target)
     write_secret(selected.mcp_token, secrets.token_urlsafe(32))
+    ensure_mcp_authorization_header(selected)
     return selected.mcp_token
 
 
