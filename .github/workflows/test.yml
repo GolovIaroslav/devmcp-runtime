@@ -27,7 +27,9 @@ jobs:
           sudo chmod u+s "$(command -v bwrap)"
 
       - name: Install dependencies
-        run: uv sync
+        # The unit discovery imports the browser suite and dogfood executes the
+        # registered pytest command, so the test environment needs test extras.
+        run: uv sync --all-extras
 
       - name: Run Test Suite
         run: uv run python -m unittest discover -s tests -p 'test_*.py'
