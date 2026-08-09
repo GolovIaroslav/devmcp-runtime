@@ -49,6 +49,36 @@ class ReleaseConfigTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 UIState.load("0.0.0.0", 47158)
 
+    def test_mcp_health_reuses_initialize_session_for_health_call(self) -> None:
+        class FakeResponse:
+            def __init__(self, body: bytes, headers: dict[str, str] | None = None) -> None:
+                self.body = body
+                self.headers = headers or {}
+
+            def __enter__(self) -> "FakeResponse":
+                return self
+
+            def __exit__(self, *_args: object) -> None:
+                return None
+
+            def read(self) -> bytes:
+                return self.body
+
+        responses = [
+            FakeResponse(b'{"result": {}}', {"Mcp-Session-Id": "session-1"}),
+            FakeResponse(b""),
+            FakeResponse(b'{"result": {"structuredContent": {"status": "ok"}}}'),
+        ]
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"DEVMCP_CONFIG_DIR": tmp}, clear=False):
+            selected = paths()
+            config = load_config(selected, workspace=tmp)
+            write_secret(selected.mcp_token, "fixture-token")
+            with patch.object(cli.urllib.request, "urlopen", side_effect=responses) as urlopen:
+                self.assertTrue(cli._mcp_health(config, selected))
+
+            health_request = urlopen.call_args_list[2].args[0]
+            self.assertEqual(health_request.get_header("Mcp-session-id"), "session-1")
+
 
 class ReleaseLifecycleTests(unittest.TestCase):
     def test_expired_approvals_are_marked_and_clear_does_not_touch_pending(self) -> None:

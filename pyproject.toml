@@ -18,10 +18,10 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/GolovIaroslav/test"
-Documentation = "https://github.com/GolovIaroslav/test/tree/main/docs"
-Source = "https://github.com/GolovIaroslav/test"
-Issues = "https://github.com/GolovIaroslav/test/issues"
+Homepage = "https://github.com/GolovIaroslav/devmcp-runtime"
+Documentation = "https://github.com/GolovIaroslav/devmcp-runtime/tree/main/docs"
+Source = "https://github.com/GolovIaroslav/devmcp-runtime"
+Issues = "https://github.com/GolovIaroslav/devmcp-runtime/issues"
 
 [project.optional-dependencies]
 dev = [

@@ -4,7 +4,7 @@
 Tunnel-клиент нужен только для интеграции с удалённым MCP-клиентом.
 
 ```bash
-uv tool install git+https://github.com/GolovIaroslav/test.git
+uv tool install git+https://github.com/GolovIaroslav/devmcp-runtime.git
 devmcp setup --workspace /абсолютный/путь/к/репозиторию
 devmcp doctor
 ```

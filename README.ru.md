@@ -26,7 +26,7 @@ DevMCP Runtime даёт MCP-клиенту локальное рабочее п�
 репозитория:
 
 ```bash
-uv tool install git+https://github.com/GolovIaroslav/test.git
+uv tool install git+https://github.com/GolovIaroslav/devmcp-runtime.git
 devmcp setup --workspace /абсолютный/путь/к/проекту --no-tunnel
 devmcp doctor
 devmcp status

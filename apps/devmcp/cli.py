@@ -62,7 +62,14 @@ def _active(unit: str) -> bool:
     return _systemctl("is-active", "--quiet", unit).returncode == 0
 
 
-def _mcp_call(url: str, token_file: Path, method: str, params: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
+def _mcp_call(
+    url: str,
+    token_file: Path,
+    method: str,
+    params: dict[str, Any],
+    *,
+    session_id: str | None = None,
+) -> tuple[dict[str, Any], str | None]:
     token = token_file.read_text(encoding="utf-8").strip()
     if not token:
         raise RuntimeError("MCP bearer file is empty")
@@ -72,6 +79,8 @@ def _mcp_call(url: str, token_file: Path, method: str, params: dict[str, Any]) -
         "MCP-Protocol-Version": PROTOCOL_VERSION,
         "Authorization": f"Bearer {token}",
     }
+    if session_id:
+        headers["Mcp-Session-Id"] = session_id
     request = urllib.request.Request(
         url,
         data=json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}).encode("utf-8"),
@@ -109,7 +118,13 @@ def _mcp_health(config: dict[str, Any], selected: ConfigPaths) -> bool:
         )
         with urllib.request.urlopen(notification, timeout=3):
             pass
-        result, _ = _mcp_call(url, selected.mcp_token, "tools/call", {"name": "health", "arguments": {}})
+        result, _ = _mcp_call(
+            url,
+            selected.mcp_token,
+            "tools/call",
+            {"name": "health", "arguments": {}},
+            session_id=session_id,
+        )
         return result.get("result", {}).get("structuredContent", {}).get("status") == "ok"
     except (OSError, RuntimeError, ValueError, KeyError, TypeError, json.JSONDecodeError, urllib.error.URLError):
         return False

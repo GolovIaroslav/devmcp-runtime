@@ -37,7 +37,7 @@ host execution unless the operator explicitly selects `unsafe` mode.
 Before public release, the maintainer must enable **GitHub Private Vulnerability
 Reporting** for this repository. Report through the private advisory form:
 
-<https://github.com/GolovIaroslav/test/security/advisories/new>
+<https://github.com/GolovIaroslav/devmcp-runtime/security/advisories/new>
 
 Do not open a public issue with an exploit or live credential. Include the
 affected version, a minimal reproduction, impact, and whether the issue escapes

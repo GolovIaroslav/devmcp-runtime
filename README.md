@@ -43,7 +43,7 @@ Before the first PyPI publication, install directly from the current source
 repository:
 
 ```bash
-uv tool install git+https://github.com/GolovIaroslav/test.git
+uv tool install git+https://github.com/GolovIaroslav/devmcp-runtime.git
 devmcp setup --workspace /absolute/path/to/project --no-tunnel
 devmcp doctor
 devmcp status

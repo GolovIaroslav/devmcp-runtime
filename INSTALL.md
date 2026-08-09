@@ -14,7 +14,7 @@ configuration for DevMCP Runtime.
 ### 1. Clone & Install Dependencies
 
 ```bash
-git clone https://github.com/GolovIaroslav/test.git devmcp-runtime
+git clone https://github.com/GolovIaroslav/devmcp-runtime.git devmcp-runtime
 cd devmcp-runtime
 uv sync --extra dev
 uv run devmcp setup --workspace /path/to/your/repo --no-tunnel

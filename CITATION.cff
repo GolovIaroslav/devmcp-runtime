@@ -5,4 +5,4 @@ authors:
   - name: "DevMCP Runtime Contributors"
 version: "0.1.0-beta.1"
 license: "Apache-2.0"
-repository-code: "https://github.com/GolovIaroslav/test"
+repository-code: "https://github.com/GolovIaroslav/devmcp-runtime"
