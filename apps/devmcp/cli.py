@@ -403,15 +403,27 @@ def _policy_command(args: argparse.Namespace) -> int:
         if "patch" in payload:
             if not isinstance(imported_patch, dict):
                 raise ValueError("patch thresholds must be an object")
-            unknown_patch_fields = sorted(set(imported_patch) - {"max_removed_lines", "max_removed_percent"})
+            unknown_patch_fields = sorted(
+                set(imported_patch) - {"max_removed_lines", "max_removed_percent"}
+            )
             if unknown_patch_fields:
-                raise ValueError(f"unknown patch threshold fields: {', '.join(unknown_patch_fields)}")
+                raise ValueError(
+                    f"unknown patch threshold fields: {', '.join(unknown_patch_fields)}"
+                )
             current_patch = config.get("patch", {})
-            max_removed_lines = imported_patch.get("max_removed_lines", current_patch.get("max_removed_lines", 200))
-            max_removed_percent = imported_patch.get("max_removed_percent", current_patch.get("max_removed_percent", 30.0))
-            if isinstance(max_removed_lines, bool) or not isinstance(max_removed_lines, int):
+            max_removed_lines = imported_patch.get(
+                "max_removed_lines", current_patch.get("max_removed_lines", 200)
+            )
+            max_removed_percent = imported_patch.get(
+                "max_removed_percent", current_patch.get("max_removed_percent", 30.0)
+            )
+            if isinstance(max_removed_lines, bool) or not isinstance(
+                max_removed_lines, int
+            ):
                 raise ValueError("max_removed_lines must be an integer")
-            if isinstance(max_removed_percent, bool) or not isinstance(max_removed_percent, (int, float)):
+            if isinstance(max_removed_percent, bool) or not isinstance(
+                max_removed_percent, (int, float)
+            ):
                 raise ValueError("max_removed_percent must be a number")
             if not math.isfinite(float(max_removed_percent)):
                 raise ValueError("max_removed_percent must be finite")

@@ -61,26 +61,44 @@ class ReleaseConfigTests(unittest.TestCase):
         self.assertEqual(decision("balanced", "workspace.delete"), "ask")
 
     def test_policy_export_import_preserves_patch_thresholds(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"DEVMCP_CONFIG_DIR": tmp}, clear=False):
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.dict(os.environ, {"DEVMCP_CONFIG_DIR": tmp}, clear=False),
+        ):
             selected = paths()
             config = load_config(selected, workspace=tmp)
             config["patch"] = {"max_removed_lines": 17, "max_removed_percent": 12.5}
             save_config(config, selected)
             exported = Path(tmp) / "policy.json"
 
-            self.assertEqual(cli._policy_command(SimpleNamespace(policy_action="export", file=str(exported))), 0)
+            self.assertEqual(
+                cli._policy_command(
+                    SimpleNamespace(policy_action="export", file=str(exported))
+                ),
+                0,
+            )
             config = load_config(selected)
             config["patch"] = {"max_removed_lines": 99, "max_removed_percent": 88.0}
             save_config(config, selected)
 
-            self.assertEqual(cli._policy_command(SimpleNamespace(policy_action="import", file=str(exported))), 0)
+            self.assertEqual(
+                cli._policy_command(
+                    SimpleNamespace(policy_action="import", file=str(exported))
+                ),
+                0,
+            )
             self.assertEqual(
                 load_config(selected)["patch"],
                 {"max_removed_lines": 17, "max_removed_percent": 12.5},
             )
 
-    def test_policy_import_rejects_invalid_patch_thresholds_without_saving(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"DEVMCP_CONFIG_DIR": tmp}, clear=False):
+    def test_policy_import_rejects_invalid_patch_thresholds_without_saving(
+        self,
+    ) -> None:
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.dict(os.environ, {"DEVMCP_CONFIG_DIR": tmp}, clear=False),
+        ):
             selected = paths()
             config = load_config(selected, workspace=tmp)
             config["patch"] = {"max_removed_lines": 23, "max_removed_percent": 19.0}
@@ -96,39 +114,69 @@ class ReleaseConfigTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            with self.assertRaisesRegex(ValueError, "patch thresholds cannot be negative"):
-                cli._policy_command(SimpleNamespace(policy_action="import", file=str(imported)))
+            with self.assertRaisesRegex(
+                ValueError, "patch thresholds cannot be negative"
+            ):
+                cli._policy_command(
+                    SimpleNamespace(policy_action="import", file=str(imported))
+                )
             self.assertEqual(
                 load_config(selected)["patch"],
                 {"max_removed_lines": 23, "max_removed_percent": 19.0},
             )
 
     def test_policy_import_without_patch_preserves_current_thresholds(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"DEVMCP_CONFIG_DIR": tmp}, clear=False):
-            selected = paths()
-            config = load_config(selected, workspace=tmp)
-            config["patch"] = {"max_removed_lines": 23, "max_removed_percent": 19.0}
-            save_config(config, selected)
-            imported = Path(tmp) / "policy.json"
-            imported.write_text(json.dumps({"rules": profile_rules("safe")}), encoding="utf-8")
-
-            self.assertEqual(cli._policy_command(SimpleNamespace(policy_action="import", file=str(imported))), 0)
-            self.assertEqual(load_config(selected)["patch"], {"max_removed_lines": 23, "max_removed_percent": 19.0})
-
-    def test_policy_import_partial_patch_preserves_omitted_threshold(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"DEVMCP_CONFIG_DIR": tmp}, clear=False):
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.dict(os.environ, {"DEVMCP_CONFIG_DIR": tmp}, clear=False),
+        ):
             selected = paths()
             config = load_config(selected, workspace=tmp)
             config["patch"] = {"max_removed_lines": 23, "max_removed_percent": 19.0}
             save_config(config, selected)
             imported = Path(tmp) / "policy.json"
             imported.write_text(
-                json.dumps({"rules": profile_rules("safe"), "patch": {"max_removed_lines": 7}}),
+                json.dumps({"rules": profile_rules("safe")}), encoding="utf-8"
+            )
+
+            self.assertEqual(
+                cli._policy_command(
+                    SimpleNamespace(policy_action="import", file=str(imported))
+                ),
+                0,
+            )
+            self.assertEqual(
+                load_config(selected)["patch"],
+                {"max_removed_lines": 23, "max_removed_percent": 19.0},
+            )
+
+    def test_policy_import_partial_patch_preserves_omitted_threshold(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.dict(os.environ, {"DEVMCP_CONFIG_DIR": tmp}, clear=False),
+        ):
+            selected = paths()
+            config = load_config(selected, workspace=tmp)
+            config["patch"] = {"max_removed_lines": 23, "max_removed_percent": 19.0}
+            save_config(config, selected)
+            imported = Path(tmp) / "policy.json"
+            imported.write_text(
+                json.dumps(
+                    {"rules": profile_rules("safe"), "patch": {"max_removed_lines": 7}}
+                ),
                 encoding="utf-8",
             )
 
-            self.assertEqual(cli._policy_command(SimpleNamespace(policy_action="import", file=str(imported))), 0)
-            self.assertEqual(load_config(selected)["patch"], {"max_removed_lines": 7, "max_removed_percent": 19.0})
+            self.assertEqual(
+                cli._policy_command(
+                    SimpleNamespace(policy_action="import", file=str(imported))
+                ),
+                0,
+            )
+            self.assertEqual(
+                load_config(selected)["patch"],
+                {"max_removed_lines": 7, "max_removed_percent": 19.0},
+            )
 
     def test_policy_import_rejects_malformed_patch_without_saving(self) -> None:
         invalid_patches = (
@@ -137,12 +185,24 @@ class ReleaseConfigTests(unittest.TestCase):
             ({"max_removed_lines": True}, "max_removed_lines must be an integer"),
             ({"max_removed_lines": 1.5}, "max_removed_lines must be an integer"),
             ({"max_removed_percent": True}, "max_removed_percent must be a number"),
-            ({"max_removed_percent": float("nan")}, "max_removed_percent must be finite"),
-            ({"max_removed_percent": float("inf")}, "max_removed_percent must be finite"),
-            ({"max_removed_percent": float("-inf")}, "max_removed_percent must be finite"),
+            (
+                {"max_removed_percent": float("nan")},
+                "max_removed_percent must be finite",
+            ),
+            (
+                {"max_removed_percent": float("inf")},
+                "max_removed_percent must be finite",
+            ),
+            (
+                {"max_removed_percent": float("-inf")},
+                "max_removed_percent must be finite",
+            ),
             ({"unexpected": 1}, "unknown patch threshold fields: unexpected"),
         )
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"DEVMCP_CONFIG_DIR": tmp}, clear=False):
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.dict(os.environ, {"DEVMCP_CONFIG_DIR": tmp}, clear=False),
+        ):
             selected = paths()
             config = load_config(selected, workspace=tmp)
             config["patch"] = {"max_removed_lines": 23, "max_removed_percent": 19.0}
@@ -152,18 +212,25 @@ class ReleaseConfigTests(unittest.TestCase):
             for invalid_patch, message in invalid_patches:
                 with self.subTest(patch=invalid_patch):
                     imported.write_text(
-                        json.dumps({"rules": profile_rules("safe"), "patch": invalid_patch}),
+                        json.dumps(
+                            {"rules": profile_rules("safe"), "patch": invalid_patch}
+                        ),
                         encoding="utf-8",
                     )
                     with self.assertRaisesRegex(ValueError, message):
-                        cli._policy_command(SimpleNamespace(policy_action="import", file=str(imported)))
+                        cli._policy_command(
+                            SimpleNamespace(policy_action="import", file=str(imported))
+                        )
                     self.assertEqual(
                         load_config(selected)["patch"],
                         {"max_removed_lines": 23, "max_removed_percent": 19.0},
                     )
 
     def test_policy_import_keeps_custom_rule_validation(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"DEVMCP_CONFIG_DIR": tmp}, clear=False):
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.dict(os.environ, {"DEVMCP_CONFIG_DIR": tmp}, clear=False),
+        ):
             selected = paths()
             config = load_config(selected, workspace=tmp)
             save_config(config, selected)
@@ -171,7 +238,10 @@ class ReleaseConfigTests(unittest.TestCase):
             imported.write_text(
                 json.dumps(
                     {
-                        "rules": {**profile_rules("balanced"), "workspace.read": "invalid"},
+                        "rules": {
+                            **profile_rules("balanced"),
+                            "workspace.read": "invalid",
+                        },
                         "patch": {"max_removed_lines": 17, "max_removed_percent": 12.5},
                     }
                 ),
@@ -179,7 +249,9 @@ class ReleaseConfigTests(unittest.TestCase):
             )
 
             with self.assertRaisesRegex(ValueError, "must be auto, ask, or deny"):
-                cli._policy_command(SimpleNamespace(policy_action="import", file=str(imported)))
+                cli._policy_command(
+                    SimpleNamespace(policy_action="import", file=str(imported))
+                )
             self.assertEqual(load_config(selected)["profile"], "balanced")
 
     def test_ui_is_loopback_only(self) -> None:
