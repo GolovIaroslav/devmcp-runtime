@@ -237,7 +237,7 @@ def test_services_page_exposes_service_controls() -> None:
                 page = browser.new_page()
                 page.goto(state.origin + "/services")
                 for label in ("Start", "Stop", "Restart"):
-                    assert page.get_by_role("button", name=label).count() == 1
+                    assert page.get_by_role("button", name=label, exact=True).count() == 1
                 assert page.get_by_role("link", name="Open redacted service logs").count() == 1
                 browser.close()
         finally:
