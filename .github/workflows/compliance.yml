@@ -59,6 +59,9 @@ jobs:
       - name: Run lint
         run: make lint
 
+      - name: Check formatting
+        run: make format-check
+
       - name: Run typecheck
         run: make typecheck
 
@@ -82,6 +85,9 @@ jobs:
 
       - name: Run dogfood smoke
         run: make dogfood-smoke
+
+      - name: Run self-dogfood target
+        run: make dogfood-self
 
       - name: Run latency benchmark
         run: make benchmark-latency
@@ -173,6 +179,7 @@ jobs:
       - name: Run complete public-beta gate
         run: |
           make lint
+          make format-check
           make typecheck
           make test
           make test-protocol
@@ -180,6 +187,7 @@ jobs:
           make test-docs-required
           make test-schema-drift
           make dogfood-smoke
+          make dogfood-self
           make benchmark-latency
           make benchmark-smoke
           make compliance

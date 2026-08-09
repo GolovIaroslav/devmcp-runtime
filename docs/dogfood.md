@@ -27,7 +27,17 @@ cross-agent leaderboard.
 ```bash
 make dogfood-runner
 make dogfood-smoke
+make dogfood-self
 ```
+
+`make dogfood-self` clones the current checkout into a temporary Git repository
+and then uses MCP only after server startup. It generates a 10k-line source
+fixture and covers bounded/ranged reads, searches at the beginning/middle/end,
+all requested Git inspection tools, a failing registered pytest task, preview
+and multi-file patch application, a passing targeted task, a broader temporary
+suite, the canonical lint/typecheck commands, `git_diff`, and a long-running
+job's status/output/kill lifecycle. The clone and its sandbox are removed when
+the target exits; the maintainer's checkout is not changed.
 
 ## MCP-Only Rule
 

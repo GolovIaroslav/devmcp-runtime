@@ -145,6 +145,7 @@ class RequiredDocsTests(unittest.TestCase):
         )
         for needle in (
             "make lint",
+            "make format-check",
             "make typecheck",
             "make test",
             "make test-protocol",
@@ -157,6 +158,13 @@ class RequiredDocsTests(unittest.TestCase):
         ):
             with self.subTest(workflow="compliance", needle=needle):
                 self.assertIn(needle, compliance)
+
+        deploy = (ROOT / ".github/workflows/deploy-sandbox-control.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("workflow_dispatch:", deploy)
+        self.assertNotIn("\n  push:", deploy)
+        self.assertIn("intentionally manual", deploy)
 
         swebench = (ROOT / ".github/workflows/swebench-lite.yml").read_text(
             encoding="utf-8"

@@ -19,7 +19,7 @@ DESKTOP_PACKAGE := apps/desktop-client/mcp_desktop_client
 DESKTOP_TS := $(DESKTOP_PACKAGE)/locales/app_zh_CN.ts
 DESKTOP_QM := $(DESKTOP_PACKAGE)/locales/app_zh_CN.qm
 
-.PHONY: start lint typecheck test ci check-dispatch-inputs check-release compliance test-protocol test-integration test-mcp-contract test-tool-golden test-security test-e2e test-runtime-semantics test-docs-required test-schema-drift test-release-prep test-gui secret-audit package-smoke dogfood-mcp dogfood-runner dogfood-smoke benchmark-latency benchmark-smoke benchmark-real-workloads swebench-reference-predictions swebench-preflight swebench-evaluate desktop-i18n-update desktop-i18n-release desktop-i18n-check report
+.PHONY: start lint format-check typecheck test ci check-dispatch-inputs check-release compliance test-protocol test-integration test-mcp-contract test-tool-golden test-security test-e2e test-runtime-semantics test-docs-required test-schema-drift test-release-prep test-gui secret-audit package-smoke dogfood-mcp dogfood-runner dogfood-smoke dogfood-self benchmark-latency benchmark-smoke benchmark-real-workloads swebench-reference-predictions swebench-preflight swebench-evaluate desktop-i18n-update desktop-i18n-release desktop-i18n-check report
 
 start:
 	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) -m coding_tools_mcp --workspace "$(MCP_WORKSPACE)" --host "$(MCP_HOST)" --port "$(MCP_PORT)" $(MCP_ARGS)
@@ -27,6 +27,9 @@ start:
 lint:
 	$(PYTHON) -m ruff check $(RUFF_FLAGS) $(PYTHON_SOURCES)
 	$(PYTHON) scripts/check_desktop_i18n.py
+
+format-check:
+	$(PYTHON) -m ruff format --check .
 
 check-dispatch-inputs:
 	$(PYTHON) scripts/check_dispatch_inputs.py
@@ -40,7 +43,7 @@ typecheck:
 test:
 	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) -m unittest discover -s tests -p 'test_*.py'
 
-ci: lint typecheck test check-dispatch-inputs test-protocol test-integration test-docs-required test-schema-drift dogfood-smoke benchmark-latency benchmark-smoke
+ci: lint format-check typecheck test check-dispatch-inputs test-protocol test-integration test-docs-required test-schema-drift dogfood-smoke dogfood-self benchmark-latency benchmark-smoke
 
 test-release-prep:
 	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) -m unittest tests.test_release_prep
@@ -101,6 +104,9 @@ dogfood-runner:
 		--server-command "$(PYTHON) -m coding_tools_mcp --workspace {workspace} --host 127.0.0.1 --port $(DOGFOOD_PORT)"
 
 dogfood-smoke: dogfood-mcp dogfood-runner
+
+dogfood-self:
+	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) benchmarks/dogfood/self_dogfood.py
 
 benchmark-latency:
 	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) benchmarks/runtime_latency.py

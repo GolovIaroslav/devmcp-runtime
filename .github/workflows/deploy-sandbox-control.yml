@@ -1,20 +1,12 @@
 name: deploy-sandbox-control
 
 # The sandbox-control Worker and start-sandbox.yml are one contract: the Worker
-# builds the workflow_dispatch body that the workflow must declare. Nothing used
-# to deploy the Worker, so a change that touched both files only ever took effect
-# on the workflow side and the pair silently drifted apart. Deploying from CI on
-# every change to either file keeps them in lockstep.
+# builds the workflow_dispatch body that the workflow must declare. Deployment is
+# intentionally manual: normal validation belongs in the compliance workflow,
+# while this optional release action requires maintainer-only Cloudflare secrets.
 
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths:
-      - cloudflare/sandbox-control/**
-      - .github/workflows/start-sandbox.yml
-      - .github/workflows/deploy-sandbox-control.yml
-      - scripts/check_dispatch_inputs.py
 
 permissions:
   contents: read
