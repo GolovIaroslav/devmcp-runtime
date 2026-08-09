@@ -44,6 +44,34 @@ uv tool install devmcp-runtime
 `127.0.0.1:47157`. Подробности интеграции с ChatGPT описаны в
 [docs/ru/CHATGPT.md](docs/ru/CHATGPT.md).
 
+### Два независимых слоя подтверждений ChatGPT и DevMCP
+
+Разрешения приложения ChatGPT и локальная политика DevMCP — независимые слои:
+
+- разрешения приложения ChatGPT определяют, спросит ли ChatGPT подтверждение
+  перед вызовом action;
+- политика и approvals DevMCP определяют, разрешит ли локальный runtime
+  операцию, запросит ли локальное подтверждение или отклонит её.
+
+Для полного MCP workflow с записью/изменением кода текущие требования OpenAI:
+ChatGPT Business, Enterprise или Edu, ChatGPT в web, Developer Mode и Secure
+MCP Tunnel для локального/private MCP-сервера. ChatGPT Pro сейчас поддерживает
+custom MCP только для чтения/fetch, а не полный coding-agent workflow с записью.
+См. [текущую документацию OpenAI](https://help.openai.com/en/articles/12584461-developer-mode-and-full-mcp-connectors-in-chatgpt).
+
+Режимы разрешений приложения ChatGPT: `Always ask`, `Any changes`, `Important
+actions`, `Never ask`. Обычно именно `Important actions` объясняет
+периодические диалоги: чтение и малорисковые операции могут выполняться
+автоматически, а более важные действия требуют подтверждения. Если интерфейс
+workspace это позволяет и вы осознанно доверяете локальному DevMCP, для этого
+приложения можно выбрать `Never ask`. В управляемых Business/Enterprise/Edu
+workspace постоянные разрешения приложения могут задаваться администратором.
+
+`Never ask` отключает обычные подтверждения ChatGPT для приложения, поэтому
+используйте его только с доверенным MCP-сервером. Особенно рискованные действия
+ChatGPT всё равно может заблокировать. DevMCP не может программно отключить
+диалоги подтверждения ChatGPT; его локальная policy действует независимо.
+
 ## Возможности и права
 
 Есть четыре data-driven профиля: `safe`, `balanced` (по умолчанию для нового

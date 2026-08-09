@@ -8,7 +8,7 @@ Default mode. Commands run with the coding-agent policy:
 
 - workspace read/write
 - system toolchain and DNS resolver paths read-only
-- `HOME`, `TMPDIR`, and `cache_dir` under an external server-owned runtime directory
+- `HOME`, `TMPDIR`, and `cache_dir` under private directories inside the sandbox
 - registered non-network tasks (for example pytest, unittest, Vitest, Jest,
   lint, typecheck, and build/check workflows) auto-allowed
 - network-looking commands, unknown commands, shell expansion, and inline
@@ -38,7 +38,9 @@ coding-tools-mcp --permission-mode safe --workspace /path/to/repo
 
 Local development mode. It allows dependency downloads, shell expansion, and inline interpreter snippets while keeping secret filtering and destructive-command checks.
 
-`HOME`, `TMPDIR`, and `cache_dir` use the same external runtime directory layout as safe mode. Only that exact runtime directory is added as an extra writable Landlock root.
+`HOME`, `TMPDIR`, and `cache_dir` use private directories inside the sandbox.
+The child also receives a fresh `--tmpfs /tmp`; host `/tmp` is not bind-mounted
+and is not a writable escape route.
 
 ```bash
 coding-tools-mcp --permission-mode trusted --workspace /path/to/repo
@@ -64,18 +66,19 @@ gates on MCP annotations — one that refuses to call, or prompts on every call 
 tool advertised as mutating. That friction lives entirely in the client, so
 `--permission-mode dangerous` does nothing about it.
 
-`--dangerously-fake-readonly-annotations` addresses that one case. It makes
-`tools/list` report every tool with `readOnlyHint: true`, `destructiveHint: false`,
-and `openWorldHint: false`:
+`--dangerously-fake-readonly-annotations` is retained only as an explicitly
+dangerous test/debug compatibility switch. It makes `tools/list` report every
+tool with `readOnlyHint: true`, `destructiveHint: false`, and `openWorldHint: false`:
 
 ```bash
 coding-tools-mcp --permission-mode dangerous \
   --dangerously-fake-readonly-annotations --workspace /path/to/repo
 ```
 
-The annotations are false. `apply_patch` still rewrites files and `exec_command`
-still runs commands; only the advertised hints change. Because the claim is false,
-it is fenced in:
+Do not use this switch to avoid ChatGPT confirmation prompts. The annotations are
+false: `apply_patch` still rewrites or deletes files, `run_task` still executes
+registered tasks, and `exec_command` still runs commands; only the advertised
+hints change. Because the claim is false, it is fenced in:
 
 - It requires `--permission-mode dangerous`, so it can only be set alongside an
   explicit assertion that the workspace is disposable.
@@ -89,6 +92,8 @@ it is fenced in:
 
 `CODING_TOOLS_MCP_DANGEROUSLY_FAKE_READONLY_ANNOTATIONS=1` is equivalent. This is
 not a tool profile: the catalog is unchanged and every tool remains callable.
+It is never the recommended solution for client confirmation behavior; use the
+ChatGPT app permission controls and keep truthful MCP annotations instead.
 
 ## Runtime Directory
 
@@ -96,13 +101,13 @@ Safe and trusted modes keep command runtime state outside the Git worktree:
 
 ```text
 /tmp/coding-tools-mcp/<workspace-hash>/<instance-id>/
-  home/
-  tmp/
-  cache/
+  home/       # host-side server state; bwrap children get private equivalents
+  tmp/        # host-side server state; bwrap children use sandbox/.devmcp-tmp
+  cache/      # host-side server state; bwrap children use sandbox/.devmcp-cache
 ```
 
 On Windows, the parent is the platform temp directory instead of `/tmp`. The server creates these directories lazily when `exec_command` first needs an environment. `server_info` and `check_exec_environment` report `runtime_dir`, `home`, `tmpdir`, and `cache_dir`.
 
-The server does not create workspace-local `.coding-tools/` directories by default. Runtime directories are per server instance; after stopping the server, operators may remove an instance directory or the whole external runtime tree. Normal OS temp cleanup may also remove stale directories.
+The server does not create workspace-local `.coding-tools/` directories by default. Runtime directories are per server instance; after stopping the server, operators may remove an instance directory or the whole external runtime tree. Bwrap removes the sandbox-owned private directories with the sandbox. Normal OS temp cleanup may also remove stale host-side directories.
 
 Set `CODING_TOOLS_MCP_RUNTIME_ROOT` to choose an explicit external runtime parent. The server reports `RUNTIME_DIR_UNWRITABLE` instead of falling back into the workspace for runtime state.

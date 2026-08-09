@@ -65,6 +65,34 @@ For ChatGPT, follow [docs/CHATGPT.md](docs/CHATGPT.md). It requires a supported
 Business, Enterprise, or Edu workspace with Developer Mode and a separately
 installed Secure MCP Tunnel client.
 
+### ChatGPT permissions and DevMCP policy are separate
+
+The ChatGPT app permission and DevMCP's local policy are two independent layers:
+
+- ChatGPT app permissions decide whether ChatGPT asks before invoking an app
+  action.
+- DevMCP policy and approvals decide whether the local runtime allows, asks for,
+  or denies the operation.
+
+For the full MCP write/modify workflow, current OpenAI requirements are ChatGPT
+Business, Enterprise, or Edu, ChatGPT on the web, Developer Mode, and Secure MCP
+Tunnel for a local/private MCP server. ChatGPT Pro currently supports custom MCP
+read/fetch access, not this full coding-agent write workflow. See the [current
+OpenAI guidance](https://help.openai.com/en/articles/12584461-developer-mode-and-full-mcp-connectors-in-chatgpt).
+
+ChatGPT app permission modes are `Always ask`, `Any changes`, `Important
+actions`, and `Never ask`. `Important actions` is normally why prompts appear
+intermittently: reads and low-risk actions may run automatically while higher-
+impact actions ask. If the ChatGPT workspace exposes an app-specific choice,
+users who intentionally trust their local DevMCP instance can select `Never
+ask` for that app. Managed Business, Enterprise, and Edu workspaces may have
+persistent app permissions controlled by an administrator.
+
+`Never ask` disables ordinary ChatGPT app confirmation prompts, so use it only
+with an MCP server you trust. Especially risky actions may still be blocked by
+ChatGPT. DevMCP cannot programmatically disable ChatGPT approval prompts; its
+own local policy remains independent.
+
 ## Features
 
 | Area | Behavior |
@@ -117,7 +145,9 @@ into the repository. Before public launch, capture real screenshots of:
 
 The deterministic coding-loop fixture is in `tests/compliance/fixtures`; run
 `make dogfood-smoke` to exercise the read → failing test → surgical patch →
-passing test → Git diff workflow.
+passing test → Git diff workflow. Run `make dogfood-self` for the stronger
+temporary-Git-clone target, including 10k-line ranged reads/searches, Git
+inspection, multi-file patching, lint/typecheck, and job lifecycle checks.
 
 ## Dogfood and benchmarks
 
