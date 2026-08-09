@@ -4,35 +4,49 @@ The normative behavior is [runtime-contract-v0.2.md](runtime-contract-v0.2.md).
 Live JSON Schemas come from `tools/list`; CI compares their names, input
 properties, annotations, and error codes with the contract.
 
+The server metadata exposes tool schema version `1.0`. Additive optional fields
+are preferred. A breaking tool name, required-input, or annotation change must
+be documented as requiring a ChatGPT Developer Mode app **Refresh** while the
+app remains a draft.
+
 ## Fixed inventory
 
-The default catalog contains exactly 20 tools:
+The default catalog contains exactly 32 tools:
 
-- `server_info`: server, workspace, automatic project context, policy, runtime,
-  auth, protocol, and fixed-catalog metadata.
-- `check_exec_environment`: lightweight execution policy and Landlock status.
-- `get_default_cwd`: inspect this MCP runtime's relative-path base.
-- `set_default_cwd`: change this MCP runtime's relative-path base.
-- `read_file`: stream a bounded UTF-8 range without loading the whole file.
-- `list_dir`: list immediate or bounded-recursive directory entries.
-- `list_files`: iterate files with glob, ignore, hidden-file, sort, and cap
-  controls.
-- `search_text`: literal or regex search; ripgrep stops after the result cap.
-- `apply_patch`: stage and atomically commit add/update/delete/move envelopes.
-- `exec_command`: run a bounded command and wait up to 10 seconds by default.
-- `write_stdin`: poll or interact with a running command session.
-- `kill_session`: terminate one runtime-owned command session.
-- `read_output`: page retained stdout or stderr using absolute byte offsets.
-- `git_status`: structured working-tree status.
-- `git_diff`: bounded unified staged/unstaged diff.
-- `git_log`: structured bounded commit history.
-- `git_show`: bounded revision metadata/content/diff.
-- `git_blame`: structured bounded line attribution.
-- `request_permissions`: report elicitation status without silently granting.
-- `view_image`: one MCP image content block plus structured metadata.
-
+- `server_info`: Server info.
+- `health`: Health check.
+- `workspace_info`: Workspace info.
+- `read_file`: Read file.
+- `read_files`: Read multiple files.
+- `list_dir`: List directory.
+- `list_files`: List files.
+- `search_text`: Search text.
+- `view_image`: View image.
+- `preview_patch`: Preview patch.
+- `apply_patch`: Apply patch.
+- `git_status`: Git status.
+- `git_diff`: Git diff.
+- `git_log`: Git log.
+- `git_show`: Git show.
+- `git_blame`: Git blame.
+- `list_tasks`: List tasks.
+- `describe_task`: Describe task.
+- `run_task`: Run task.
+- `exec_command`: Exec command.
+- `job_status`: Job status.
+- `read_output`: Read output.
+- `write_stdin`: Write stdin.
+- `kill_session`: Kill session.
+- `job_output`: Job output.
+- `job_input`: Job input.
+- `job_cancel`: Job cancel.
+- `approval_status`: Approval status.
+- `list_pending_approvals`: List pending approvals.
+- `check_exec_environment`: Check exec environment.
+- `get_default_cwd`: Get default cwd.
+- `set_default_cwd`: Set default cwd.
 `view_image` may be disabled when an installation cannot accept binary image
-content. That capability gate is not a tool profile. The other 19 tools are
+content. That capability gate is not a tool profile. The other 31 tools are
 always advertised, and `listChanged` is `false`.
 
 ## Result envelope
@@ -59,7 +73,12 @@ count, dimensions, resize metadata, and warnings, but no base64 or data URL.
 
 ## Patch behavior
 
-`apply_patch` accepts the standard envelope:
+`apply_patch` accepts the standard envelope. Preview and small Add/Update
+patches are automatic. Delete and Move are controlled by the active data policy:
+Safe and Balanced ask, and Power can allow them. An Update is routed
+to local out-of-band approval only when it removes more than 200 existing lines
+or more than 30% of an existing file. Unique context, baseline/hash protection,
+atomic writes, rollback, and symlink defenses apply to every patch.
 
 ```text
 *** Begin Patch
@@ -78,7 +97,7 @@ count, dimensions, resize metadata, and warnings, but no base64 or data URL.
 All operations are parsed and matched before writes. Context must be unique.
 Files are prepared in their destination directories, fsynced, baseline-checked,
 and installed with atomic replacement. Multi-file failure restores prior files.
-Mode bits, BOM, and newline style are preserved; moves inherit source mode.
+Mode bits, BOM, and newline style are preserved.
 
 ## Command and output behavior
 
@@ -99,8 +118,10 @@ than labeling pipes as a TTY.
 
 ## Permission modes
 
-- `safe`: blocks network-looking commands, shell expansion, inline scripts,
-  destructive commands, outside-workspace arguments, and secret/loader env.
+- `safe`: allows registered non-network tasks and safe local coding operations;
+  unknown commands, network, shell expansion, inline scripts, destructive
+  commands, outside-workspace arguments, and secret/loader env require local
+  approval or are denied according to the policy.
 - `trusted`: enables normal local-development network, expansion, and inline
   snippets while retaining secret and destructive-command checks.
 - `dangerous`: disables command permission gates and Landlock; use only inside

@@ -26,7 +26,7 @@ SUITES = {
     "security": ["tests.compliance.test_security"],
     "e2e": ["tests.compliance.test_e2e"],
     "runtime-semantics": ["tests.compliance.test_runtime_semantics"],
-    "dogfood": ["tests.compliance.test_dogfood"],
+    "dogfood": ["tests.compliance.test_dogfood", "tests.compliance.test_live_dogfood_v5"],
     "compliance-report": ["tests.compliance.test_compliance_report"],
     "docs-required": ["tests.compliance.test_docs_required"],
     "schema-drift": ["tests.compliance.test_schema_drift"],

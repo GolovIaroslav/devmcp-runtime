@@ -112,7 +112,7 @@ class MCPContractTests(ComplianceTestCase):
             "list_dir": (True, False, True, False),
             "list_files": (True, False, True, False),
             "search_text": (True, False, True, False),
-            "apply_patch": (False, True, False, False),
+            "apply_patch": (False, False, False, False),
             "exec_command": (False, True, False, True),
             "write_stdin": (False, False, False, False),
             "kill_session": (False, True, False, False),
@@ -122,8 +122,20 @@ class MCPContractTests(ComplianceTestCase):
             "git_log": (True, False, True, False),
             "git_show": (True, False, True, False),
             "git_blame": (True, False, True, False),
-            "request_permissions": (True, False, False, False),
             "view_image": (True, False, True, False),
+            "list_tasks": (True, False, True, False),
+            "describe_task": (True, False, True, False),
+            "run_task": (False, False, False, False),
+            "job_status": (True, False, True, False),
+            "job_output": (True, False, True, False),
+            "job_input": (False, True, False, False),
+            "job_cancel": (False, True, False, False),
+            "approval_status": (True, False, True, False),
+            "list_pending_approvals": (True, False, True, False),
+            "health": (True, False, True, False),
+            "workspace_info": (True, False, True, False),
+            "read_files": (True, False, True, False),
+            "preview_patch": (True, False, True, False),
         }
         for tool in self.client.list_tools():
             name = str(tool.get("name"))
@@ -187,12 +199,10 @@ class MCPContractTests(ComplianceTestCase):
         try:
             with MCPClient(self.workspace.root) as traced:
                 traced.call_tool(
-                    "request_permissions",
+                    "exec_command",
                     {
-                        "tool_name": "exec_command",
-                        "permission": "sensitive_env",
-                        "reason": "trace redaction check",
-                        "arguments": {"token": "COMPLIANCE_SHOULD_NOT_LEAK"},
+                        "cmd": "echo trace-redaction-check",
+                        "env": {"OPENAI_API_KEY": "COMPLIANCE_SHOULD_NOT_LEAK"},
                     },
                 )
                 stderr = traced.stderr_snapshot()
@@ -208,9 +218,9 @@ class MCPContractTests(ComplianceTestCase):
         trace_events = [event for event in events if event.get("event") == "tool_call"]
         self.assertTrue(trace_events, f"expected structured tool_call trace in stderr: {stderr!r}")
         event = trace_events[-1]
-        self.assertEqual(event.get("tool"), "request_permissions")
+        self.assertEqual(event.get("tool"), "exec_command")
         self.assertFalse(event.get("ok"))
-        self.assertEqual(event.get("error_code"), "ELICITATION_UNSUPPORTED")
+        self.assertEqual(event.get("status"), "approval_required")
         serialized = json.dumps(event, sort_keys=True)
         self.assertNotIn("COMPLIANCE_SHOULD_NOT_LEAK", serialized)
         self.assertIn("[REDACTED]", serialized)
@@ -344,7 +354,7 @@ class MCPContractTests(ComplianceTestCase):
                 with urllib.request.urlopen(request, timeout=5) as response:
                     body = json.loads(response.read().decode("utf-8"))
                 self.assertEqual(body.get("protocolVersion"), "2025-11-25")
-                self.assertEqual(body.get("server", {}).get("name"), "coding-tools-mcp")
+                self.assertEqual(body.get("server", {}).get("name"), "devmcp-runtime")
                 self.assertEqual(body.get("transport", {}).get("endpoint"), "/mcp")
                 self.assertEqual(body.get("auth", {}).get("type"), "none")
                 self.assertIn("tools", body)

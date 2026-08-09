@@ -3,30 +3,31 @@ requires = ["setuptools>=68,<77"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "coding-tools-mcp"
-version = "0.2.2"
-description = "Workspace-confined coding tools exposed as an MCP server."
+name = "devmcp-runtime"
+version = "0.1.0-beta.1"
+description = "Local sandboxed coding runtime for MCP clients with configurable permissions and task workflows."
 requires-python = ">=3.11"
 dependencies = [
   "PyJWT>=2.8",
 ]
 readme = "README.md"
 license = { file = "LICENSE" }
-authors = [{ name = "Coding Tools MCP Contributors" }]
+authors = [{ name = "DevMCP Runtime Contributors" }]
 classifiers = [
   "License :: OSI Approved :: Apache Software License",
 ]
 
 [project.urls]
-Homepage = "https://github.com/xyTom/coding-tools-mcp"
-Documentation = "https://github.com/xyTom/coding-tools-mcp/tree/main/docs"
-Source = "https://github.com/xyTom/coding-tools-mcp"
-Issues = "https://github.com/xyTom/coding-tools-mcp/issues"
+Homepage = "https://github.com/GolovIaroslav/devmcp-runtime"
+Documentation = "https://github.com/GolovIaroslav/devmcp-runtime/tree/main/docs"
+Source = "https://github.com/GolovIaroslav/devmcp-runtime"
+Issues = "https://github.com/GolovIaroslav/devmcp-runtime/issues"
 
 [project.optional-dependencies]
 dev = [
-  "mypy>=2.1,<2.2",
-  "PyYAML>=6.0",
+    "mypy>=2.1,<2.2",
+    "pytest>=8,<10",
+    "PyYAML>=6.0",
   "ruff>=0.15,<0.16",
   "typing_extensions>=4.12",
 ]
@@ -37,14 +38,21 @@ desktop = [
 image = [
   "Pillow>=10.0",
 ]
+gui = [
+  "playwright>=1.45,<2",
+]
 
 [project.scripts]
+devmcp-runtime = "coding_tools_mcp.server:main"
+devmcp-desktop = "mcp_desktop_client.app:main"
+# Compatibility launchers retained for existing local installations.
 coding-tools-mcp = "coding_tools_mcp.server:main"
 coding-tools-mcp-desktop = "mcp_desktop_client.app:main"
+devmcp = "apps.devmcp.cli:main"
 
 [tool.setuptools.packages.find]
 where = [".", "apps/desktop-client"]
-include = ["coding_tools_mcp*", "mcp_desktop_client*"]
+include = ["coding_tools_mcp*", "mcp_desktop_client*", "apps.devmcp*"]
 
 [tool.setuptools.package-data]
 mcp_desktop_client = ["locales/*.qm", "locales/*.ts"]

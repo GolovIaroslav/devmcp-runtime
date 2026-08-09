@@ -11,6 +11,12 @@ class RequiredDocsTests(unittest.TestCase):
     def test_required_operator_docs_exist(self) -> None:
         required_paths = [
             "README.md",
+            "README.ru.md",
+            "CONTRIBUTING.md",
+            "CODE_OF_CONDUCT.md",
+            "ROADMAP.md",
+            "SUPPORT.md",
+            "THIRD_PARTY_NOTICES.md",
             "SECURITY.md",
             "COMPLIANCE.md",
             "BENCHMARK.md",
@@ -30,11 +36,30 @@ class RequiredDocsTests(unittest.TestCase):
             "docs/troubleshooting.md",
             "docs/competitive-analysis.md",
             "docs/runtime-contract-v0.2.md",
+            "docs/INSTALL.md",
+            "docs/CONFIGURATION.md",
+            "docs/PERMISSIONS.md",
+            "docs/ARCHITECTURE.md",
+            "docs/SECURITY.md",
+            "docs/CHATGPT.md",
+            "docs/DEVELOPMENT.md",
+            "docs/RELEASE.md",
+            "docs/FAQ.md",
             "Dockerfile",
             ".dockerignore",
             "docker-compose.yml",
             "scripts/mcp_smoke.py",
             ".devcontainer/devcontainer.json",
+            "docs/ru/INSTALL.md",
+            "docs/ru/CONFIGURATION.md",
+            "docs/ru/PERMISSIONS.md",
+            "docs/ru/ARCHITECTURE.md",
+            "docs/ru/SECURITY.md",
+            "docs/ru/CHATGPT.md",
+            "docs/ru/TROUBLESHOOTING.md",
+            "docs/ru/DEVELOPMENT.md",
+            "docs/ru/RELEASE.md",
+            "docs/ru/FAQ.md",
         ]
         missing = [path for path in required_paths if not (ROOT / path).is_file()]
         self.assertEqual(missing, [])
@@ -59,7 +84,7 @@ class RequiredDocsTests(unittest.TestCase):
     def test_docs_contain_required_operational_topics(self) -> None:
         expectations = {
             "README.md": ["Quickstart", "Safety Boundary", "Dogfood", "SWE-bench"],
-            "SECURITY.md": ["Linux Landlock", "Environment Scrubbing", "Session Lifecycle"],
+            "SECURITY.md": ["bubblewrap", "Residual risk", "GitHub Private Vulnerability"],
             "COMPLIANCE.md": ["make compliance", "required_tools", "not_measured"],
             "BENCHMARK.md": ["make dogfood-smoke", "make benchmark-latency", "PREFLIGHT_ONLY", "swebench-official-attempt"],
             "docs/ci-and-tests.md": ["make ci", "workflow", "swebench-lite"],
@@ -87,7 +112,6 @@ class RequiredDocsTests(unittest.TestCase):
             "make test",
             "make test-protocol",
             "make test-integration",
-            "make check-npm-launcher",
             "make dogfood-smoke",
             "make benchmark-latency",
             "make benchmark-smoke",
@@ -103,7 +127,7 @@ class RequiredDocsTests(unittest.TestCase):
                 self.assertIn(needle, swebench)
 
         docker_image = (ROOT / ".github/workflows/docker-image.yml").read_text(encoding="utf-8")
-        for needle in ("docker/build-push-action", "ghcr.io", "coding-tools-mcp-sandbox"):
+        for needle in ("docker/build-push-action", "ghcr.io", "devmcp-runtime-sandbox"):
             with self.subTest(workflow="docker-image", needle=needle):
                 self.assertIn(needle, docker_image)
 
@@ -116,14 +140,13 @@ class RequiredDocsTests(unittest.TestCase):
         for needle in (
             'tags: ["v*"]',
             "scripts/check_release_versions.py",
-            "./.github/workflows/compliance.yml",
-            "./.github/workflows/real-workloads.yml",
-            "./.github/workflows/swebench-lite.yml",
-            "Verify wheel contents and installation",
-            "pypa/gh-action-pypi-publish",
-            "npm@11.18.0",
-            "npm publish ./dist/*.tgz --access public --provenance",
-            "gh release create",
+            "workflow_dispatch",
+            "gitleaks/gitleaks-action@v3.0.0",
+            'gitleaks git --no-banner --redact --exit-code 1 --log-opts="--all" .',
+            "gitleaks dir --no-banner --redact --exit-code 1 .",
+            "Build source and wheel distributions",
+            "Verify a clean wheel installation",
+            "Upload release artifacts",
         ):
             with self.subTest(workflow="release", needle=needle):
                 self.assertIn(needle, release)

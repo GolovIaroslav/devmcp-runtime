@@ -16,9 +16,12 @@ If an older client or server reports `SANDBOX_UNAVAILABLE` as an error, upgrade 
 
 If the result returns `status: "running"`, poll with `write_stdin` using empty `chars`, or terminate with `kill_session`. Session deadlines still apply when the client stops polling.
 
-## Permission Elicitation Is Unsupported
+## Local Approval Is Out of Band
 
-If `request_permissions` returns `ELICITATION_UNSUPPORTED`, the MCP client cannot show approval prompts. For dependency downloads and local development, prefer `--permission-mode trusted`; it allows network-looking commands, shell expansion, and inline scripts while keeping secret filtering and destructive-command checks. For isolated containers or VMs, use `--permission-mode dangerous` to disable `exec_command` permission gates.
+The model-facing catalog does not use MCP elicitation. Safe registered tasks and
+small patches run automatically. Risky operations return an `approval_required`
+record; approve it locally with `devmcp approve <approval_id>`, then retry the
+exact same operation with that `approval_id`.
 
 ## Missing Toolchain Environment
 

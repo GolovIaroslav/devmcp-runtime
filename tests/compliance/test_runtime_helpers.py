@@ -426,7 +426,7 @@ class RuntimeHelperTests(unittest.TestCase):
                 patch.object(server_module.os, "name", "nt"),
                 patch.dict(server_module.os.environ, host_env, clear=True),
             ):
-                env = runtime._command_env({"CUSTOM": "ok", "OPENAI_API_KEY": "sk-test-secret-value"})
+                env = runtime._command_env({"CUSTOM": "ok", "OPENAI_API_KEY": "fixture-openai-key-value"})
 
             self.assertEqual(env.get("Path"), host_env["Path"])
             self.assertEqual(env.get("PATHEXT"), host_env["PATHEXT"])
@@ -564,7 +564,7 @@ class RuntimeHelperTests(unittest.TestCase):
                 "LIBPATH": r"C:\VS\VC\Tools\MSVC\libpath",
                 "CUDA_PATH": "/opt/cuda",
                 "ONEAPI_ROOT": "/opt/intel/oneapi",
-                "OPENAI_API_KEY": "sk-test-secret-value",
+                "OPENAI_API_KEY": "fixture-openai-key-value",
                 "PYTHONPATH": "/tmp/injected",
                 "DYLD_LIBRARY_PATH": "/tmp/injected",
             }
@@ -588,13 +588,13 @@ class RuntimeHelperTests(unittest.TestCase):
                 shell_env_policy=ShellEnvPolicy(inherit="all"),
             )
             host_env = {
-                "OPENAI_API_KEY": "sk-test-secret-value",
+                "OPENAI_API_KEY": "fixture-openai-key-value",
                 "LD_PRELOAD": "/tmp/injected.so",
             }
             with patch.dict(server_module.os.environ, host_env, clear=True):
                 env = runtime._command_env({})
 
-            self.assertEqual(env.get("OPENAI_API_KEY"), "sk-test-secret-value")
+            self.assertEqual(env.get("OPENAI_API_KEY"), "fixture-openai-key-value")
             self.assertEqual(env.get("LD_PRELOAD"), "/tmp/injected.so")
 
     def test_runtime_root_stays_posix_tmp_when_process_tmpdir_is_workspace_local(self) -> None:
@@ -687,12 +687,12 @@ class RuntimeHelperTests(unittest.TestCase):
             else:
                 self.assertIn("start_new_session", kwargs)
             self.assertEqual(kwargs.get("pass_fds"), (captured["read_fd"],))
-            self.assertEqual(captured.get("write_roots"), [runtime.runtime_dir])
+            self.assertEqual(captured.get("write_roots"), [runtime.sandbox.sandbox_dir, runtime.runtime_dir])
             popen_args = captured["args"]
             self.assertIsInstance(popen_args, tuple)
             argv = popen_args[0]
             self.assertIsInstance(argv, list)
-            self.assertTrue(str(argv[1]).endswith("landlock_exec.py"))
+            self.assertTrue(any(str(a).endswith("landlock_exec.py") for a in argv))
 
     def test_exec_command_passes_runtime_write_root_to_landlock(self) -> None:
         for permission_mode in ("safe", "trusted"):
@@ -701,7 +701,7 @@ class RuntimeHelperTests(unittest.TestCase):
                 with fake_landlock_exec() as captured:
                     runtime.exec_command({"cmd": "printf ok", "timeout_ms": 5000, "yield_time_ms": 0})
 
-                self.assertEqual(captured.get("write_roots"), [runtime.runtime_dir])
+                self.assertEqual(captured.get("write_roots"), [runtime.sandbox.sandbox_dir, runtime.runtime_dir])
 
     def test_dangerously_skip_all_permissions_auto_grants_permission_gates(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -713,21 +713,11 @@ class RuntimeHelperTests(unittest.TestCase):
 
             dangerous_runtime = Runtime(workspace, permission_mode="dangerous")
             dangerous_runtime._check_command_policy("curl https://example.com", {})
-            grant = dangerous_runtime.request_permissions(
-                {
-                    "tool_name": "exec_command",
-                    "permission": "network",
-                    "reason": "test dangerous mode",
-                    "arguments": {"cmd": "curl https://example.com"},
-                }
-            )
-            self.assertTrue(grant.get("ok"))
-            self.assertEqual(grant.get("status"), "granted")
 
-            filtered_env = default_runtime._command_env({"OPENAI_API_KEY": "sk-test-secret-value"})
-            dangerous_env = dangerous_runtime._command_env({"OPENAI_API_KEY": "sk-test-secret-value"})
+            filtered_env = default_runtime._command_env({"OPENAI_API_KEY": "fixture-openai-key-value"})
+            dangerous_env = dangerous_runtime._command_env({"OPENAI_API_KEY": "fixture-openai-key-value"})
             self.assertNotIn("OPENAI_API_KEY", filtered_env)
-            self.assertEqual(dangerous_env.get("OPENAI_API_KEY"), "sk-test-secret-value")
+            self.assertEqual(dangerous_env.get("OPENAI_API_KEY"), "fixture-openai-key-value")
 
     def test_landlock_device_access_includes_truncate_and_ioctl_bits(self) -> None:
         handled = server_module.landlock_handled_access(5)
@@ -849,7 +839,7 @@ Maven home: /usr/share/maven
             self.assertIn("read_file", names)
             self.assertNotIn("edit_file", names)
             apply_patch_tool = next(tool for tool in first if tool["name"] == "apply_patch")
-            self.assertIs(apply_patch_tool["annotations"].get("destructiveHint"), True)
+            self.assertIs(apply_patch_tool["annotations"].get("destructiveHint"), False)
             self.assertIs(apply_patch_tool["annotations"].get("readOnlyHint"), False)
 
     def test_agent_text_matches_per_tool_limits_without_renderer_truncation(self) -> None:
@@ -1417,7 +1407,7 @@ Maven home: /usr/share/maven
                 "EOF"
             )
             runtime.exec_command({"cmd": xml_heredoc, "timeout_ms": 5000, "max_output_bytes": 4096})
-            self.assertIn(tag, (workspace / "pom.xml").read_text(encoding="utf-8"))
+            self.assertIn(tag, (runtime.sandbox.sandbox_dir / "pom.xml").read_text(encoding="utf-8"))
 
     def test_heredoc_payload_stripping_keeps_live_shell_code_scanned(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -1541,7 +1531,7 @@ class FakeReadonlyAnnotationTests(unittest.TestCase):
             runtime = Runtime(workspace, permission_mode="dangerous", fake_readonly_annotations=True)
             result = runtime.exec_command({"cmd": "echo ran > ran.txt", "timeout_ms": 30000, "yield_time_ms": 30000})
             self.assertEqual(result.get("status"), "exited", result)
-            self.assertTrue((workspace / "ran.txt").exists(), "read-only annotation must not stop execution")
+            self.assertTrue((runtime.sandbox.sandbox_dir / "ran.txt").exists(), "read-only annotation must not stop execution")
 
     def test_override_is_reported_by_check_exec_environment(self) -> None:
         with TemporaryDirectory() as tmp:

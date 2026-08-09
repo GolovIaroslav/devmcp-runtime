@@ -1,10 +1,11 @@
-# Installation and Setup Guide
+# DevMCP Runtime installation and setup
 
-This document covers installation, CLI usage, systemd daemon setup, and client configuration for the ChatGPT Dev Runtime.
+This document covers installation, CLI usage, systemd daemon setup, and client
+configuration for DevMCP Runtime.
 
 ## Requirements
 
-- Linux or macOS (Linux recommended for Landlock isolation support)
+- Linux with bubblewrap (`bwrap`) for the supported beta security boundary
 - Python ≥ 3.11
 - `uv` (recommended) or standard `pip`
 
@@ -13,34 +14,42 @@ This document covers installation, CLI usage, systemd daemon setup, and client c
 ### 1. Clone & Install Dependencies
 
 ```bash
-git clone https://github.com/GolovIaroslav/test.git chatgpt-dev-runtime
-cd chatgpt-dev-runtime
-uv sync
+git clone https://github.com/GolovIaroslav/devmcp-runtime.git devmcp-runtime
+cd devmcp-runtime
+uv sync --extra dev
+uv run devmcp setup --workspace /path/to/your/repo --no-tunnel
 ```
 
-### 2. Run manually (stdio mode)
+### 2. Run the configured local MCP service
 
 ```bash
-uv run python -m coding_tools_mcp --workspace /path/to/your/repo --stdio
+uv run devmcp serve
 ```
 
-### 3. Run manually (HTTP mode)
+### 3. Check the local endpoint
 
 ```bash
-uv run python -m coding_tools_mcp --workspace /path/to/your/repo --host 127.0.0.1 --port 47157
+uv run devmcp status
 ```
 
 ## Systemd Daemon Installation (Linux)
 
-To run the runtime automatically in the background as a user service:
+To run the runtime automatically in the background as a user service, keep the
+installed runtime tree separate from the project it is allowed to edit:
 
 ```bash
-sudo ./scripts/install_systemd.sh
+devmcp setup --workspace "$HOME/Documents/projects/my-project" --no-tunnel
+devmcp service install
 ```
+
+The installer requires an explicit workspace, creates only a user systemd
+unit, and generates loopback bearer authentication when no token is supplied.
+The MCP runtime source directory is never selected as the authoritative
+workspace automatically.
 
 To inspect service logs:
 ```bash
-sudo journalctl -u chatgpt-dev-runtime -f
+journalctl --user -u devmcp-runtime.service -f
 ```
 
 ## Out-of-Band Approval CLI (`devmcp`)
@@ -49,15 +58,15 @@ When an untrusted shell execution is attempted by an AI agent, the runtime retur
 
 To view pending approvals:
 ```bash
-uv run python -m apps.devmcp.cli approvals
+devmcp approvals
 ```
 
 To approve a request:
 ```bash
-uv run python -m apps.devmcp.cli approve <approval_id>
+devmcp approve <approval_id>
 ```
 
 To deny a request:
 ```bash
-uv run python -m apps.devmcp.cli deny <approval_id>
+devmcp deny <approval_id>
 ```

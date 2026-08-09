@@ -1,11 +1,11 @@
 # Compliance Report
 
 - contract: `coding-tools-mcp-v0.2`
-- commit: `e9c9acf6535d6c2e86c050dcc66ef73db11eb038+dirty`
+- commit: `3b1121634ba3f4cc476ecd22ba3db543817f8209`
 - suite: `all`
 - passed: `true`
-- tests_run: `84`
-- elapsed_seconds: `62.588`
+- tests_run: `92`
+- elapsed_seconds: `38.613`
 
 ## Required Tools
 
@@ -27,7 +27,6 @@
 - `git_log`: passed
 - `git_show`: passed
 - `git_blame`: passed
-- `request_permissions`: passed
 - `view_image`: passed
 
 ## Failures

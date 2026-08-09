@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
+import inspect
 import re
 import unittest
 from pathlib import Path
 
-from coding_tools_mcp.server import KILL_SESSION_STATUSES, TOOL_REGISTRY, input_schemas, tool_annotations
+from coding_tools_mcp.server import KILL_SESSION_STATUSES, Runtime, TOOL_REGISTRY, input_schemas, tool_annotations
 from tests.compliance.mcp_client import REQUIRED_TOOLS
 
 
@@ -71,6 +72,25 @@ class SchemaDriftTests(unittest.TestCase):
         documented = set(re.findall(r"^- `([a-z0-9_]+)`:", inventory, flags=re.MULTILINE))
         self.assertEqual(documented, set(TOOL_REGISTRY))
         self.assertIn(f"exactly {len(TOOL_REGISTRY)} tools", text)
+
+    def test_security_sensitive_schema_names_are_consumed_by_handlers(self) -> None:
+        expected = {
+            "search_text": {"is_regex", "context_lines"},
+            "git_diff": {"context_lines"},
+            "apply_patch": {"approval_id"},
+            "exec_command": {"approval_id", "network_required", "task_id"},
+            "run_task": {"approval_id", "cwd", "env"},
+        }
+        schemas = input_schemas()
+        for tool_name, names in expected.items():
+            source = inspect.getsource(getattr(Runtime, tool_name))
+            if tool_name == "run_task":
+                source += inspect.getsource(Runtime._operation_workdir)
+            schema_names = set(schemas[tool_name]["properties"])
+            with self.subTest(tool=tool_name):
+                self.assertTrue(names <= schema_names)
+                for name in names:
+                    self.assertRegex(source, rf'args\.(?:get|pop)\("{re.escape(name)}"')
 
     def test_contract_error_enum_contains_live_tool_failure_codes(self) -> None:
         source = "\n".join(

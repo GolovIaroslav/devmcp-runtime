@@ -24,6 +24,7 @@ import sys
 import tempfile
 import threading
 import time
+import tomllib
 import urllib.parse
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
@@ -32,6 +33,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, cast
 
 from . import __version__
+from .audit import append_tool_event
 from .envutils import ENV_PREFIX, truthy_env
 from .errors import JsonRpcError, ToolFailure
 from .landlock_exec import libc_syscall
@@ -76,6 +78,7 @@ from .protocol import (
     validate_rpc_envelope,
 )
 from .project_context import ProjectContext, load_project_context
+from .policy import PROFILE_NAMES, decision as policy_decision, effective_rules, legacy_profile, validate_rules
 from .telemetry import SessionTelemetry
 from .textutils import DEFAULT_MAX_LINES, TextTruncation, truncate_text_head
 from .tool_results import make_tool_result
@@ -83,8 +86,9 @@ from .transport_http import HTTPSessionManager
 from .transport_stdio import serve_stdio
 
 
-SERVER_NAME = "coding-tools-mcp"
-SERVER_TITLE = "Coding Tools MCP"
+SERVER_NAME = "devmcp-runtime"
+SERVER_TITLE = "DevMCP Runtime"
+TOOL_SCHEMA_VERSION = "1.0"
 MCP_ENDPOINT_PATH = "/mcp"
 DEFAULT_EXCLUDED_NAMES = {
     ".git",
@@ -321,6 +325,37 @@ class RuntimePolicy:
     shell_env_policy: ShellEnvPolicy
     allow_network: bool
     fake_readonly_annotations: bool = False
+    policy_profile: str | None = None
+
+
+AUTO_ALLOW_POLICY = {
+    "read_only": [
+        "workspace inspection and search",
+        "git read-only inspection",
+        "preview_patch",
+        "safe local process inspection",
+    ],
+    "safe_mutations": [
+        "apply_patch below the destructive thresholds",
+        "registered non-network tests, lint, typecheck, and build/check tasks",
+    ],
+    "approval_required": [
+        "network capability",
+        "dependency installation or update",
+        "database migration",
+        "unknown or unregistered exec_command operations",
+        "unregistered shell expansion or inline scripts",
+        "destructive patches over configured thresholds",
+        "sensitive environment injection",
+        "privileged or unusual executables",
+    ],
+    "deny": [
+        "patch deletes and moves",
+        "paths outside the authoritative workspace",
+        "sudo, su, doas, mount, umount, docker, and podman operations",
+        "sandbox escape and policy/configuration modification",
+    ],
+}
 
 
 OAUTH_TOKEN_AUTH_METHODS = ("client_secret_basic", "client_secret_post", "none")
@@ -505,7 +540,11 @@ def fake_readonly_annotations_from_args(args: argparse.Namespace, permission_mod
 
 def runtime_policy_from_args(args: argparse.Namespace) -> RuntimePolicy:
     permission_mode = permission_mode_from_args(args)
-    allow_network = (
+    policy_profile = policy_profile_from_args(args)
+    # A legacy switch only affects a process that has not selected a profile.
+    # This preserves old command lines without making --permission-mode safe
+    # silently override a GUI-selected Power or Custom matrix.
+    allow_network = policy_profile is None and (
         PERMISSION_MODE_CAPABILITIES[permission_mode].network
         or bool(getattr(args, "allow_network", False))
         or truthy_env(os.environ.get(f"{ENV_PREFIX}_ALLOW_NETWORK"))
@@ -515,7 +554,38 @@ def runtime_policy_from_args(args: argparse.Namespace) -> RuntimePolicy:
         shell_env_policy=shell_env_policy_from_args(args),
         allow_network=allow_network,
         fake_readonly_annotations=fake_readonly_annotations_from_args(args, permission_mode),
+        policy_profile=policy_profile,
     )
+
+
+def policy_profile_from_args(args: argparse.Namespace) -> str | None:
+    raw = getattr(args, "policy_profile", None) or os.environ.get("DEVMCP_POLICY_PROFILE")
+    if raw is None:
+        return None
+    profile = str(raw).strip().lower()
+    if profile not in PROFILE_NAMES:
+        raise ValueError(f"policy profile must be one of: {', '.join(PROFILE_NAMES)}")
+    return profile
+
+
+def policy_rules_from_config_file(path: str | None, profile: str) -> dict[str, str] | None:
+    """Load only non-secret custom policy data for a configured server process."""
+
+    if profile != "custom" or not path:
+        return None
+    try:
+        with Path(path).expanduser().open("rb") as handle:
+            config = tomllib.load(handle)
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        raise ValueError(f"unable to read policy config file: {exc}") from exc
+    policy = config.get("policy", {})
+    custom = policy.get("custom", {}) if isinstance(policy, dict) else {}
+    if not isinstance(custom, dict):
+        raise ValueError("policy.custom must be a table")
+    try:
+        return validate_rules(custom)
+    except ValueError as exc:
+        raise ValueError(f"invalid custom policy: {exc}") from exc
 
 
 @dataclass(frozen=True)
@@ -562,7 +632,10 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     "search_text": ToolSpec(title="Search text", description="Search text.", read_only=True, idempotent=True),
     "view_image": ToolSpec(title="View image", description="View image.", read_only=True, idempotent=True, content_builder=_image_content),
     "preview_patch": ToolSpec(title="Preview patch", description="Preview patch.", read_only=True, idempotent=True),
-    "apply_patch": ToolSpec(title="Apply patch", description="Apply patch.", destructive=True),
+    "apply_patch": ToolSpec(
+        title="Apply patch",
+        description="Apply a previewed Add/Update patch. Small non-destructive updates run automatically; deletes, moves, and high-risk updates are blocked or require local approval.",
+    ),
     "git_status": ToolSpec(title="Git status", description="Git status.", read_only=True, idempotent=True),
     "git_diff": ToolSpec(title="Git diff", description="Git diff.", read_only=True, idempotent=True),
     "git_log": ToolSpec(title="Git log", description="Git log.", read_only=True, idempotent=True),
@@ -570,23 +643,23 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     "git_blame": ToolSpec(title="Git blame", description="Git blame.", read_only=True, idempotent=True),
     "list_tasks": ToolSpec(title="List tasks", description="List tasks.", read_only=True, idempotent=True),
     "describe_task": ToolSpec(title="Describe task", description="Describe task.", read_only=True, idempotent=True),
-    "run_task": ToolSpec(title="Run task", description="Run task.", destructive=True),
+    "run_task": ToolSpec(
+        title="Run task",
+        description="Run a registered local test, lint, typecheck, build, or check task in the isolated sandbox. Safe non-network tasks run automatically.",
+    ),
     "exec_command": ToolSpec(title="Exec command", description="Exec command.", destructive=True, open_world=True, error_status="failed"),
     "job_status": ToolSpec(title="Job status", description="Job status.", read_only=True, idempotent=True),
+    "read_output": ToolSpec(title="Read output", description="Read output.", read_only=True, idempotent=True),
+    "write_stdin": ToolSpec(title="Write stdin", description="Write stdin."),
+    "kill_session": ToolSpec(title="Kill session", description="Kill session.", destructive=True),
     "job_output": ToolSpec(title="Job output", description="Job output.", read_only=True, idempotent=True),
     "job_input": ToolSpec(title="Job input", description="Job input.", destructive=True),
     "job_cancel": ToolSpec(title="Job cancel", description="Job cancel.", destructive=True),
     "approval_status": ToolSpec(title="Approval status", description="Approval status.", read_only=True, idempotent=True),
     "list_pending_approvals": ToolSpec(title="List pending approvals", description="List pending approvals.", read_only=True, idempotent=True),
-    "lsp_symbols": ToolSpec(title="LSP symbols", description="LSP symbols.", read_only=True, idempotent=True),
-    "lsp_definition": ToolSpec(title="LSP definition", description="LSP definition.", read_only=True, idempotent=True),
-    "lsp_references": ToolSpec(title="LSP references", description="LSP references.", read_only=True, idempotent=True),
-    "lsp_diagnostics": ToolSpec(title="LSP diagnostics", description="LSP diagnostics.", read_only=True, idempotent=True),
-    "antigravity_start": ToolSpec(title="Antigravity start", description="Antigravity start.", destructive=True),
-    "antigravity_status": ToolSpec(title="Antigravity status", description="Antigravity status.", read_only=True, idempotent=True),
-    "antigravity_output": ToolSpec(title="Antigravity output", description="Antigravity output.", read_only=True, idempotent=True),
-    "antigravity_result": ToolSpec(title="Antigravity result", description="Antigravity result.", read_only=True, idempotent=True),
-    "antigravity_cancel": ToolSpec(title="Antigravity cancel", description="Antigravity cancel.", destructive=True),
+    "check_exec_environment": ToolSpec(title="Check exec environment", description="Check exec environment.", read_only=True, idempotent=True),
+    "get_default_cwd": ToolSpec(title="Get default cwd", description="Get default cwd.", read_only=True, idempotent=True),
+    "set_default_cwd": ToolSpec(title="Set default cwd", description="Set default cwd.", idempotent=True),
 }
 
 LANDLOCK_CREATE_RULESET_VERSION = 1
@@ -684,7 +757,19 @@ def normalize_rel_display(path: Path, root: Path) -> str:
 
 
 def matches_any_glob(rel: str, patterns: list[str]) -> bool:
-    return any(fnmatch.fnmatch(rel, pattern) or PurePosixPath(rel).match(pattern) for pattern in patterns)
+    def matches(pattern: str) -> bool:
+        if pattern in {"**", "**/*"}:
+            return True
+        if fnmatch.fnmatch(rel, pattern) or PurePosixPath(rel).match(pattern):
+            return True
+        # Python's fnmatch does not treat **/ as an optional directory prefix,
+        # so a root-level file such as calc.py would be missed by **/*.py.
+        if pattern.startswith("**/"):
+            short = pattern.removeprefix("**/")
+            return fnmatch.fnmatch(rel, short) or PurePosixPath(rel).match(short)
+        return False
+
+    return any(matches(pattern) for pattern in patterns)
 
 
 def file_entry(path: Path, rel: str, path_stat: os.stat_result) -> dict[str, Any]:
@@ -1138,8 +1223,13 @@ class Runtime:
         project_context: ProjectContext | None = None,
         fake_readonly_annotations: bool = False,
         transport: str = "stdio",
+        policy_profile: str | None = None,
+        sandbox_backend: str = "bwrap",
+        max_removed_lines: int = 200,
+        max_removed_percent: float = 30.0,
+        policy_rules: dict[str, Any] | None = None,
     ) -> None:
-        from .sandbox import ExecutionSandbox
+        from .sandbox import ExecutionSandbox, detect_sandbox_backend
         from .tasks import TaskRegistry
         self.sandbox: ExecutionSandbox | None = None
         self.task_registry = TaskRegistry()
@@ -1159,8 +1249,27 @@ class Runtime:
                 details={"supported": list(PERMISSION_MODE_CHOICES)},
             )
         self.permission_mode = permission_mode
+        self._profile_managed = policy_profile is not None
+        if policy_profile is None:
+            policy_profile = legacy_profile(permission_mode)
+        if policy_profile not in PROFILE_NAMES:
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                f"Unknown policy profile: {policy_profile}",
+                category="validation",
+                details={"supported": list(PROFILE_NAMES)},
+            )
+        self.policy_profile = policy_profile
+        self.policy_rules = validate_rules(policy_rules or {}) if policy_profile == "custom" else None
+        self.sandbox_backend = detect_sandbox_backend(sandbox_backend)
+        if max_removed_lines < 0 or max_removed_percent < 0:
+            raise ToolFailure("INVALID_ARGUMENT", "Patch risk thresholds cannot be negative.", category="validation")
+        self.max_removed_lines = max_removed_lines
+        self.max_removed_percent = max_removed_percent
         self.capabilities = PERMISSION_MODE_CAPABILITIES[permission_mode]
-        self.dangerously_skip_all_permissions = self.capabilities.skip_all_permissions
+        self.dangerously_skip_all_permissions = (
+            not self._profile_managed and self.capabilities.skip_all_permissions
+        )
         # Faking annotations is only defensible where the caller has already
         # asserted the workspace is disposable, so bind it to that assertion
         # instead of letting it be set orthogonally.
@@ -1180,7 +1289,11 @@ class Runtime:
                 category="validation",
                 details={"supported": list(SHELL_ENV_INHERIT_CHOICES)},
             )
-        self.allow_network = allow_network or self.capabilities.network
+        self.allow_network = (
+            allow_network or self.capabilities.network
+            if not self._profile_managed
+            else self._policy_decision_for_capabilities({"network.public"}) == "auto"
+        )
         self.auth_token = auth_token or None
         self.oauth_config = oauth_config
         self.server_instance_id = secrets.token_urlsafe(12)
@@ -1284,7 +1397,22 @@ class Runtime:
         return "enabled" if self.capabilities.secret_env_filter else "disabled"
 
     def landlock_enabled(self) -> bool:
-        return self.capabilities.landlock
+        return self.capabilities.landlock and self.sandbox_backend.name != "unsafe"
+
+    def _policy_decision_for_capabilities(self, required: set[str]) -> str:
+        """Return the strictest active profile decision for real operations."""
+
+        if not required:
+            return "auto"
+        decisions = {
+            policy_decision(self.policy_profile, capability, self.policy_rules)
+            for capability in required
+        }
+        if "deny" in decisions:
+            return "deny"
+        if "ask" in decisions:
+            return "ask"
+        return "auto"
 
     def landlock_write_roots(self) -> list[Path]:
         return [self.runtime_dir]
@@ -1307,6 +1435,7 @@ class Runtime:
                 "name": SERVER_NAME,
                 "title": SERVER_TITLE,
                 "version": __version__,
+                "schemaVersion": TOOL_SCHEMA_VERSION,
             },
             "instructions": self.project_context.server_instructions(),
         }
@@ -1351,6 +1480,8 @@ class Runtime:
             "home": str(self.command_home_dir()),
             "tmpdir": str(self.command_tmp_dir()),
             "cache_dir": str(self.cache_dir),
+            "sandbox_backend": self.sandbox_backend.name,
+            "sandbox_secure": self.sandbox_backend.secure,
         }
 
     def _landlock_enforced(self, landlock: dict[str, Any]) -> bool:
@@ -1364,9 +1495,22 @@ class Runtime:
             "server": SERVER_NAME,
             "title": SERVER_TITLE,
             "version": __version__,
+            "schema_version": TOOL_SCHEMA_VERSION,
             "protocol_version": self.protocol_version,
             **self._exec_environment_summary(),
             "default_cwd": self.default_cwd_display(),
+            "policy_profile": self.policy_profile,
+            "policy_rules": effective_rules(self.policy_profile, self.policy_rules),
+            "patch_risk_thresholds": {
+                "max_removed_lines": self.max_removed_lines,
+                "max_removed_percent": self.max_removed_percent,
+            },
+            "sandbox_backend": {
+                "name": self.sandbox_backend.name,
+                "available": self.sandbox_backend.available,
+                "secure": self.sandbox_backend.secure,
+                "description": self.sandbox_backend.description,
+            },
             "auth_enabled": self.auth_enabled(),
             "dangerously_skip_all_permissions": self.dangerously_skip_all_permissions,
             "annotation_override": "fake_readonly" if self.fake_readonly_annotations else None,
@@ -1377,6 +1521,7 @@ class Runtime:
                 "global_tmp_write": self.global_tmp_write_policy(),
                 "secret_env_filter": self.secret_env_filter_policy(),
             },
+            "permission_policy": AUTO_ALLOW_POLICY,
             "shell_env_inherit": self.shell_env_policy.inherit,
             "shell_env_include_only": list(self.shell_env_policy.include_only),
             "shell_env_exclude": list(self.shell_env_policy.exclude),
@@ -1441,8 +1586,6 @@ class Runtime:
                     "status": "required",
                     "retryable": True,
                 }
-            if exc.code == "ELICITATION_UNSUPPORTED":
-                payload["status"] = "unsupported"
             self.emit_tool_trace(name, args, payload, started_at)
             return make_tool_result(name, payload, is_error=True)
         except Exception as exc:  # noqa: BLE001 - tool failures must stay structured
@@ -1475,6 +1618,8 @@ class Runtime:
             warnings.append(
                 "tools/list annotations are faked as read-only; apply_patch and exec_command still mutate and execute"
             )
+        if self.sandbox_backend.name == "unsafe":
+            warnings.append("SANDBOX: UNSAFE HOST MODE")
         return {
             "ok": True,
             **self._exec_environment_summary(),
@@ -1510,6 +1655,13 @@ class Runtime:
             error_code=error.get("code"),
             duration_ms=duration_ms,
             truncated=bool(payload.get("truncated")),
+        )
+        append_tool_event(
+            name,
+            ok=bool(payload.get("ok")),
+            error_code=error.get("code"),
+            duration_ms=duration_ms,
+            policy_profile=self.policy_profile,
         )
         if os.environ.get(f"{ENV_PREFIX}_TRACE") != "1":
             return
@@ -1827,7 +1979,7 @@ class Runtime:
         if not query:
             raise ToolFailure("INVALID_ARGUMENT", "query is required.", category="validation")
         resolved = self.resolve_existing(str(args.get("path", ".")))
-        regex = bool(args.get("regex", False))
+        regex = bool(args.get("is_regex", False))
         case_sensitive = bool(args.get("case_sensitive", False))
         include_globs = [str(item) for item in args.get("include_globs", [])]
         if isinstance(args.get("glob"), str):
@@ -2031,106 +2183,273 @@ class Runtime:
             "warnings": ["result limit reached; search stopped early"] if truncated else [],
         }
 
+    def _analyze_patch(self, patch_text: str) -> dict[str, Any]:
+        import difflib
+        operations = parse_patch(patch_text)
+        staged: dict[str, StagedFile] = {}
+        summaries: list[str] = []
+        affected: list[dict[str, Any]] = []
+        total_additions = 0
+        total_removals = 0
+        total_orig_lines = 0
+        file_metrics: list[dict[str, Any]] = []
+        diff_chunks: list[str] = []
+        overall_risk = "ALLOW"
+        policy_capabilities: set[str] = set()
+
+        for op in operations:
+            self._validate_patch_path(op.path, require_existing=op.kind in {"update", "delete"})
+            if op.kind in {"add", "update", "delete"}:
+                self.workspace.reject_write_symlink(op.path)
+            if op.move_to:
+                self._validate_patch_path(op.move_to, require_existing=False)
+                self.workspace.reject_write_symlink(op.move_to)
+
+            if op.kind == "add":
+                target = self.workspace.resolve_for_write(op.path)
+                if target.existed:
+                    raise ToolFailure("PATCH_FAILED", "Cannot add file that already exists.", category="validation")
+                baseline = FileBaseline.capture(target.path)
+                new_content = op.add_content or ""
+                staged[target.display] = StagedFile(target.display, target.path, new_content, baseline, None)
+                orig_lines = 0
+                add_lines = len(new_content.splitlines())
+                rem_lines = 0
+                removed_existing_lines = 0
+                pct_rem = 0.0
+                file_risk = "ALLOW"
+                if self._profile_managed:
+                    required = {"workspace.create"}
+                    policy_capabilities.update(required)
+                    decision = self._policy_decision_for_capabilities(required)
+                    if decision == "deny":
+                        raise ToolFailure("ACCESS_DENIED", "Create is disabled by the active policy profile.", category="security")
+                    file_risk = "ASK" if decision == "ask" else "ALLOW"
+
+                diff_lines = list(difflib.unified_diff(
+                    [],
+                    new_content.splitlines(keepends=True),
+                    fromfile="/dev/null",
+                    tofile="b/" + target.display,
+                ))
+                diff_chunks.append("".join(diff_lines))
+                affected.append({"path": target.display, "operation": "add"})
+                summaries.append(f"A {target.display}")
+
+            elif op.kind == "update":
+                source = self.workspace.resolve_existing(op.path)
+                if source.path.is_dir():
+                    raise ToolFailure("PATCH_FAILED", "Cannot update a directory.", category="validation")
+                prior = staged.get(source.display)
+                if prior is not None and prior.content is None:
+                    raise ToolFailure("PATCH_FAILED", "Cannot update a deleted file.", category="validation")
+                baseline = prior.baseline if prior is not None else FileBaseline.capture(source.path)
+                orig_text = prior.content if prior is not None else baseline.text(source.display)
+                assert orig_text is not None
+                updated_text = apply_update_hunks(orig_text, op.hunks, op.path)
+
+                orig_list = orig_text.splitlines(keepends=True)
+                new_list = updated_text.splitlines(keepends=True)
+                diff_lines = list(difflib.unified_diff(
+                    orig_list,
+                    new_list,
+                    fromfile="a/" + source.display,
+                    tofile="b/" + source.display,
+                ))
+                diff_chunks.append("".join(diff_lines))
+
+                orig_lines = len(orig_text.splitlines())
+                add_lines = sum(1 for line in diff_lines if line.startswith("+") and not line.startswith("+++"))
+                rem_lines = sum(1 for line in diff_lines if line.startswith("-") and not line.startswith("---"))
+                # A replacement removes lines from the unified diff but is not
+                # destructive when the file keeps the same line count. Risk is
+                # based on net existing lines removed, so a one-line surgical
+                # fix in a two-line file remains an automatic operation.
+                removed_existing_lines = max(0, orig_lines - len(new_list))
+                pct_rem = round((removed_existing_lines / orig_lines) * 100, 2) if orig_lines > 0 else 0.0
+
+                file_risk = "ALLOW"
+                if self._profile_managed:
+                    required = {"workspace.patch_small"}
+                    if removed_existing_lines > self.max_removed_lines or pct_rem > self.max_removed_percent:
+                        required.add("workspace.patch_destructive")
+                    policy_capabilities.update(required)
+                    decision = self._policy_decision_for_capabilities(required)
+                    if decision == "deny":
+                        raise ToolFailure("ACCESS_DENIED", "Patch is disabled by the active policy profile.", category="security")
+                    file_risk = "ASK" if decision == "ask" else "ALLOW"
+                elif removed_existing_lines > self.max_removed_lines or pct_rem > self.max_removed_percent:
+                    file_risk = "ASK"
+
+                staged[source.display] = StagedFile(source.display, source.path, updated_text, baseline, baseline.mode)
+                affected.append({"path": source.display, "operation": "update"})
+                summaries.append(f"M {source.display}")
+
+            elif op.kind == "delete":
+                source = self.workspace.resolve_existing(op.path)
+                if source.path.is_dir():
+                    raise ToolFailure("PATCH_FAILED", "Cannot delete a directory with Delete File.", category="validation")
+                operation_decision = policy_decision(self.policy_profile, "workspace.delete", self.policy_rules)
+                policy_capabilities.add("workspace.delete")
+                if operation_decision == "deny":
+                    raise ToolFailure("ACCESS_DENIED", "Delete is disabled by the active policy profile.", category="security")
+                baseline = FileBaseline.capture(source.path)
+                staged[source.display] = StagedFile(source.display, source.path, None, baseline, None)
+                original_text = (baseline.data or b"").decode("utf-8", errors="replace")
+                orig_lines = len(original_text.splitlines())
+                add_lines = 0
+                rem_lines = orig_lines
+                removed_existing_lines = orig_lines
+                pct_rem = 100.0 if orig_lines else 0.0
+                file_risk = "ASK" if operation_decision == "ask" else "ALLOW"
+                diff_chunks.append("".join(difflib.unified_diff(
+                    original_text.splitlines(keepends=True),
+                    [],
+                    fromfile="a/" + source.display,
+                    tofile="/dev/null",
+                )))
+                affected.append({"path": source.display, "operation": "delete"})
+                summaries.append(f"D {source.display}")
+
+            elif op.kind == "move":
+                if not op.move_to:
+                    raise ToolFailure("PATCH_FAILED", "Move target is required.", category="validation")
+                source = self.workspace.resolve_existing(op.path)
+                target = self.workspace.resolve_for_write(op.move_to)
+                if source.path.is_dir():
+                    raise ToolFailure("PATCH_FAILED", "Cannot move a directory with Move File.", category="validation")
+                if target.existed:
+                    raise ToolFailure("PATCH_FAILED", "Move target already exists.", category="validation")
+                operation_decision = policy_decision(self.policy_profile, "workspace.move", self.policy_rules)
+                policy_capabilities.add("workspace.move")
+                if operation_decision == "deny":
+                    raise ToolFailure("ACCESS_DENIED", "Move is disabled by the active policy profile.", category="security")
+                baseline = FileBaseline.capture(source.path)
+                staged[source.display] = StagedFile(source.display, source.path, None, baseline, None)
+                staged[target.display] = StagedFile(
+                    target.display,
+                    target.path,
+                    baseline.text(source.display),
+                    FileBaseline.capture(target.path),
+                    baseline.mode,
+                )
+                orig_lines = len(baseline.text(source.display).splitlines())
+                add_lines = orig_lines
+                rem_lines = orig_lines
+                removed_existing_lines = 0
+                pct_rem = 0.0
+                file_risk = "ASK" if operation_decision == "ask" else "ALLOW"
+                diff_chunks.append("".join(difflib.unified_diff(
+                    baseline.text(source.display).splitlines(keepends=True),
+                    [],
+                    fromfile="a/" + source.display,
+                    tofile="/dev/null",
+                )))
+                diff_chunks.append("".join(difflib.unified_diff(
+                    [],
+                    baseline.text(source.display).splitlines(keepends=True),
+                    fromfile="/dev/null",
+                    tofile="b/" + target.display,
+                )))
+                affected.extend([
+                    {"path": source.display, "operation": "move_from"},
+                    {"path": target.display, "operation": "move_to"},
+                ])
+                summaries.append(f"M {source.display} -> {target.display}")
+
+            total_additions += add_lines
+            total_removals += rem_lines
+            total_orig_lines += orig_lines
+            file_metrics.append({
+                "path": op.path,
+                "operation": op.kind,
+                "additions": add_lines,
+                "removals": rem_lines,
+                "removed_existing_lines": removed_existing_lines if op.kind == "update" else rem_lines,
+                "original_line_count": orig_lines,
+                "percentage_removed": pct_rem,
+                "risk": file_risk,
+                "risk_class": "high" if file_risk == "ASK" else "normal",
+            })
+            if file_risk == "ASK" and overall_risk != "DENY":
+                overall_risk = "ASK"
+
+        if not file_metrics:
+            raise ToolFailure("PATCH_FAILED", "No files were modified.", category="validation")
+        total_removed_existing_lines = sum(int(item.get("removed_existing_lines", 0)) for item in file_metrics)
+        total_pct_rem = (
+            round((total_removed_existing_lines / total_orig_lines) * 100, 2)
+            if total_orig_lines > 0
+            else 0.0
+        )
+
+        return {
+            "staged": list(staged.values()),
+            "summary": "\n".join(summaries),
+            "affected_files": affected,
+            "unified_diff": "".join(diff_chunks),
+            "files": file_metrics,
+            "additions": total_additions,
+            "removals": total_removals,
+            "removed_existing_lines": total_removed_existing_lines,
+            "original_line_count": total_orig_lines,
+            "percentage_removed": total_pct_rem,
+            "risk": overall_risk,
+            "risk_class": "high" if overall_risk == "ASK" else "normal",
+            "policy_capabilities": sorted(policy_capabilities),
+        }
+
     def apply_patch(self, args: dict[str, Any]) -> dict[str, Any]:
-        patch = str(args.get("patch", ""))
+        patch_text = str(args.get("patch", ""))
         dry_run = bool(args.get("dry_run", False))
+        approval_id = args.get("approval_id")
+
         with self.patch_lock:
-            operations = parse_patch(patch)
-            staged: dict[str, StagedFile] = {}
-            summaries: list[str] = []
-            affected: list[dict[str, str]] = []
-            additions = 0
-            removals = 0
-            for op in operations:
-                self._validate_patch_path(op.path, require_existing=op.kind in {"update", "delete"})
-                if op.kind in {"add", "update", "delete"}:
-                    self.workspace.reject_write_symlink(op.path)
-                if op.move_to:
-                    self._validate_patch_path(op.move_to, require_existing=False)
-                    self.workspace.reject_write_symlink(op.move_to)
-                if op.kind == "add":
-                    target = self.workspace.resolve_for_write(op.path)
-                    if target.existed:
-                        raise ToolFailure("PATCH_FAILED", "Cannot add file that already exists.", category="validation")
-                    baseline = FileBaseline.capture(target.path)
-                    staged[target.display] = StagedFile(
-                        target.display,
-                        target.path,
-                        op.add_content or "",
-                        baseline,
-                        None,
+            analysis = self._analyze_patch(patch_text)
+
+            if analysis["risk"] == "DENY":
+                raise ToolFailure("ACCESS_DENIED", "Patch operation is unconditionally denied.", category="security")
+            elif analysis["risk"] == "ASK":
+                if approval_id:
+                    from .approval import ApprovalEngine
+                    approval_engine = ApprovalEngine()
+                    approval_engine.consume(
+                        approval_id,
+                        patch_text,
+                        str(self.workspace.root),
+                        sandbox_id=self.server_instance_id,
+                        capabilities=analysis["policy_capabilities"] or ["high_risk_patch"],
                     )
-                    affected.append({"path": target.display, "operation": "add"})
-                    summaries.append(f"A {target.display}")
-                    additions += len((op.add_content or "").splitlines())
-                elif op.kind == "delete":
-                    target = self.workspace.resolve_existing(op.path)
-                    if target.path.is_dir():
-                        raise ToolFailure("PATCH_FAILED", "Cannot delete a directory.", category="validation")
-                    prior = staged.get(target.display)
-                    baseline = prior.baseline if prior is not None else FileBaseline.capture(target.path)
-                    staged[target.display] = StagedFile(target.display, target.path, None, baseline, baseline.mode)
-                    affected.append({"path": target.display, "operation": "delete"})
-                    summaries.append(f"D {target.display}")
-                    removals += len((baseline.data or b"").splitlines())
-                elif op.kind == "update":
-                    source = self.workspace.resolve_existing(op.path)
-                    if source.path.is_dir():
-                        raise ToolFailure("PATCH_FAILED", "Cannot update a directory.", category="validation")
-                    prior = staged.get(source.display)
-                    if prior is not None and prior.content is None:
-                        raise ToolFailure("PATCH_FAILED", "Cannot update a deleted file.", category="validation")
-                    baseline = prior.baseline if prior is not None else FileBaseline.capture(source.path)
-                    content = prior.content if prior is not None else baseline.text(source.display)
-                    assert content is not None
-                    updated = apply_update_hunks(content, op.hunks, op.path)
-                    for hunk in op.hunks:
-                        for line in hunk:
-                            additions += line.startswith("+")
-                            removals += line.startswith("-")
-                    source_mode = prior.mode if prior is not None else baseline.mode
-                    if op.move_to:
-                        dest = self.workspace.resolve_for_write(op.move_to)
-                        if dest.existed and dest.display != source.display:
-                            raise ToolFailure("PATCH_FAILED", "Cannot move over an existing file.", category="validation")
-                        dest_baseline = baseline if dest.display == source.display else FileBaseline.capture(dest.path)
-                        staged[source.display] = StagedFile(
-                            source.display,
-                            source.path,
-                            None,
-                            baseline,
-                            source_mode,
-                        )
-                        staged[dest.display] = StagedFile(
-                            dest.display,
-                            dest.path,
-                            updated,
-                            dest_baseline,
-                            source_mode,
-                        )
-                        affected.append({"path": dest.display, "old_path": source.display, "operation": "move"})
-                        summaries.append(f"R {source.display} -> {dest.display}")
-                    else:
-                        staged[source.display] = StagedFile(
-                            source.display,
-                            source.path,
-                            updated,
-                            baseline,
-                            source_mode,
-                        )
-                        affected.append({"path": source.display, "operation": "update"})
-                        summaries.append(f"M {source.display}")
-            if not affected:
-                raise ToolFailure("PATCH_FAILED", "No files were modified.", category="validation")
+                else:
+                    from .approval import ApprovalEngine
+                    approval_engine = ApprovalEngine()
+                    return approval_engine.request_approval(
+                        action=patch_text,
+                        cwd=str(self.workspace.root),
+                        reason=f"High risk patch ({analysis['removals']} lines / {analysis['percentage_removed']}% removed)",
+                        risk="high_risk_patch",
+                        network=False,
+                        sandbox_id=self.server_instance_id,
+                        capabilities=analysis["policy_capabilities"] or ["high_risk_patch"],
+                    )
+
             if not dry_run:
-                self._commit_staged_files(list(staged.values()))
+                self._commit_staged_files(analysis["staged"])
+
         return {
             "dry_run": dry_run,
             "clean": True,
-            "summary": "\n".join(summaries),
-            "affected_files": affected,
-            "additions": additions,
-            "removals": removals,
+            "summary": analysis["summary"],
+            "affected_files": analysis["affected_files"],
+            "unified_diff": analysis["unified_diff"],
+            "files": analysis["files"],
+            "additions": analysis["additions"],
+            "removals": analysis["removals"],
+            "original_line_count": analysis["original_line_count"],
+            "percentage_removed": analysis["percentage_removed"],
+            "removed_existing_lines": analysis["removed_existing_lines"],
+            "risk": analysis["risk"],
+            "risk_class": analysis["risk_class"],
             "warnings": [],
         }
 
@@ -2148,55 +2467,438 @@ class Runtime:
             self.patch_baselines[change.display] = (
                 None if change.baseline.data is None else change.baseline.data.decode("utf-8", errors="replace")
             )
-
-    def exec_command(self, args: dict[str, Any]) -> dict[str, Any]:
-        self._prune_sessions()
-        cmd = str(args.get("cmd", ""))
-        if not cmd:
-            raise ToolFailure("INVALID_ARGUMENT", "cmd is required.", category="validation")
             
-        from .approval import ApprovalEngine
-        approval_engine = ApprovalEngine()
-        decision = approval_engine.evaluate_command(cmd)
-        if decision == "DENY":
-            raise ToolFailure("ACCESS_DENIED", f"Command is unconditionally denied.", category="security")
-        elif decision == "ASK":
-            return approval_engine.request_approval("exec_command", str(args.get("cwd", ".")), "Unknown command", "high", False)
+        if self.sandbox is not None:
+            for change in staged:
+                if change.content is None:
+                    self.sandbox.safe_delete_file(change.display)
+                else:
+                    self.sandbox.safe_write_file(change.display, change.content, change.mode)
 
+    def _operation_workdir(self, args: dict[str, Any]) -> ResolvedPath:
         workdir_arg = args.get("workdir", args.get("cwd", "."))
         if "workdir" in args and "cwd" in args and str(args["workdir"]) != str(args["cwd"]):
             raise ToolFailure("INVALID_ARGUMENT", "workdir and cwd refer to different directories.", category="validation")
         workdir = self.resolve_existing(str(workdir_arg))
         if not workdir.path.is_dir():
             raise ToolFailure("NOT_A_DIRECTORY", "workdir is not a directory.", category="validation")
-        self._check_command_policy(cmd, args)
+        return workdir
+
+    def _required_command_capabilities(self, cmd: str, args: dict[str, Any]) -> set[str]:
+        if self.dangerously_skip_all_permissions:
+            return set()
+        self._check_command_paths(cmd)
+        required: set[str] = set()
+        env = args.get("env", {})
+        if isinstance(env, dict) and any(is_filtered_env_var(str(key), str(value)) for key, value in env.items()):
+            required.add("sensitive_env")
+        if not self.capabilities.inline_script and inline_script_command(cmd) is not None:
+            required.add(INLINE_SCRIPT_PERMISSION)
+        if not self.capabilities.shell_expansion and SHELL_EXPANSION_RE.search(cmd):
+            required.add("shell_expansion")
+        compact = " ".join(cmd.split()).lower()
+        if re.search(r"(^|[;&|]\s*)rm\s+(-[^\s]*r[^\s]*f|-?[^\s]*f[^\s]*r)\s+/", compact) or DESTRUCTIVE_RE.search(cmd):
+            required.add("destructive_command")
+        if (
+            not self.allow_network
+            and (bool(args.get("network_required", False)) or (NETWORK_RE.search(cmd) and not is_literal_network_reference_command(cmd)))
+        ):
+            required.add("network")
+        return required
+
+    @staticmethod
+    def _network_capability(cmd: str, args: dict[str, Any]) -> str | None:
+        if not (
+            bool(args.get("network_required", False))
+            or (NETWORK_RE.search(cmd) and not is_literal_network_reference_command(cmd))
+        ):
+            return None
+        local_markers = ("localhost", "127.0.0.1", "[::1]", "::1")
+        return "network.host_local" if any(marker in cmd.lower() for marker in local_markers) else "network.public"
+
+    @staticmethod
+    def _command_domain_capabilities(cmd: str) -> set[str]:
+        """Classify the explicitly surfaced policy domains of an exec request."""
+
+        compact = " ".join(cmd.split()).lower()
+        required: set[str] = set()
+        if re.search(r"\b(?:npm|pnpm|yarn|bun|pip|uv|poetry|cargo|go)\s+(?:install|add|sync|tidy)\b", compact):
+            required.add("deps.install")
+        if re.search(r"\b(?:alembic\s+upgrade|prisma\s+db\s+(?:push|migrate)|\w*migrate\b)", compact):
+            required.add("db.migrate")
+        if re.search(r"\bgit\s+(?:branch|switch|checkout\s+-b)\b", compact):
+            required.add("git.branch")
+        if re.search(r"\bgit\s+commit\b", compact):
+            required.add("git.commit")
+        if re.search(r"\bgit\s+push\b", compact):
+            required.add("git.push")
+        return required
+
+    def _profile_command_capabilities(self, cmd: str, args: dict[str, Any], registered_task: Any = None) -> set[str]:
+        required = {"exec.registered" if registered_task is not None else "exec.arbitrary"}
+        required.update(self._command_domain_capabilities(cmd))
+        network = self._network_capability(cmd, args)
+        if network:
+            required.add(network)
+        env = args.get("env", {})
+        if isinstance(env, dict) and any(is_filtered_env_var(str(key), str(value)) for key, value in env.items()):
+            required.add("env.sensitive")
+        return required
+
+    def _profile_authorize_command(
+        self,
+        action: str | list[str],
+        args: dict[str, Any],
+        *,
+        registered_task: Any = None,
+        task_id: str = "",
+    ) -> set[str] | dict[str, Any]:
+        cmd = action if isinstance(action, str) else " ".join(action)
+        self._check_command_paths(cmd)
+        if self._contains_always_denied_command(cmd):
+            raise ToolFailure(
+                "ACCESS_DENIED",
+                "The requested executable is unconditionally denied by the runtime policy.",
+                category="security",
+            )
+        required = self._profile_command_capabilities(cmd, args, registered_task)
+        decision = self._policy_decision_for_capabilities(required)
+        if decision == "deny":
+            blocked = sorted(capability for capability in required if policy_decision(self.policy_profile, capability, self.policy_rules) == "deny")
+            raise ToolFailure(
+                "ACCESS_DENIED",
+                "Operation is disabled by the active policy profile.",
+                category="security",
+                details={"capabilities": blocked},
+            )
+        from .approval import ApprovalEngine
+
+        workdir = self._operation_workdir(args)
+        approval_engine = ApprovalEngine()
+        approval_id = args.get("approval_id")
+        if approval_id:
+            approved = set(
+                approval_engine.consume(
+                    str(approval_id),
+                    action,
+                    str(workdir.path),
+                    env=args.get("env", {}),
+                    task_id=task_id,
+                    network=any(capability.startswith("network.") for capability in required),
+                    sandbox=True,
+                    sandbox_id=self.server_instance_id,
+                )
+            )
+            return approved | required
+        if decision == "ask":
+            return approval_engine.request_approval(
+                action=action,
+                cwd=str(workdir.path),
+                reason="Permission required by the active policy profile.",
+                risk="high" if required & {"env.sensitive", "git.push", "db.migrate"} else "medium",
+                network=any(capability.startswith("network.") for capability in required),
+                env=args.get("env", {}),
+                task_id=task_id,
+                sandbox=True,
+                sandbox_id=self.server_instance_id,
+                capabilities=sorted(required),
+            )
+        return required
+
+    def _profile_authorize_operation(
+        self, capability: str, args: dict[str, Any], action: str
+    ) -> dict[str, Any] | None:
+        """Authorize a non-exec capability without routing through legacy modes."""
+
+        decision = self._policy_decision_for_capabilities({capability})
+        if decision == "deny":
+            raise ToolFailure(
+                "ACCESS_DENIED",
+                "Operation is disabled by the active policy profile.",
+                category="security",
+                details={"capabilities": [capability]},
+            )
+        if decision == "auto":
+            return None
+        from .approval import ApprovalEngine
+
+        approval_engine = ApprovalEngine()
+        approval_id = args.get("approval_id")
+        if approval_id:
+            approval_engine.consume(
+                str(approval_id), action, str(self.workspace.root), sandbox_id=self.server_instance_id, capabilities=[capability]
+            )
+            return None
+        return approval_engine.request_approval(
+            action=action,
+            cwd=str(self.workspace.root),
+            reason="Permission required by the active policy profile.",
+            risk="medium",
+            network=False,
+            sandbox_id=self.server_instance_id,
+            capabilities=[capability],
+        )
+
+    def _profile_exec_command(self, args: dict[str, Any]) -> dict[str, Any]:
+        cmd = args.get("cmd", "")
+        if not isinstance(cmd, str) or not cmd:
+            raise ToolFailure("INVALID_ARGUMENT", "cmd is required and must be a string.", category="validation")
+        registered_task = self._registered_direct_task(cmd)
+        authorized = self._profile_authorize_command(cmd, args, registered_task=registered_task, task_id=str(args.get("task_id", "")))
+        if isinstance(authorized, dict):
+            return authorized
+        internal_args = dict(args)
+        internal_args.pop("approval_id", None)
+        internal_args.update(
+            {
+                "approval_class": "ALLOW",
+                "_policy_authorized": True,
+                "_approved_capabilities": sorted(authorized),
+                "_resolved_workdir": self._operation_workdir(args).path,
+                "_network_capability": self._network_capability(cmd, args),
+            }
+        )
+        return self._execute_command_legacy(internal_args)
+
+    def exec_command(self, args: dict[str, Any]) -> dict[str, Any]:
+        if self._profile_managed:
+            return self._profile_exec_command(args)
+        cmd = args.get("cmd", "")
+        if not isinstance(cmd, str) or not cmd:
+            raise ToolFailure("INVALID_ARGUMENT", "cmd is required and must be a string.", category="validation")
+        workdir = self._operation_workdir(args)
+        from .approval import ApprovalEngine
+
+        approval_engine = ApprovalEngine()
+        approval_id = args.get("approval_id")
+        task_id = str(args.get("task_id", ""))
+        network_required = bool(args.get("network_required", False))
+        operation_cwd = str(workdir.path)
+        required_caps = self._required_command_capabilities(cmd, args)
+        if self._contains_always_denied_command(cmd):
+            raise ToolFailure(
+                "ACCESS_DENIED",
+                "The requested executable is unconditionally denied by the runtime policy.",
+                category="security",
+            )
+        registered_task = self._registered_direct_task(cmd)
+        if registered_task is not None and registered_task.approval_class == "DENY":
+            raise ToolFailure("ACCESS_DENIED", "The registered task is unconditionally denied.", category="security")
+        if self.dangerously_skip_all_permissions or self.permission_mode == "trusted":
+            decision = "ALLOW"
+        elif registered_task is not None and not registered_task.network_requirement and registered_task.approval_class == "ALLOW":
+            decision = "ALLOW"
+        else:
+            decision = str(args.get("approval_class") or approval_engine.evaluate_command(cmd))
+        if decision == "DENY":
+            raise ToolFailure("ACCESS_DENIED", "Command is unconditionally denied.", category="security")
+
+        internal_args = dict(args)
+        if approval_id:
+            granted = set(
+                approval_engine.consume(
+                    approval_id,
+                    cmd,
+                    operation_cwd,
+                    env=args.get("env", {}),
+                    task_id=task_id,
+                    network=network_required,
+                    sandbox=True,
+                    sandbox_id=self.server_instance_id,
+                )
+            )
+            internal_args.pop("approval_id", None)
+            internal_args["approval_class"] = "ALLOW"
+            internal_args["_approved_capabilities"] = sorted(granted)
+        else:
+            requested = set(required_caps)
+            if decision == "ASK":
+                requested.add("exec")
+            if requested:
+                return approval_engine.request_approval(
+                    action=cmd,
+                    cwd=operation_cwd,
+                    reason="Permission required for the requested command capabilities.",
+                    risk="high" if "destructive_command" in requested else "medium",
+                    network="network" in requested,
+                    env=args.get("env", {}),
+                    task_id=task_id,
+                    sandbox=True,
+                    sandbox_id=self.server_instance_id,
+                    capabilities=sorted(requested),
+                )
+            self._check_command_policy(cmd, args)
+        internal_args["approval_class"] = "ALLOW" if decision == "ALLOW" else decision
+        internal_args["_resolved_workdir"] = workdir.path
+        return self._execute_command_legacy(internal_args)
+
+    def _execute_task_argv(self, argv: list[str], args: dict[str, Any], capabilities: set[str]) -> dict[str, Any]:
+        if not argv or any(not isinstance(item, str) or not item for item in argv):
+            raise ToolFailure("INVALID_ARGUMENT", "Task produced an invalid argv.", category="validation")
+        task_args = dict(args)
+        task_args["_resolved_workdir"] = self._operation_workdir(args).path
+        task_args["cmd"] = argv
+        task_args["approval_class"] = "ALLOW"
+        task_args["_argv_task"] = True
+        task_args["_approved_capabilities"] = sorted(capabilities)
+        return self._execute_command_legacy(task_args)
+
+    def _execute_command_legacy(self, args: dict[str, Any]) -> dict[str, Any]:
+        self._prune_sessions()
+        cmd_raw = args.get("cmd", "")
+        if isinstance(cmd_raw, list):
+            cmd = [str(x) for x in cmd_raw]
+            cmd_str = " ".join(cmd)
+        else:
+            cmd = str(cmd_raw)
+            cmd_str = cmd
+
+        if not cmd:
+            raise ToolFailure("INVALID_ARGUMENT", "cmd is required.", category="validation")
+            
+        approval_id = args.get("approval_id")
+        from .approval import ApprovalEngine
+        approval_engine = ApprovalEngine()
+        approved_caps: list[str] = [str(item) for item in args.get("_approved_capabilities", [])]
+        network_required = bool(args.get("network_required", False))
+
+        if approval_id:
+            approved_caps = approval_engine.consume(
+                approval_id,
+                cmd_raw,
+                str(args.get("cwd", ".")),
+                env=args.get("env"),
+                task_id=str(args.get("task_id", "")),
+                network=network_required,
+                sandbox=True,
+            )
+        else:
+            decision = args.get("approval_class") or approval_engine.evaluate_command(cmd_str)
+            if decision == "DENY":
+                raise ToolFailure("ACCESS_DENIED", "Command is unconditionally denied.", category="security")
+            elif decision == "ASK":
+                req_caps = ["destructive_command"] if "rm " in cmd_str or "reset" in cmd_str else ["exec"]
+                if network_required:
+                    req_caps.append("network")
+                return approval_engine.request_approval(
+                    action=cmd_raw,
+                    cwd=str(args.get("cwd", ".")),
+                    reason="Permission required",
+                    risk="high" if "destructive" in req_caps else "medium",
+                    network=network_required,
+                    env=args.get("env", {}),
+                    task_id=str(args.get("task_id", "")),
+                    capabilities=req_caps,
+                )
+
+        resolved_workdir = args.get("_resolved_workdir")
+        if isinstance(resolved_workdir, Path):
+            workdir = ResolvedPath(normalize_rel_display(resolved_workdir, self.workspace.root), resolved_workdir, True)
+        else:
+            workdir_arg = args.get("workdir", args.get("cwd", "."))
+            if "workdir" in args and "cwd" in args and str(args["workdir"]) != str(args["cwd"]):
+                raise ToolFailure("INVALID_ARGUMENT", "workdir and cwd refer to different directories.", category="validation")
+            workdir = self.resolve_existing(str(workdir_arg))
+        if not workdir.path.is_dir():
+            raise ToolFailure("NOT_A_DIRECTORY", "workdir is not a directory.", category="validation")
+        if not args.get("_argv_task"):
+            self._check_command_policy(cmd, args, granted_capabilities=set(approved_caps))
+        
+        if self.sandbox is None:
+            from .sandbox import ExecutionSandbox
+            self.sandbox = ExecutionSandbox.create(self.workspace.root)
+
+        sandbox_workdir = self.sandbox.translate_path_for_exec(workdir.path)
+        
         timeout_ms = int(args.get("timeout_ms", 30000))
         yield_ms = int(args.get("yield_time_ms", 10000))
         max_output_bytes = int(args.get("max_output_bytes", 65536))
         tty = bool(args.get("tty", False))
         stdin_text = str(args.get("stdin", ""))
-        env = self._command_env(args.get("env", {}))
+        approved_capabilities = set(approved_caps)
+        env = self._command_env(
+            args.get("env", {}),
+            allow_sensitive=(
+                "sensitive_env" in approved_capabilities
+                or "env.sensitive" in approved_capabilities
+                or (self._profile_managed and self._policy_decision_for_capabilities({"env.sensitive"}) == "auto")
+            ),
+        )
         start = time.time()
         deadline = start + (timeout_ms / 1000.0)
         landlock_fd: int | None = None
         landlock_warning: str | None = None
         popen_cmd: Any = cmd
-        popen_shell = True
+        popen_shell = False
         popen_extra = process_group_popen_kwargs()
+        
+        import shutil
+        if tty and os.name == "nt":
+            raise ToolFailure(
+                "TTY_UNSUPPORTED",
+                "tty=true requires ConPTY support, which is not available in this build.",
+                category="runtime",
+                details={"platform": os.name, "retry_hint": "Run the command without tty=true."},
+            )
+        # Windows has no bubblewrap. Permit process-only execution only when
+        # the operator explicitly selected trusted mode; safe mode remains a
+        # hard failure rather than silently losing the sandbox boundary.
+        if self.sandbox_backend.name == "podman":
+            raise ToolFailure(
+                "SANDBOX_UNAVAILABLE",
+                "The optional Podman backend is detected but not implemented in this release.",
+                category="security",
+            )
+        bwrap_available = self.sandbox_backend.name == "bwrap" and shutil.which("bwrap") is not None
+        if self.sandbox_backend.name == "unsafe":
+            bwrap_available = False
+            sandbox_workdir = workdir.path
+        if self.sandbox_backend.name != "unsafe" and not bwrap_available and not (os.name == "nt" and self.permission_mode == "trusted"):
+            raise ToolFailure("SANDBOX_UNAVAILABLE", "bwrap is required for execution sandbox but not found.", category="security")
+        if not bwrap_available and os.name == "nt":
+            # Windows has no bwrap equivalent in this runtime. This path is
+            # intentionally available only in explicit trusted mode; use the
+            # requested workspace so compiler outputs and process semantics
+            # remain compatible with the trusted host execution contract.
+            sandbox_workdir = workdir.path
+            
+        network_capability = args.get("_network_capability")
+        allow_network = (
+            "network" in approved_capabilities
+            or "network.public" in approved_capabilities
+            or "network.host_local" in approved_capabilities
+            or (
+                self._profile_managed
+                and isinstance(network_capability, str)
+                and self._policy_decision_for_capabilities({network_capability}) == "auto"
+            )
+            or (not self._profile_managed and self.permission_mode == "trusted")
+        )
+        bwrap_args = self.sandbox.get_bwrap_args(allow_network=allow_network) if bwrap_available else []
+        if isinstance(cmd, str):
+            actual_cmd = (["cmd.exe", "/d", "/s", "/c", cmd] if os.name == "nt" else ["/bin/sh", "-c", cmd])
+            popen_shell = False
+        else:
+            actual_cmd = cmd
+            popen_shell = False
+            
+        # We still initialize landlock as defense in depth if bwrap is missing somehow, 
+        # but bwrap provides the primary namespace isolation.
         if self.landlock_enabled():
             try:
                 landlock_fd = open_landlock_ruleset(
-                    self.workspace.root,
+                    self.sandbox.sandbox_dir,
                     guard_allow_roots(),
-                    write_roots=self.landlock_write_roots(),
+                    write_roots=[self.sandbox.sandbox_dir, self.runtime_dir],
                 )
-                popen_cmd = landlock_exec_argv(landlock_fd, cmd)
-                popen_shell = False
+                actual_cmd = landlock_exec_argv(landlock_fd, actual_cmd)
                 popen_extra["pass_fds"] = (landlock_fd,)
             except ToolFailure as exc:
                 if exc.code != "SANDBOX_UNAVAILABLE":
                     raise
                 landlock_warning = landlock_unavailable_warning(exc)
+        popen_cmd = bwrap_args + actual_cmd
+        self._prune_sessions()
         with self.sessions_lock:
             if self._closed:
                 if landlock_fd is not None:
@@ -2217,12 +2919,7 @@ class Runtime:
         session: ExecSession | None = None
         registered = False
         slot_released = False
-        if self.sandbox is None:
-            self.sandbox = ExecutionSandbox.create(self.workspace.root)
-        else:
-            self.sandbox.sync_from_authoritative()
 
-        sandbox_workdir = self.sandbox.translate_path_for_exec(workdir.path)
 
         try:
             process, pty_master_fd = spawn_process(
@@ -2307,12 +3004,25 @@ class Runtime:
                 return finish()
             time.sleep(0.02)
 
-    def _check_command_policy(self, cmd: str, args: dict[str, Any]) -> None:
+    def _check_command_policy(
+        self,
+        cmd: str,
+        args: dict[str, Any],
+        *,
+        granted_capabilities: set[str] | None = None,
+    ) -> None:
+        granted = granted_capabilities or set()
+        if self._profile_managed:
+            # Profile decisions and approvals were resolved before command
+            # execution. Keep the non-negotiable path validation here, but do
+            # not reapply the retired safe/trusted/dangerous gates.
+            self._check_command_paths(cmd)
+            return
         if self.dangerously_skip_all_permissions:
             return
         self._check_command_paths(cmd)
         env = args.get("env", {})
-        if isinstance(env, dict) and any(
+        if "sensitive_env" not in granted and isinstance(env, dict) and any(
             is_filtered_env_var(str(key), str(value)) for key, value in env.items()
         ):
             raise ToolFailure(
@@ -2321,7 +3031,7 @@ class Runtime:
                 category="permission",
                 details={"permission": "sensitive_env", "env_keys": sorted(str(key) for key in env)},
             )
-        if not self.capabilities.inline_script:
+        if "inline_script" not in granted and not self.capabilities.inline_script:
             inline_script = inline_script_command(cmd)
             if inline_script is not None:
                 raise ToolFailure(
@@ -2331,28 +3041,28 @@ class Runtime:
                     details={"permission": INLINE_SCRIPT_PERMISSION, **inline_script},
                 )
         compact = " ".join(cmd.split()).lower()
-        if not self.capabilities.shell_expansion and SHELL_EXPANSION_RE.search(cmd):
+        if "shell_expansion" not in granted and not self.capabilities.shell_expansion and SHELL_EXPANSION_RE.search(cmd):
             raise ToolFailure(
                 "PERMISSION_REQUIRED",
                 "Shell command substitution and parameter expansion require explicit permission.",
                 category="permission",
                 details={"permission": "shell_expansion", "command": compact},
             )
-        if re.search(r"(^|[;&|]\s*)rm\s+(-[^\s]*r[^\s]*f|-?[^\s]*f[^\s]*r)\s+/", compact):
+        if "destructive_command" not in granted and re.search(r"(^|[;&|]\s*)rm\s+(-[^\s]*r[^\s]*f|-?[^\s]*f[^\s]*r)\s+/", compact):
             raise ToolFailure(
                 "PERMISSION_REQUIRED",
                 "Destructive commands are blocked without explicit permission.",
                 category="permission",
                 details={"permission": "destructive_command", "command": compact},
             )
-        if DESTRUCTIVE_RE.search(cmd):
+        if "destructive_command" not in granted and DESTRUCTIVE_RE.search(cmd):
             raise ToolFailure(
                 "PERMISSION_REQUIRED",
                 "Destructive commands are blocked without explicit permission.",
                 category="permission",
                 details={"permission": "destructive_command", "command": compact},
             )
-        if not self.allow_network and NETWORK_RE.search(cmd) and not is_literal_network_reference_command(cmd):
+        if "network" not in granted and not self.allow_network and NETWORK_RE.search(cmd) and not is_literal_network_reference_command(cmd):
             raise ToolFailure(
                 "PERMISSION_REQUIRED",
                 "Network access is denied by default.",
@@ -2426,6 +3136,25 @@ class Runtime:
             if exc.code in {"PATH_OUTSIDE_WORKSPACE", "ABSOLUTE_PATH_DENIED", "SYMLINK_ESCAPE"}:
                 raise escape_failure() from exc
 
+    @staticmethod
+    def _contains_always_denied_command(cmd: str) -> bool:
+        normalized = cmd.replace("\\", "/").lower()
+        if any(marker in normalized for marker in ("docker.sock", "podman.sock", "/var/run/docker", "/run/docker")):
+            return True
+        try:
+            tokens = shlex_split(strip_heredoc_payloads(cmd))
+        except ValueError:
+            tokens = cmd.split()
+        denied = {"sudo", "su", "doas", "mount", "umount", "docker", "podman"}
+        return any(PurePosixPath(token.replace("\\", "/")).name in denied for token in tokens)
+
+    def _registered_direct_task(self, cmd: str):
+        try:
+            tokens = shlex_split(strip_heredoc_payloads(cmd))
+        except ValueError:
+            return None
+        return self.task_registry.match_direct_argv(tokens)
+
     def _reject_setuid_executable(self, executable: str) -> None:
         if not executable:
             return
@@ -2444,9 +3173,9 @@ class Runtime:
                 details={"permission": "privileged_executable", "path": str(executable_path)},
             )
 
-    def _command_env(self, extra: Any) -> dict[str, str]:
+    def _command_env(self, extra: Any, *, allow_sensitive: bool = False) -> dict[str, str]:
         env = self._base_command_env()
-        if not self.dangerously_skip_all_permissions:
+        if not self.dangerously_skip_all_permissions and not allow_sensitive:
             env = {key: value for key, value in env.items() if not is_filtered_env_var(key, value)}
             env = {key: value for key, value in env.items() if key not in ECOSYSTEM_CACHE_ENV_NAMES}
         if self.shell_env_policy.exclude:
@@ -2473,7 +3202,7 @@ class Runtime:
             for key, value in extra.items():
                 key_text = str(key)
                 value_text = str(value)
-                if not self.dangerously_skip_all_permissions and is_filtered_env_var(key_text, value_text):
+                if not self.dangerously_skip_all_permissions and not allow_sensitive and is_filtered_env_var(key_text, value_text):
                     continue
                 env[key_text] = value_text
         return env
@@ -2607,6 +3336,8 @@ class Runtime:
     def _get_output_session(self, session_id: str) -> ExecSession:
         self._prune_sessions()
         with self.sessions_lock:
+            with open("/tmp/debug_sessions.txt", "a") as f:
+                f.write(f"LOOKING FOR {session_id} IN SESSIONS: {list(self.sessions.keys())} OUTPUT: {list(self.output_sessions.keys())}\n")
             session = self.sessions.get(session_id) or self.output_sessions.get(session_id)
         if session is None:
             raise ToolFailure("SESSION_NOT_FOUND", "Output session not found.", category="runtime")
@@ -3197,36 +3928,6 @@ class Runtime:
             }
         return result
 
-    def request_permissions(self, args: dict[str, Any]) -> dict[str, Any]:
-        if self.dangerously_skip_all_permissions:
-            return {
-                "ok": True,
-                "status": "granted",
-                "grant_id": "dangerously-skip-all-permissions",
-                "expires_at": None,
-                "constraints": {
-                    "mode": "dangerously_skip_all_permissions",
-                    "workspace": str(self.workspace.root),
-                    "requested": args,
-                },
-                "warnings": [
-                    "dangerously-skip-all-permissions is enabled; permission-gated operations are auto-granted"
-                ],
-            }
-        return {
-            "ok": False,
-            "status": "unsupported",
-            "grant_id": None,
-            "expires_at": None,
-            "error": {
-                "code": "ELICITATION_UNSUPPORTED",
-                "message": "Permission elicitation is not available for this client.",
-                "category": "permission",
-                "retryable": False,
-                "details": {"requested": args},
-            },
-        }
-
     def view_image(self, args: dict[str, Any]) -> dict[str, Any]:
         resolved = self.resolve_existing(str(args.get("path", "")))
         max_bytes = int(args.get("max_bytes", 5_242_880))
@@ -3276,10 +3977,47 @@ class Runtime:
         return {"workspace": str(self.workspace.root)}
         
     def read_files(self, args: dict[str, Any]) -> dict[str, Any]:
-        return {"error": "Not implemented"}
+        if self._profile_managed:
+            approval = self._profile_authorize_operation("workspace.read", args, "read_files")
+            if approval is not None:
+                return approval
+        raw_paths = args.get("paths", [])
+        if not isinstance(raw_paths, list):
+            raise ToolFailure("INVALID_ARGUMENT", "paths argument must be a list of path strings.", category="validation")
+        files = []
+        for raw_path in raw_paths:
+            res = self.workspace.resolve_existing(str(raw_path))
+            try:
+                content = res.path.read_text(encoding="utf-8")
+            except UnicodeDecodeError as exc:
+                raise ToolFailure("UNSUPPORTED_ENCODING", "File is not valid utf-8.", category="validation") from exc
+            files.append({
+                "path": res.display,
+                "content": content,
+                "bytes": len(content.encode("utf-8")),
+            })
+        return {"files": files}
         
     def preview_patch(self, args: dict[str, Any]) -> dict[str, Any]:
-        return {"error": "Not implemented"}
+        patch_text = str(args.get("patch", ""))
+        with self.patch_lock:
+            analysis = self._analyze_patch(patch_text)
+        return {
+            "dry_run": True,
+            "clean": True,
+            "summary": analysis["summary"],
+            "affected_files": analysis["affected_files"],
+            "unified_diff": analysis["unified_diff"],
+            "files": analysis["files"],
+            "additions": analysis["additions"],
+            "removals": analysis["removals"],
+            "original_line_count": analysis["original_line_count"],
+            "percentage_removed": analysis["percentage_removed"],
+            "removed_existing_lines": analysis["removed_existing_lines"],
+            "risk": analysis["risk"],
+            "risk_class": analysis["risk_class"],
+            "warnings": [],
+        }
         
     def list_tasks(self, args: dict[str, Any]) -> dict[str, Any]:
         return {"tasks": self.task_registry.list_tasks(args.get("category"), args.get("query"))}
@@ -3288,55 +4026,157 @@ class Runtime:
         return self.task_registry.describe_task(args.get("task_id", ""))
         
     def run_task(self, args: dict[str, Any]) -> dict[str, Any]:
-        cmd = self.task_registry.resolve_command(args.get("task_id", ""), args.get("args"), args.get("path"))
-        return self.exec_command({"cmd": cmd, "timeout_ms": args.get("timeout_ms", 30000)})
+        task_id = str(args.get("task_id", ""))
+        template = self.task_registry.get_task(task_id)
+        if not template:
+            raise ToolFailure("NOT_FOUND", f"Task '{task_id}' not found.", category="validation")
+        if self._profile_managed:
+            cwd = self._operation_workdir(args)
+            if template.cwd_policy == "workspace_root" and cwd.path != self.workspace.root:
+                raise ToolFailure("ACCESS_DENIED", f"Task '{task_id}' only runs at the workspace root.", category="security")
+            cmd_argv = self.task_registry.build_argv(template, args)
+            exec_args = {
+                "cwd": cwd.display,
+                "timeout_ms": args.get("timeout_ms", 30000),
+                "yield_time_ms": args.get("yield_time_ms", 10000),
+                "max_output_bytes": args.get("max_output_bytes", 65536),
+                "env": self._task_env(args.get("env", {})),
+                "approval_id": args.get("approval_id"),
+                "network_required": template.network_requirement,
+            }
+            authorized = self._profile_authorize_command(
+                cmd_argv,
+                exec_args,
+                registered_task=template,
+                task_id=task_id,
+            )
+            if isinstance(authorized, dict):
+                return authorized
+            exec_args.update(
+                {
+                    "_policy_authorized": True,
+                    "_approved_capabilities": sorted(authorized),
+                    "_network_capability": self._network_capability(" ".join(cmd_argv), exec_args),
+                }
+            )
+            return self._execute_task_argv(cmd_argv, exec_args, authorized)
+        if template.approval_class == "DENY":
+            raise ToolFailure("ACCESS_DENIED", f"Task '{task_id}' is unconditionally denied.", category="security")
+        cwd = self._operation_workdir(args)
+        if template.cwd_policy == "workspace_root" and cwd.path != self.workspace.root:
+            raise ToolFailure("ACCESS_DENIED", f"Task '{task_id}' only runs at the workspace root.", category="security")
+        path_arg = args.get("path")
+        if isinstance(path_arg, str):
+            pure_path = PurePosixPath(path_arg)
+            if pure_path.is_absolute() or ".." in pure_path.parts:
+                raise ToolFailure("PATH_OUTSIDE_WORKSPACE", "Task path must stay inside the workspace.", category="security")
+        cmd_argv = self.task_registry.build_argv(template, args)
+        from .approval import ApprovalEngine
+
+        approval_engine = ApprovalEngine()
+        network_required = template.network_requirement
+        requested_caps = {"network"} if network_required else set()
+        if template.approval_class == "ASK":
+            requested_caps.add("task")
+        approval_id = args.get("approval_id")
+        granted_caps: set[str] = set()
+        if approval_id:
+            granted_caps = set(
+                approval_engine.consume(
+                    approval_id,
+                    cmd_argv,
+                    str(cwd.path),
+                    env=args.get("env", {}),
+                    task_id=task_id,
+                    network=network_required,
+                    sandbox=True,
+                    sandbox_id=self.server_instance_id,
+                )
+            )
+        elif requested_caps:
+            return approval_engine.request_approval(
+                action=cmd_argv,
+                cwd=str(cwd.path),
+                reason=f"Task '{task_id}' requests explicit capabilities.",
+                risk="network" if network_required else "task",
+                network=network_required,
+                env=args.get("env", {}),
+                task_id=task_id,
+                sandbox=True,
+                sandbox_id=self.server_instance_id,
+                capabilities=sorted(requested_caps),
+            )
+        exec_args = {
+            "cwd": cwd.display,
+            "timeout_ms": args.get("timeout_ms", 30000),
+            "yield_time_ms": args.get("yield_time_ms", 10000),
+            "max_output_bytes": args.get("max_output_bytes", 65536),
+            "env": self._task_env(args.get("env", {})),
+        }
+        return self._execute_task_argv(cmd_argv, exec_args, granted_caps)
+
+    @staticmethod
+    def _task_env(raw_env: Any) -> dict[str, Any]:
+        env = dict(raw_env) if isinstance(raw_env, dict) else {}
+        if "PATH" not in env:
+            runtime_bin = str(Path(sys.executable).parent)
+            env["PATH"] = runtime_bin + os.pathsep + os.environ.get("PATH", os.defpath)
+        return env
         
     def job_status(self, args: dict[str, Any]) -> dict[str, Any]:
-        return {"error": "Not implemented"}
+        session_id = args.get("session_id", "")
+        with self.sessions_lock:
+            session = self.sessions.get(session_id) or self.output_sessions.get(session_id)
+            if session is None:
+                return {"status": "not_found", "session_id": session_id}
+            session.refresh_status()
+            poll = session.process.poll()
+            status_str = "running" if poll is None else ("success" if poll == 0 else "failed")
+            return {
+                "status": status_str,
+                "session_id": session_id,
+                "exit_code": poll
+            }
         
     def job_output(self, args: dict[str, Any]) -> dict[str, Any]:
+        args["output_ref"] = "session:" + args.get("session_id", "") + ":stdout"
         return self.read_output(args)
         
     def job_input(self, args: dict[str, Any]) -> dict[str, Any]:
+        if "input" in args and "chars" not in args:
+            args["chars"] = args["input"]
         return self.write_stdin(args)
         
     def job_cancel(self, args: dict[str, Any]) -> dict[str, Any]:
         return self.kill_session(args)
         
     def approval_status(self, args: dict[str, Any]) -> dict[str, Any]:
-        return {"error": "Not implemented"}
+        approval_id = args.get("approval_id")
+        if not approval_id:
+            return {"error": "approval_id is required"}
+        from .approval import ApprovalEngine
+        engine = ApprovalEngine()
+        status = engine.get_status(approval_id)
+        return {"approval_id": approval_id, "status": status}
         
     def list_pending_approvals(self, args: dict[str, Any]) -> dict[str, Any]:
+        from .approval import ApprovalEngine
+        engine = ApprovalEngine()
+        pending = engine.list_pending()
+        return {"pending_approvals": pending}
+        
+def lsp_definition(self, args: dict[str, Any]) -> dict[str, Any]:
         return {"error": "Not implemented"}
         
-    def lsp_symbols(self, args: dict[str, Any]) -> dict[str, Any]:
+def lsp_diagnostics(self, args: dict[str, Any]) -> dict[str, Any]:
         return {"error": "Not implemented"}
         
-    def lsp_definition(self, args: dict[str, Any]) -> dict[str, Any]:
+def antigravity_status(self, args: dict[str, Any]) -> dict[str, Any]:
         return {"error": "Not implemented"}
         
-    def lsp_references(self, args: dict[str, Any]) -> dict[str, Any]:
+def antigravity_result(self, args: dict[str, Any]) -> dict[str, Any]:
         return {"error": "Not implemented"}
         
-    def lsp_diagnostics(self, args: dict[str, Any]) -> dict[str, Any]:
-        return {"error": "Not implemented"}
-        
-    def antigravity_start(self, args: dict[str, Any]) -> dict[str, Any]:
-        return {"error": "Not implemented"}
-        
-    def antigravity_status(self, args: dict[str, Any]) -> dict[str, Any]:
-        return {"error": "Not implemented"}
-        
-    def antigravity_output(self, args: dict[str, Any]) -> dict[str, Any]:
-        return {"error": "Not implemented"}
-        
-    def antigravity_result(self, args: dict[str, Any]) -> dict[str, Any]:
-        return {"error": "Not implemented"}
-        
-    def antigravity_cancel(self, args: dict[str, Any]) -> dict[str, Any]:
-        return {"error": "Not implemented"}
-
-
 def walk_files(root: Path) -> Iterator[Path]:
     if root.is_file() or root.is_symlink():
         yield root
@@ -4067,9 +4907,12 @@ def landlock_path_allowed_access(path: Path) -> int:
     )
 
 
-def landlock_exec_argv(ruleset_fd: int, cmd: str) -> list[str]:
+def landlock_exec_argv(ruleset_fd: int, cmd: str | list[str]) -> list[str]:
     helper = Path(__file__).with_name("landlock_exec.py")
-    return [sys.executable, str(helper), str(ruleset_fd), cmd]
+    base = [sys.executable, str(helper), str(ruleset_fd)]
+    if isinstance(cmd, list):
+        return base + cmd
+    return base + [cmd]
 
 
 def is_default_system_path_root(resolved: Path) -> bool:
@@ -4456,13 +5299,8 @@ def input_schemas() -> dict[str, dict[str, Any]]:
     string_array = {"type": "array", "items": {"type": "string"}}
     return {
         "server_info": object_schema(),
-        "check_exec_environment": object_schema(),
-        "get_default_cwd": object_schema(),
-        "set_default_cwd": object_schema(
-            {
-                "path": {**string, "default": "."},
-            }
-        ),
+        "health": object_schema(),
+        "workspace_info": object_schema(),
         "read_file": object_schema(
             {
                 "path": {**string, "minLength": 1},
@@ -4473,6 +5311,12 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                 "encoding": {**string, "enum": ["utf-8"], "default": "utf-8"},
             },
             ["path"],
+        ),
+        "read_files": object_schema(
+            {
+                "paths": string_array,
+            },
+            ["paths"],
         ),
         "list_dir": object_schema(
             {
@@ -4499,81 +5343,46 @@ def input_schemas() -> dict[str, dict[str, Any]]:
         ),
         "search_text": object_schema(
             {
-                "query": {**string, "minLength": 1},
                 "path": {**string, "default": "."},
-                "regex": {**boolean, "default": False},
+                "query": {**string, "minLength": 1},
+                "is_regex": {**boolean, "default": False},
                 "case_sensitive": {**boolean, "default": False},
-                "include_globs": string_array,
                 "glob": string,
-                "exclude_globs": string_array,
-                "context_lines": {**integer, "minimum": 0, "maximum": 5, "default": 0},
-                "max_results": {**integer, "minimum": 1, "maximum": 10000, "default": 1000},
-                "max_preview_bytes": {**integer, "minimum": 80, "maximum": 4096, "default": 512},
+                "context_lines": {**integer, "minimum": 0, "maximum": 10, "default": 1},
+                "max_results": {**integer, "minimum": 1, "maximum": 1000, "default": 100},
             },
             ["query"],
         ),
-        "apply_patch": object_schema({"patch": {**string, "minLength": 1}, "dry_run": {**boolean, "default": False}}, ["patch"]),
-        "exec_command": object_schema(
+        "view_image": object_schema(
             {
-                "cmd": {**string, "minLength": 1},
-                "workdir": {**string, "default": "."},
-                "cwd": {**string},
-                "timeout_ms": {**integer, "minimum": 1, "maximum": 600000, "default": 30000},
-                "yield_time_ms": {**integer, "minimum": 0, "maximum": 30000, "default": 10000},
-                "max_output_bytes": {**integer, "minimum": 1, "maximum": 1048576, "default": 65536},
-                "verbosity": {**string, "enum": ["summary", "preview", "full"]},
-                "preview_bytes": {**integer, "minimum": 1, "maximum": 1048576, "default": 4096},
-                "stdin": {**string, "default": ""},
-                "tty": {**boolean, "default": False},
-                "env": {"type": "object", "additionalProperties": {"type": "string"}, "default": {}},
+                "path": {**string, "minLength": 1},
+                "max_bytes": {**integer, "minimum": 1, "maximum": 10485760, "default": 5242880},
+                "max_width": {**integer, "minimum": 1, "maximum": 4096, "default": 1024},
+                "max_height": {**integer, "minimum": 1, "maximum": 4096, "default": 1024},
+                "auto_resize": {**boolean, "default": True},
             },
-            ["cmd"],
+            ["path"],
         ),
-        "write_stdin": object_schema(
+        "preview_patch": object_schema(
             {
-                "session_id": {**string, "minLength": 1},
-                "chars": {**string, "default": ""},
-                "yield_time_ms": {**integer, "minimum": 0, "maximum": 30000, "default": 10000},
-                "max_output_bytes": {**integer, "minimum": 1, "maximum": 1048576, "default": 65536},
-                "verbosity": {**string, "enum": ["summary", "preview", "full"]},
-                "preview_bytes": {**integer, "minimum": 1, "maximum": 1048576, "default": 4096},
+                "patch": {**string, "minLength": 1},
             },
-            ["session_id"],
+            ["patch"],
         ),
-        "kill_session": object_schema(
+        "apply_patch": object_schema(
             {
-                "session_id": {**string, "minLength": 1},
-                "signal": {**string, "enum": ["TERM", "KILL", "INT"], "default": "TERM"},
-                "wait_ms": {**integer, "minimum": 0, "maximum": 30000, "default": 5000},
-                "max_output_bytes": {**integer, "minimum": 1, "maximum": 1048576, "default": 65536},
-                "verbosity": {**string, "enum": ["summary", "preview", "full"]},
-                "preview_bytes": {**integer, "minimum": 1, "maximum": 1048576, "default": 4096},
+                "patch": {**string, "minLength": 1},
+                "dry_run": boolean,
+                "approval_id": string,
             },
-            ["session_id"],
+            ["patch"],
         ),
-        "read_output": object_schema(
-            {
-                "output_ref": {**string, "minLength": 1},
-                "stream": {**string, "enum": ["stdout", "stderr"]},
-                "offset": {**integer, "minimum": 0, "default": 0},
-                "limit": {**integer, "minimum": 1, "maximum": 1048576, "default": 4096},
-            },
-            ["output_ref"],
-        ),
-        "git_status": object_schema(
-            {
-                "path": {**string, "default": "."},
-                "include_untracked": {**boolean, "default": True},
-                "max_entries": {**integer, "minimum": 1, "maximum": 10000, "default": 1000},
-            }
-        ),
+        "git_status": object_schema(),
         "git_diff": object_schema(
             {
-                "path": string,
-                "paths": string_array,
+                "path": {**string, "default": "."},
                 "staged": {**boolean, "default": False},
-                "unstaged": {**boolean, "default": True},
-                "context_lines": {**integer, "minimum": 0, "maximum": 20, "default": 3},
+                "context_lines": {**integer, "minimum": 0, "maximum": 10, "default": 3},
                 "max_bytes": {**integer, "minimum": 1, "maximum": 1048576, "default": 262144},
             }
         ),
@@ -4581,19 +5390,19 @@ def input_schemas() -> dict[str, dict[str, Any]]:
             {
                 "path": {**string, "default": "."},
                 "ref": {**string, "default": "HEAD"},
-                "max_count": {**integer, "minimum": 1, "maximum": 100, "default": 20},
-                "skip": {**integer, "minimum": 0, "maximum": 10000, "default": 0},
+                "max_count": {**integer, "minimum": 1, "maximum": 1000, "default": 20},
+                "skip": {**integer, "minimum": 0, "default": 0},
             }
         ),
         "git_show": object_schema(
             {
-                "rev": {**string, "default": "HEAD"},
-                "path": string,
-                "paths": string_array,
-                "include_diff": {**boolean, "default": True},
-                "context_lines": {**integer, "minimum": 0, "maximum": 20, "default": 3},
+                "rev": {**string, "minLength": 1},
+                "path": {**string, "default": "."},
+                "context": {**integer, "minimum": 0, "maximum": 10, "default": 3},
                 "max_bytes": {**integer, "minimum": 1, "maximum": 1048576, "default": 262144},
-            }
+                "include_diff": {**boolean, "default": True},
+            },
+            ["rev"],
         ),
         "git_blame": object_schema(
             {
@@ -4605,42 +5414,119 @@ def input_schemas() -> dict[str, dict[str, Any]]:
             },
             ["path"],
         ),
-        "request_permissions": object_schema(
+        "list_tasks": object_schema(
             {
-                "tool_name": {**string, "enum": ["exec_command", "apply_patch"]},
-                "permission": {
-                    **string,
-                    "enum": [
-                        "network",
-                        "destructive_command",
-                        "long_timeout",
-                        "sensitive_env",
-                        "shell_expansion",
-                        INLINE_SCRIPT_PERMISSION,
-                        "privileged_executable",
-                        "write_generated_or_ignored",
-                    ],
-                },
-                "reason": {**string, "minLength": 1},
-                "arguments": {"type": "object", "additionalProperties": True},
-                "scope": {**string, "enum": ["once", "session"], "default": "once"},
-                "ttl_seconds": {**integer, "minimum": 1, "maximum": 3600, "default": 300},
-            },
-            ["tool_name", "permission", "reason", "arguments"],
+                "category": string,
+                "query": string,
+            }
         ),
-        "view_image": object_schema(
+        "describe_task": object_schema(
+            {
+                "task_id": {**string, "minLength": 1},
+            },
+            ["task_id"],
+        ),
+        "run_task": object_schema(
+            {
+                "task_id": {**string, "minLength": 1},
+                "args": string_array,
+                "path": string,
+                "cwd": string,
+                "env": {"type": "object", "additionalProperties": {"type": "string"}},
+                "timeout_ms": {**integer, "minimum": 1, "default": 30000},
+                "yield_time_ms": {**integer, "minimum": 0, "maximum": 300000, "default": 10000},
+                "max_output_bytes": {**integer, "minimum": 1, "maximum": 1048576, "default": 262144},
+                "approval_id": string,
+            },
+            ["task_id"],
+        ),
+        "exec_command": object_schema(
+            {
+                "cmd": {**string, "minLength": 1},
+                "cwd": string,
+                "workdir": string,
+                "timeout_ms": {**integer, "minimum": 1, "maximum": 300000, "default": 30000},
+                "yield_time_ms": {**integer, "minimum": 0, "maximum": 300000, "default": 10000},
+                "env": {"type": "object", "additionalProperties": {"type": "string"}},
+                "max_bytes": {**integer, "minimum": 1, "maximum": 1048576, "default": 262144},
+                "max_output_bytes": {**integer, "minimum": 1, "maximum": 1048576, "default": 262144},
+                "tty": {**boolean, "default": False},
+                "stdin": string,
+                "verbosity": {**integer, "minimum": 0, "maximum": 2, "default": 0},
+                "preview_bytes": {**integer, "minimum": 1, "maximum": 1048576, "default": 2048},
+                "network_required": boolean,
+                "task_id": string,
+                "approval_id": string,
+            },
+            ["cmd"],
+        ),
+                "job_status": object_schema(
+            {
+                "session_id": {**string, "minLength": 1},
+            },
+            ["session_id"],
+        ),
+        "read_output": object_schema(
+            {
+                "output_ref": {**string, "minLength": 1},
+                "offset": {**integer, "minimum": 0},
+                "limit": {**integer, "minimum": 1, "maximum": 1048576, "default": 262144},
+            },
+            ["output_ref"],
+        ),
+        "write_stdin": object_schema(
+            {
+                "session_id": {**string, "minLength": 1},
+                "chars": string,
+                "yield_time_ms": {**integer, "minimum": 0, "maximum": 300000, "default": 10000},
+                "max_output_bytes": {**integer, "minimum": 1, "maximum": 1048576, "default": 262144},
+            },
+            ["session_id"],
+        ),
+        "kill_session": object_schema(
+            {
+                "session_id": {**string, "minLength": 1},
+                "signal": {**string, "default": "SIGTERM"},
+                "wait_ms": {**integer, "minimum": 0, "maximum": 300000, "default": 5000},
+                "kill_wait_ms": {**integer, "minimum": 0, "maximum": 300000, "default": 2000},
+            },
+            ["session_id"],
+        ),
+        "job_output": object_schema(
+            {
+                "session_id": {**string, "minLength": 1},
+            },
+            ["session_id"],
+        ),
+        "job_input": object_schema(
+            {
+                "session_id": {**string, "minLength": 1},
+                "input": {**string, "minLength": 1},
+            },
+            ["session_id", "input"],
+        ),
+        "job_cancel": object_schema(
+            {
+                "session_id": {**string, "minLength": 1},
+            },
+            ["session_id"],
+        ),
+        "approval_status": object_schema(
+            {
+                "approval_id": {**string, "minLength": 1},
+            },
+            ["approval_id"],
+        ),
+        "list_pending_approvals": object_schema(),
+        "check_exec_environment": object_schema(),
+        "get_default_cwd": object_schema(),
+        "set_default_cwd": object_schema(
             {
                 "path": {**string, "minLength": 1},
-                "max_bytes": {**integer, "minimum": 1024, "maximum": 10485760, "default": 5242880},
-                "max_width": {**integer, "minimum": 1, "maximum": 10000, "default": IMAGE_RESIZE_MAX_DIMENSION},
-                "max_height": {**integer, "minimum": 1, "maximum": 10000, "default": IMAGE_RESIZE_MAX_DIMENSION},
-                "auto_resize": {**boolean, "default": True},
             },
             ["path"],
         ),
     }
-
-
 def _server_card_auth(runtime: Runtime, *, oauth_base_url: str | None = None) -> dict[str, Any]:
     if runtime.oauth_enabled():
         cfg = runtime.oauth_config
@@ -4667,6 +5553,7 @@ def server_card_payload(runtime: Runtime, *, oauth_base_url: str | None = None) 
     mutating = [name for name in names if annotations[name].get("readOnlyHint") is not True]
     payload = {
         "protocolVersion": PROTOCOL_VERSION,
+        "schemaVersion": TOOL_SCHEMA_VERSION,
         "server": {
             "name": SERVER_NAME,
             "title": SERVER_TITLE,
@@ -4693,7 +5580,7 @@ def server_card_payload(runtime: Runtime, *, oauth_base_url: str | None = None) 
 
 
 class MCPHandler(http.server.BaseHTTPRequestHandler):
-    server_version = f"CodingToolsMCP/{__version__}"
+    server_version = f"DevMCPRuntime/{__version__}"
 
     @property
     def runtime(self) -> Runtime:
@@ -4771,6 +5658,9 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         normalized = posixpath.normpath(request_path)
         if normalized == "/.well-known/oauth-authorization-server":
             self.handle_oauth_as_metadata(head_only=head_only)
+            return
+        if normalized in {"/healthz", "/readyz"}:
+            self.send_json({"status": "ok", "ready": True, "version": __version__}, head_only=head_only)
             return
         if normalized == "/.well-known/oauth-protected-resource":
             self.handle_oauth_resource_metadata(head_only=head_only)
@@ -4968,9 +5858,9 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
     def send_unauthorized(self, *, head_only: bool = False) -> None:
         if self.runtime.oauth_config is not None:
             base = self.oauth_base_url()
-            www_auth = f'Bearer realm="coding-tools-mcp", resource_metadata="{base}/.well-known/oauth-protected-resource"'
+            www_auth = f'Bearer realm="devmcp-runtime", resource_metadata="{base}/.well-known/oauth-protected-resource"'
         else:
-            www_auth = 'Bearer realm="coding-tools-mcp"'
+            www_auth = 'Bearer realm="devmcp-runtime"'
         self.send_rpc_error(
             -32000,
             "Unauthorized",
@@ -5349,6 +6239,9 @@ def build_runtime(
     transport: str = "stdio",
 ) -> Runtime:
     workspace = Path(args.workspace or os.environ.get(f"{ENV_PREFIX}_WORKSPACE") or os.getcwd())
+    policy_rules = policy_rules_from_config_file(
+        os.environ.get("DEVMCP_POLICY_CONFIG_FILE"), runtime_policy.policy_profile
+    )
     runtime = Runtime(
         workspace,
         enable_view_image=args.enable_view_image,
@@ -5360,6 +6253,11 @@ def build_runtime(
         project_context=project_context,
         fake_readonly_annotations=runtime_policy.fake_readonly_annotations,
         transport=transport,
+        policy_profile=runtime_policy.policy_profile,
+        sandbox_backend=str(getattr(args, "sandbox_backend", "bwrap")),
+        max_removed_lines=int(getattr(args, "max_removed_lines", 200)),
+        max_removed_percent=float(getattr(args, "max_removed_percent", 30.0)),
+        policy_rules=policy_rules,
     )
     if emit_warning and runtime.capabilities.skip_all_permissions:
         print(
@@ -5386,10 +6284,34 @@ def run_http(args: argparse.Namespace) -> int:
         print(f"ERROR: {ENV_PREFIX}_AUTH_MODE must be one of: {supported}.", file=sys.stderr)
         return 2
     auth_token = args.auth_token or os.environ.get(f"{ENV_PREFIX}_AUTH_TOKEN") or None
+    token_file = getattr(args, "auth_token_file", None) or os.environ.get("DEVMCP_AUTH_TOKEN_FILE")
+    if not auth_token and token_file:
+        try:
+            auth_token = Path(token_file).expanduser().read_text(encoding="utf-8").strip() or None
+        except OSError as exc:
+            print(f"ERROR: unable to read MCP auth token file: {exc}", file=sys.stderr)
+            return 2
+        if not auth_token:
+            print("ERROR: MCP auth token file is empty.", file=sys.stderr)
+            return 2
     try:
         runtime_policy = runtime_policy_from_args(args)
     except ValueError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+    active_profile = runtime_policy.policy_profile or legacy_profile(runtime_policy.permission_mode)
+    server_capability = "server.loopback" if is_loopback_bind_host(str(args.host)) else "server.public"
+    server_decision = policy_decision(
+        active_profile,
+        server_capability,
+        policy_rules_from_config_file(os.environ.get("DEVMCP_POLICY_CONFIG_FILE"), active_profile),
+    )
+    if server_decision != "auto":
+        print(
+            f"ERROR: {server_capability} is {server_decision} in the active policy profile. "
+            "Select a profile or Custom rule that auto-allows this server bind.",
+            file=sys.stderr,
+        )
         return 2
 
     oauth_config: OAuthConfig | None = None
@@ -5486,7 +6408,11 @@ def run_http(args: argparse.Namespace) -> int:
         )
         return 2
 
-    runtime = build_runtime(args, runtime_policy, auth_token=auth_token, oauth_config=oauth_config, transport="http")
+    try:
+        runtime = build_runtime(args, runtime_policy, auth_token=auth_token, oauth_config=oauth_config, transport="http")
+    except (ToolFailure, ValueError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
 
     def runtime_factory() -> Runtime:
         return build_runtime(
@@ -5525,12 +6451,17 @@ def run_stdio(args: argparse.Namespace) -> int:
     except ValueError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
-    runtime = build_runtime(args, runtime_policy)
+    try:
+        runtime = build_runtime(args, runtime_policy)
+    except (ToolFailure, ValueError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
     return serve_stdio(runtime)
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Serve workspace-confined coding tools over MCP.")
+    parser.add_argument("--version", action="version", version=f"DevMCP Runtime {__version__}")
     parser.add_argument("--workspace", help="workspace root; defaults to CODING_TOOLS_MCP_WORKSPACE or cwd")
     parser.add_argument(
         "--host",
@@ -5548,6 +6479,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--auth-token",
         default=None,
         help=f"require Authorization: Bearer <token> on /mcp; defaults to {ENV_PREFIX}_AUTH_TOKEN",
+    )
+    parser.add_argument(
+        "--auth-token-file",
+        default=None,
+        help="read the bearer token from a 0600 file instead of exposing it in arguments or shell history",
     )
     parser.add_argument(
         "--oauth-mode",
@@ -5577,6 +6513,30 @@ def build_parser() -> argparse.ArgumentParser:
             "trusted allows local development network, shell expansion, and inline scripts; "
             "dangerous disables permission gates"
         ),
+    )
+    parser.add_argument(
+        "--policy-profile",
+        choices=PROFILE_NAMES,
+        default=None,
+        help="data-driven policy profile; defaults to DEVMCP_POLICY_PROFILE or safe for legacy direct launches",
+    )
+    parser.add_argument(
+        "--max-removed-lines",
+        type=int,
+        default=200,
+        help="existing lines removed before a patch requires approval",
+    )
+    parser.add_argument(
+        "--sandbox-backend",
+        choices=("bwrap", "podman", "unsafe"),
+        default="bwrap",
+        help="execution backend; bwrap is preferred, unsafe is explicit and visibly warned",
+    )
+    parser.add_argument(
+        "--max-removed-percent",
+        type=float,
+        default=30.0,
+        help="percentage of an existing file removed before a patch requires approval",
     )
     parser.add_argument(
         "--allow-network",

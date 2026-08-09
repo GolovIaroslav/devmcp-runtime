@@ -21,21 +21,12 @@
     {
       "name": "delete_file",
       "patch": "*** Begin Patch\n*** Delete File: TODO.md\n*** End Patch\n",
-      "expect_success": true,
-      "expect_deleted": [
-        "TODO.md"
-      ]
+      "expect_success": false
     },
     {
       "name": "move_file",
       "patch": "*** Begin Patch\n*** Update File: TODO.md\n*** Move to: docs/TODO.md\n*** End Patch\n",
-      "expect_success": true,
-      "expect_paths": {
-        "docs/TODO.md": "Keep this file available"
-      },
-      "expect_deleted": [
-        "TODO.md"
-      ]
+      "expect_success": false
     },
     {
       "name": "context_mismatch_rejects_cleanly",

@@ -41,7 +41,6 @@ REQUIRED_TOOLS = (
     "git_log",
     "git_show",
     "git_blame",
-    "request_permissions",
     "view_image",
 )
 

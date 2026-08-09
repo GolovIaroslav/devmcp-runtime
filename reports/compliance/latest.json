@@ -1,9 +1,9 @@
 {
-  "commit": "e9c9acf6535d6c2e86c050dcc66ef73db11eb038+dirty",
+  "commit": "3b1121634ba3f4cc476ecd22ba3db543817f8209",
   "contract": "coding-tools-mcp-v0.2",
   "dogfood": "passed",
   "e2e": "passed",
-  "elapsed_seconds": 62.588,
+  "elapsed_seconds": 38.613,
   "failures": [],
   "passed": true,
   "required_tools": {
@@ -21,7 +21,6 @@
     "list_files": "passed",
     "read_file": "passed",
     "read_output": "passed",
-    "request_permissions": "passed",
     "search_text": "passed",
     "server_info": "passed",
     "set_default_cwd": "passed",
@@ -31,6 +30,6 @@
   "security": "passed",
   "skipped": [],
   "suite": "all",
-  "tests_run": 84,
+  "tests_run": 92,
   "write_only": false
 }

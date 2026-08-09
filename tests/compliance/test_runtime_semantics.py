@@ -47,6 +47,9 @@ class RuntimeSemanticsTests(ComplianceTestCase):
             session_id = payload.get("session_id")
             self.assertIsInstance(session_id, str)
             output = client.call_tool("write_stdin", {"session_id": session_id, "chars": "compat\n"})
+            pass
+            print("OUTPUT:", client.call_tool("job_output", {"session_id": session_id}))
+            print("STATUS:", client.call_tool("job_status", {"session_id": session_id}))
             self.assertIn("echo:compat", self.tool_text(output))
             client.call_tool("write_stdin", {"session_id": session_id, "chars": "exit\n"})
 
