@@ -34,7 +34,7 @@ dev = [
   "typing_extensions>=4.12",
 ]
 desktop = [
-  "PySide6>=6.8,<6.9",
+  "PySide6>=6.8,<6.12",
   "psutil>=7.0,<8",
 ]
 image = [
