@@ -80,7 +80,8 @@ _PROFILES: dict[str, dict[str, str]] = {
     "safe": _profile(_SAFE_AUTO, _SAFE_ASK, _FLOOR_DENY),
     "balanced": _profile(
         _SAFE_AUTO | {"workspace.create", "git.branch", "git.commit"},
-        _SAFE_ASK | {"workspace.delete", "workspace.move", "workspace.patch_destructive"},
+        _SAFE_ASK
+        | {"workspace.delete", "workspace.move", "workspace.patch_destructive"},
         _FLOOR_DENY,
     ),
     "power": _profile(
@@ -124,7 +125,9 @@ def validate_rules(rules: dict[str, Any]) -> dict[str, str]:
     for capability in CAPABILITIES:
         value = str(rules.get(capability, "deny")).lower()
         if value not in DECISIONS:
-            raise ValueError(f"policy decision for {capability} must be auto, ask, or deny")
+            raise ValueError(
+                f"policy decision for {capability} must be auto, ask, or deny"
+            )
         if capability in UNIMPLEMENTED_CAPABILITIES and value != "deny":
             raise ValueError(f"{capability} is not implemented in this runtime release")
         normalized[capability] = value
@@ -134,13 +137,17 @@ def validate_rules(rules: dict[str, Any]) -> dict[str, str]:
     return normalized
 
 
-def effective_rules(profile: str, custom: dict[str, Any] | None = None) -> dict[str, str]:
+def effective_rules(
+    profile: str, custom: dict[str, Any] | None = None
+) -> dict[str, str]:
     if profile == "custom":
         return validate_rules(custom or {})
     return profile_rules(profile)
 
 
-def decision(profile: str, capability: str, custom: dict[str, Any] | None = None) -> str:
+def decision(
+    profile: str, capability: str, custom: dict[str, Any] | None = None
+) -> str:
     rules = effective_rules(profile, custom)
     if capability not in rules:
         raise ValueError(f"unknown policy capability: {capability}")

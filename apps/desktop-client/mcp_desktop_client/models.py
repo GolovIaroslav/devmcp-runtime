@@ -69,7 +69,9 @@ class WorkspaceProfile:
         return self.tunnel.computed_public_url().rstrip("/")
 
     def frp_proxy_snippet(self) -> str:
-        proxy_name = re.sub(r"[^a-z0-9_-]+", "-", self.name.lower()).strip("-_") or "workspace"
+        proxy_name = (
+            re.sub(r"[^a-z0-9_-]+", "-", self.name.lower()).strip("-_") or "workspace"
+        )
         return "\n".join(
             [
                 "[[proxies]]",
@@ -116,4 +118,6 @@ def build_profile(path: str, name: str | None = None) -> WorkspaceProfile:
         raise ValueError(tr("Models", "Workspace path cannot be empty."))
     cleaned = os.path.normpath(path)
     label = name or cleaned.replace("\\", "/").split("/")[-1]
-    return WorkspaceProfile(id=uuid4().hex, name=label or tr("Models", "Workspace"), path=cleaned)
+    return WorkspaceProfile(
+        id=uuid4().hex, name=label or tr("Models", "Workspace"), path=cleaned
+    )

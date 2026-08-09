@@ -47,7 +47,9 @@ def paths() -> ConfigPaths:
         root = Path(configured).expanduser()
     else:
         xdg = os.environ.get("XDG_CONFIG_HOME", "").strip()
-        root = (Path(xdg).expanduser() if xdg else Path.home() / ".config") / "devmcp-runtime"
+        root = (
+            Path(xdg).expanduser() if xdg else Path.home() / ".config"
+        ) / "devmcp-runtime"
     secrets_dir = root / "secrets"
     return ConfigPaths(
         root=root,
@@ -113,8 +115,14 @@ def migrate_legacy(target: ConfigPaths | None = None) -> list[str]:
 
     selected = ensure_dirs(target)
     imported: list[str] = []
-    legacy_tokens = (LEGACY_RUNTIME_DIR / "mcp-token", LEGACY_RUNTIME_DIR / "secrets" / "mcp-token")
-    legacy_keys = (LEGACY_TUNNEL_DIR / "control-plane-api-key", LEGACY_RUNTIME_DIR / "control-plane-api-key")
+    legacy_tokens = (
+        LEGACY_RUNTIME_DIR / "mcp-token",
+        LEGACY_RUNTIME_DIR / "secrets" / "mcp-token",
+    )
+    legacy_keys = (
+        LEGACY_TUNNEL_DIR / "control-plane-api-key",
+        LEGACY_RUNTIME_DIR / "control-plane-api-key",
+    )
     source = next((item for item in legacy_tokens if item.is_file()), None)
     if source is not None and not selected.mcp_token.exists():
         _copy_secret(source, selected.mcp_token)
@@ -141,7 +149,9 @@ def _copy_secret(source: Path, destination: Path) -> None:
     _atomic_write(destination, value, mode=0o600)
 
 
-def load_config(target: ConfigPaths | None = None, *, workspace: str | None = None) -> dict[str, Any]:
+def load_config(
+    target: ConfigPaths | None = None, *, workspace: str | None = None
+) -> dict[str, Any]:
     selected = ensure_dirs(target)
     migrate_legacy(selected)
     if not selected.config_file.exists():
@@ -153,7 +163,9 @@ def load_config(target: ConfigPaths | None = None, *, workspace: str | None = No
         with selected.config_file.open("rb") as handle:
             loaded = tomllib.load(handle)
     except (OSError, tomllib.TOMLDecodeError) as exc:
-        raise ValueError(f"invalid configuration: {selected.config_file}: {exc}") from exc
+        raise ValueError(
+            f"invalid configuration: {selected.config_file}: {exc}"
+        ) from exc
     config = default_config(workspace)
     _deep_merge(config, loaded)
     validate_config(config)
@@ -176,18 +188,25 @@ def _legacy_settings() -> dict[str, Any]:
 
 def validate_config(config: dict[str, Any]) -> None:
     if int(config.get("schema_version", 0)) != CONFIG_SCHEMA_VERSION:
-        raise ValueError(f"unsupported config schema version: {config.get('schema_version')}")
+        raise ValueError(
+            f"unsupported config schema version: {config.get('schema_version')}"
+        )
     workspace = Path(str(config.get("workspace", ""))).expanduser()
     if not workspace.is_absolute():
         raise ValueError("workspace must be an absolute path")
     workspaces = config.get("workspaces", [str(workspace)])
-    if not isinstance(workspaces, list) or not all(Path(str(item)).expanduser().is_absolute() for item in workspaces):
+    if not isinstance(workspaces, list) or not all(
+        Path(str(item)).expanduser().is_absolute() for item in workspaces
+    ):
         raise ValueError("workspaces must be a list of absolute paths")
     profile = str(config.get("profile", DEFAULT_PROFILE)).lower()
     if profile not in {"safe", "balanced", "power", "custom"}:
         raise ValueError("profile must be safe, balanced, power, or custom")
     patch = config.get("patch", {})
-    if int(patch.get("max_removed_lines", 0)) < 0 or float(patch.get("max_removed_percent", 0)) < 0:
+    if (
+        int(patch.get("max_removed_lines", 0)) < 0
+        or float(patch.get("max_removed_percent", 0)) < 0
+    ):
         raise ValueError("patch thresholds cannot be negative")
     custom = config.get("policy", {}).get("custom", {})
     effective_rules(profile, custom)
@@ -219,7 +238,9 @@ def _toml_value(value: Any) -> str:
 
 def _toml_bytes(config: dict[str, Any]) -> bytes:
     lines: list[str] = []
-    scalar = {key: value for key, value in config.items() if not isinstance(value, dict)}
+    scalar = {
+        key: value for key, value in config.items() if not isinstance(value, dict)
+    }
     for key, value in scalar.items():
         lines.append(f"{key} = {_toml_value(value)}")
     for section, values in config.items():
@@ -317,7 +338,10 @@ def get_key(config: dict[str, Any], key: str) -> Any:
 
 def set_key(config: dict[str, Any], key: str, value: Any) -> None:
     parts = [part for part in key.split(".") if part]
-    if not parts or any(part.lower() in {"secret", "token", "password", "api_key", "key"} for part in parts):
+    if not parts or any(
+        part.lower() in {"secret", "token", "password", "api_key", "key"}
+        for part in parts
+    ):
         raise ValueError("secret values must be stored through the auth setup flow")
     current = config
     for part in parts[:-1]:

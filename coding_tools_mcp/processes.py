@@ -14,7 +14,10 @@ from .textutils import DEFAULT_MAX_LINES, TextTruncation, truncate_text_tail
 
 setattr(subprocess, "_USE_POSIX_SPAWN", False)
 
-_spawner_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="coding_tools_spawner")
+_spawner_executor = concurrent.futures.ThreadPoolExecutor(
+    max_workers=1, thread_name_prefix="coding_tools_spawner"
+)
+
 
 def _do_spawn(*args: Any, **kwargs: Any) -> subprocess.Popen[bytes]:
     return subprocess.Popen(*args, **kwargs)
@@ -93,7 +96,10 @@ def spawn_process(
             "TTY_UNSUPPORTED",
             "tty=true requires ConPTY support, which is not available in this build.",
             category="runtime",
-            details={"platform": os.name, "retry_hint": "Run the command without tty=true."},
+            details={
+                "platform": os.name,
+                "retry_hint": "Run the command without tty=true.",
+            },
         )
     try:
         import pty
@@ -183,17 +189,23 @@ class ExecSession:
 
     def write_input(self, data: bytes) -> None:
         if self._stdin_closed:
-            raise ToolFailure("SESSION_CLOSED", "Session stdin is closed.", category="runtime")
+            raise ToolFailure(
+                "SESSION_CLOSED", "Session stdin is closed.", category="runtime"
+            )
         try:
             if self.pty_master_fd is not None:
                 os.write(self.pty_master_fd, data)
                 return
             if self.process.stdin is None or self.process.stdin.closed:
-                raise ToolFailure("SESSION_CLOSED", "Session stdin is closed.", category="runtime")
+                raise ToolFailure(
+                    "SESSION_CLOSED", "Session stdin is closed.", category="runtime"
+                )
             self.process.stdin.write(data)
             self.process.stdin.flush()
         except (BrokenPipeError, OSError, ValueError) as exc:
-            raise ToolFailure("SESSION_CLOSED", "Session stdin is closed.", category="runtime") from exc
+            raise ToolFailure(
+                "SESSION_CLOSED", "Session stdin is closed.", category="runtime"
+            ) from exc
 
     def close_stdin(self) -> None:
         if self.pty_master_fd is not None or self._stdin_closed:
@@ -256,9 +268,13 @@ class ExecSession:
         }
         warnings: list[str] = list(self.warnings)
         if stdout_truncation.truncated:
-            warnings.append(f"stdout truncated from tail by {stdout_truncation.truncated_by}")
+            warnings.append(
+                f"stdout truncated from tail by {stdout_truncation.truncated_by}"
+            )
         if stderr_truncation.truncated:
-            warnings.append(f"stderr truncated from tail by {stderr_truncation.truncated_by}")
+            warnings.append(
+                f"stderr truncated from tail by {stderr_truncation.truncated_by}"
+            )
         if stdout_omitted > 0:
             warnings.append("stdout cursor skipped dropped bytes")
         if stderr_omitted > 0:
@@ -268,7 +284,12 @@ class ExecSession:
         return payload
 
     def refresh_status(self) -> None:
-        if self.timeout_at is not None and not self.timed_out and self.process.poll() is None and time.time() >= self.timeout_at:
+        if (
+            self.timeout_at is not None
+            and not self.timed_out
+            and self.process.poll() is None
+            and time.time() >= self.timeout_at
+        ):
             self.timed_out = True
             terminate_process_group(self.process, signal.SIGTERM)
             self.drain_readers()
@@ -280,10 +301,16 @@ class ExecSession:
         self.terminating = False
         if code < 0:
             values = {item.value for item in signal.Signals}
-            self.signal_name = signal.Signals(-code).name if -code in values else str(-code)
+            self.signal_name = (
+                signal.Signals(-code).name if -code in values else str(-code)
+            )
         elif code > 128:
             values = {item.value for item in signal.Signals}
-            self.signal_name = signal.Signals(code - 128).name if (code - 128) in values else str(code - 128)
+            self.signal_name = (
+                signal.Signals(code - 128).name
+                if (code - 128) in values
+                else str(code - 128)
+            )
         self.closed = True
         if self.completed_at is None:
             self.completed_at = time.time()
@@ -312,9 +339,19 @@ class ExecSession:
     def retained_stream_bytes(self, stream: str) -> tuple[bytes, int, int, int]:
         with self.lock:
             if stream == "stdout":
-                return bytes(self.stdout), self.stdout_start_offset, self.stdout_total_bytes, self.stdout_dropped_bytes
+                return (
+                    bytes(self.stdout),
+                    self.stdout_start_offset,
+                    self.stdout_total_bytes,
+                    self.stdout_dropped_bytes,
+                )
             if stream == "stderr":
-                return bytes(self.stderr), self.stderr_start_offset, self.stderr_total_bytes, self.stderr_dropped_bytes
+                return (
+                    bytes(self.stderr),
+                    self.stderr_start_offset,
+                    self.stderr_total_bytes,
+                    self.stderr_dropped_bytes,
+                )
         raise ValueError(f"Unknown output stream: {stream}")
 
 
@@ -352,16 +389,26 @@ def start_reader_threads(session: ExecSession) -> None:
                 session.pty_master_fd = None
 
     if session.pty_master_fd is not None:
-        thread = threading.Thread(target=pty_reader, args=(session.pty_master_fd,), daemon=True)
+        thread = threading.Thread(
+            target=pty_reader, args=(session.pty_master_fd,), daemon=True
+        )
         session.reader_threads.append(thread)
         thread.start()
         return
     if session.process.stdout is not None:
-        thread = threading.Thread(target=reader, args=(session.process.stdout, session.append_stdout), daemon=True)
+        thread = threading.Thread(
+            target=reader,
+            args=(session.process.stdout, session.append_stdout),
+            daemon=True,
+        )
         session.reader_threads.append(thread)
         thread.start()
     if session.process.stderr is not None:
-        thread = threading.Thread(target=reader, args=(session.process.stderr, session.append_stderr), daemon=True)
+        thread = threading.Thread(
+            target=reader,
+            args=(session.process.stderr, session.append_stderr),
+            daemon=True,
+        )
         session.reader_threads.append(thread)
         thread.start()
 
@@ -371,7 +418,11 @@ def start_session_watchdog(session: ExecSession) -> None:
         return
 
     def watchdog() -> None:
-        delay = max(0.0, session.timeout_at - time.time()) if session.timeout_at is not None else 0.0
+        delay = (
+            max(0.0, session.timeout_at - time.time())
+            if session.timeout_at is not None
+            else 0.0
+        )
         try:
             session.process.wait(timeout=delay)
         except subprocess.TimeoutExpired:
@@ -407,7 +458,9 @@ def _trim_buffer(
     return overflow
 
 
-def truncate_output_bytes_tail(data: bytes, max_bytes: int, max_lines: int = DEFAULT_MAX_LINES) -> TextTruncation:
+def truncate_output_bytes_tail(
+    data: bytes, max_bytes: int, max_lines: int = DEFAULT_MAX_LINES
+) -> TextTruncation:
     return truncate_text_tail(
         data.decode("utf-8", errors="replace"),
         max_lines=max_lines,

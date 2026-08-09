@@ -11,7 +11,9 @@ from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
 
-def select_successful_run(workflow_runs: list[dict[str, object]], sha: str) -> dict[str, object] | None:
+def select_successful_run(
+    workflow_runs: list[dict[str, object]], sha: str
+) -> dict[str, object] | None:
     matches = [
         run
         for run in workflow_runs
@@ -34,7 +36,9 @@ def workflow_runs_url(api_url: str, repo: str, workflow: str, sha: str) -> str:
     return f"{base}?{query}"
 
 
-def fetch_runs(api_url: str, repo: str, workflow: str, sha: str, token: str) -> list[dict[str, object]]:
+def fetch_runs(
+    api_url: str, repo: str, workflow: str, sha: str, token: str
+) -> list[dict[str, object]]:
     request = Request(
         workflow_runs_url(api_url, repo, workflow, sha),
         headers={
@@ -49,7 +53,9 @@ def fetch_runs(api_url: str, repo: str, workflow: str, sha: str, token: str) -> 
             payload = json.load(response)
     except HTTPError as error:
         detail = error.read().decode("utf-8", errors="replace")
-        raise SystemExit(f"GitHub Actions API failed with {error.code}: {detail}") from error
+        raise SystemExit(
+            f"GitHub Actions API failed with {error.code}: {detail}"
+        ) from error
     runs = payload.get("workflow_runs", [])
     if not isinstance(runs, list):
         raise SystemExit("GitHub Actions API returned an invalid workflow_runs payload")

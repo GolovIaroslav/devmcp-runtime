@@ -8,6 +8,7 @@ Verifies initialize + tools/list + server_info, then runs each CMD through
 exec_command expecting a clean exit. Bearer auth is taken from the
 CODING_TOOLS_MCP_AUTH_TOKEN environment variable (read by the shared client).
 """
+
 from __future__ import annotations
 
 import argparse
@@ -32,9 +33,16 @@ def main(argv: list[str] | None = None) -> int:
             if required not in names:
                 raise SystemExit(f"tools/list is missing {required}: {sorted(names)}")
         info = client.call_tool("server_info", {})["structuredContent"]
-        print(f"server_info: permission_mode={info['permission_mode']} tool_count={info['tool_count']}")
-        if args.expect_permission_mode and info["permission_mode"] != args.expect_permission_mode:
-            raise SystemExit(f"expected permission_mode={args.expect_permission_mode}, got {info['permission_mode']}")
+        print(
+            f"server_info: permission_mode={info['permission_mode']} tool_count={info['tool_count']}"
+        )
+        if (
+            args.expect_permission_mode
+            and info["permission_mode"] != args.expect_permission_mode
+        ):
+            raise SystemExit(
+                f"expected permission_mode={args.expect_permission_mode}, got {info['permission_mode']}"
+            )
         for cmd in args.commands:
             result = client.call_tool(
                 "exec_command",

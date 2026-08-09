@@ -26,7 +26,10 @@ SUITES = {
     "security": ["tests.compliance.test_security"],
     "e2e": ["tests.compliance.test_e2e"],
     "runtime-semantics": ["tests.compliance.test_runtime_semantics"],
-    "dogfood": ["tests.compliance.test_dogfood", "tests.compliance.test_live_dogfood_v5"],
+    "dogfood": [
+        "tests.compliance.test_dogfood",
+        "tests.compliance.test_live_dogfood_v5",
+    ],
     "compliance-report": ["tests.compliance.test_compliance_report"],
     "docs-required": ["tests.compliance.test_docs_required"],
     "schema-drift": ["tests.compliance.test_schema_drift"],
@@ -52,11 +55,19 @@ class RecordingResult(unittest.TextTestResult):
         self.test_ids.append(test.id())
         super().startTest(test)
 
-    def addFailure(self, test: unittest.case.TestCase, err: tuple[type[BaseException], BaseException, Any]) -> None:
+    def addFailure(
+        self,
+        test: unittest.case.TestCase,
+        err: tuple[type[BaseException], BaseException, Any],
+    ) -> None:
         super().addFailure(test, err)
         self.records.append(make_record(test, "failure", err))
 
-    def addError(self, test: unittest.case.TestCase, err: tuple[type[BaseException], BaseException, Any]) -> None:
+    def addError(
+        self,
+        test: unittest.case.TestCase,
+        err: tuple[type[BaseException], BaseException, Any],
+    ) -> None:
         super().addError(test, err)
         self.records.append(make_record(test, "error", err))
 
@@ -140,10 +151,14 @@ def write_reports(
         "dogfood": category_status(result, "tests.compliance.test_dogfood"),
         "tests_run": 0 if result is None else result.testsRun,
         "failures": failures,
-        "skipped": [] if result is None else [test.id() for test, _reason in result.skipped],
+        "skipped": []
+        if result is None
+        else [test.id() for test, _reason in result.skipped],
         "write_only": write_only,
     }
-    JSON_REPORT.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    JSON_REPORT.write_text(
+        json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
     MD_REPORT.write_text(markdown_report(report), encoding="utf-8")
     return report
 
@@ -168,10 +183,14 @@ def required_tool_statuses(
 def category_status(result: RecordingResult | None, module_prefix: str) -> str:
     if result is None:
         return "not_run"
-    matching_runs = [test_id for test_id in result.test_ids if test_id.startswith(module_prefix)]
+    matching_runs = [
+        test_id for test_id in result.test_ids if test_id.startswith(module_prefix)
+    ]
     if not matching_runs:
         return "not_run"
-    matching_failures = [record for record in result.records if record.test.startswith(module_prefix)]
+    matching_failures = [
+        record for record in result.records if record.test.startswith(module_prefix)
+    ]
     if matching_failures:
         return "failed"
     return "passed"
@@ -215,14 +234,26 @@ def markdown_report(report: dict[str, Any]) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Run Coding Tools MCP compliance tests.")
+    parser = argparse.ArgumentParser(
+        description="Run Coding Tools MCP compliance tests."
+    )
     parser.add_argument("--suite", choices=sorted(SUITES), default="all")
-    parser.add_argument("--report", action="store_true", help="write reports/compliance/latest.{json,md}")
-    parser.add_argument("--write-report-only", action="store_true", help="write a not-run report skeleton")
+    parser.add_argument(
+        "--report",
+        action="store_true",
+        help="write reports/compliance/latest.{json,md}",
+    )
+    parser.add_argument(
+        "--write-report-only",
+        action="store_true",
+        help="write a not-run report skeleton",
+    )
     args = parser.parse_args(argv)
 
     if args.write_report_only:
-        write_reports(suite_name=args.suite, result=None, elapsed_seconds=0, write_only=True)
+        write_reports(
+            suite_name=args.suite, result=None, elapsed_seconds=0, write_only=True
+        )
         return 0
 
     start = time.time()

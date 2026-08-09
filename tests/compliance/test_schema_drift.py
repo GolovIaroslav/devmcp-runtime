@@ -6,7 +6,13 @@ import re
 import unittest
 from pathlib import Path
 
-from coding_tools_mcp.server import KILL_SESSION_STATUSES, Runtime, TOOL_REGISTRY, input_schemas, tool_annotations
+from coding_tools_mcp.server import (
+    KILL_SESSION_STATUSES,
+    Runtime,
+    TOOL_REGISTRY,
+    input_schemas,
+    tool_annotations,
+)
 from tests.compliance.mcp_client import REQUIRED_TOOLS
 
 
@@ -30,10 +36,18 @@ class SchemaDriftTests(unittest.TestCase):
         for tool_name in REQUIRED_TOOLS:
             with self.subTest(tool=tool_name):
                 section = sections.get(tool_name, "")
-                self.assertTrue(section, f"runtime contract lacks section for {tool_name}")
-                self.assertIn(tool_name, schemas, f"live input schema missing {tool_name}")
+                self.assertTrue(
+                    section, f"runtime contract lacks section for {tool_name}"
+                )
+                self.assertIn(
+                    tool_name, schemas, f"live input schema missing {tool_name}"
+                )
                 for property_name in schemas[tool_name].get("properties", {}):
-                    self.assertIn(f'"{property_name}"', section, f"{tool_name} contract missing {property_name}")
+                    self.assertIn(
+                        f'"{property_name}"',
+                        section,
+                        f"{tool_name} contract missing {property_name}",
+                    )
 
     def test_contract_contains_live_annotation_values(self) -> None:
         contract = self.CONTRACT_PATH.read_text(encoding="utf-8")
@@ -68,8 +82,12 @@ class SchemaDriftTests(unittest.TestCase):
 
     def test_tools_docs_list_matches_live_tool_names(self) -> None:
         text = (ROOT / "docs/tools-and-schemas.md").read_text(encoding="utf-8")
-        inventory = text.split("## Fixed inventory", 1)[1].split("## Result envelope", 1)[0]
-        documented = set(re.findall(r"^- `([a-z0-9_]+)`:", inventory, flags=re.MULTILINE))
+        inventory = text.split("## Fixed inventory", 1)[1].split(
+            "## Result envelope", 1
+        )[0]
+        documented = set(
+            re.findall(r"^- `([a-z0-9_]+)`:", inventory, flags=re.MULTILINE)
+        )
         self.assertEqual(documented, set(TOOL_REGISTRY))
         self.assertIn(f"exactly {len(TOOL_REGISTRY)} tools", text)
 

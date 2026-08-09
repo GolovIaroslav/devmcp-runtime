@@ -21,7 +21,9 @@ def append_tool_event(
 ) -> None:
     selected = ensure_dirs(paths())
     event = {
-        "timestamp": datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+        "timestamp": datetime.now(timezone.utc)
+        .isoformat(timespec="milliseconds")
+        .replace("+00:00", "Z"),
         "tool": str(tool),
         "ok": bool(ok),
         "error_code": str(error_code) if error_code else None,
@@ -30,7 +32,9 @@ def append_tool_event(
     }
     try:
         with selected.audit_log.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(event, sort_keys=True, separators=(",", ":")) + "\n")
+            handle.write(
+                json.dumps(event, sort_keys=True, separators=(",", ":")) + "\n"
+            )
         if os.name != "nt":
             selected.audit_log.chmod(0o600)
     except OSError:
@@ -38,7 +42,9 @@ def append_tool_event(
         return
 
 
-def read_recent_events(path: Path | None = None, *, limit: int = 100) -> list[dict[str, Any]]:
+def read_recent_events(
+    path: Path | None = None, *, limit: int = 100
+) -> list[dict[str, Any]]:
     selected = path or paths().audit_log
     try:
         lines = selected.read_text(encoding="utf-8").splitlines()[-max(1, limit) :]

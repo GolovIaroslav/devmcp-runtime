@@ -28,7 +28,9 @@ class ReadFileGoldenTests(ComplianceTestCase):
         self.assertIs(payload.get("truncated"), False)
         self.assertIn("return a - b", self.tool_text(result))
 
-        result = self.client.call_tool("read_file", {"path": "src/math.js", "start_line": 1, "end_line": 3})
+        result = self.client.call_tool(
+            "read_file", {"path": "src/math.js", "start_line": 1, "end_line": 3}
+        )
         payload = self.assert_tool_success(result)
         self.assertEqual(payload.get("start_line"), 1)
         self.assertEqual(payload.get("end_line"), 3)
@@ -36,15 +38,24 @@ class ReadFileGoldenTests(ComplianceTestCase):
         self.assertIn("function add", text)
         self.assertNotIn("multiply", text)
 
-        result = self.client.call_tool("read_file", {"path": "src/large.txt", "max_bytes": 80})
+        result = self.client.call_tool(
+            "read_file", {"path": "src/large.txt", "max_bytes": 80}
+        )
         payload = self.assert_tool_success(result)
         self.assertLessEqual(len(self.tool_text(result).encode("utf-8")), 200)
-        self.assertTrue(payload.get("truncated", True), f"large read should report truncation: {payload!r}")
+        self.assertTrue(
+            payload.get("truncated", True),
+            f"large read should report truncation: {payload!r}",
+        )
         self.assertIn(payload.get("truncated_by"), {"lines", "bytes"})
         self.assertIsInstance(payload.get("next_start_line"), int)
 
-        self.assert_denied_or_permission_required("read_file", {"path": "assets/raw.bin"})
-        self.assert_denied_or_permission_required("read_file", {"path": "../outside-secret.txt"})
+        self.assert_denied_or_permission_required(
+            "read_file", {"path": "assets/raw.bin"}
+        )
+        self.assert_denied_or_permission_required(
+            "read_file", {"path": "../outside-secret.txt"}
+        )
 
 
 class ListAndSearchGoldenTests(ComplianceTestCase):
@@ -55,13 +66,18 @@ class ListAndSearchGoldenTests(ComplianceTestCase):
         for excluded in (".git", ".reference", "node_modules", "dist", "ignored.log"):
             self.assertNotIn(excluded, text)
 
-        files = self.client.call_tool("list_files", {"glob": "**/*.js", "max_results": 2})
+        files = self.client.call_tool(
+            "list_files", {"glob": "**/*.js", "max_results": 2}
+        )
         payload = self.assert_tool_success(files)
         self.assertIn("src/math.js", self.tool_text(files))
         entries = payload.get("files") or payload.get("entries") or []
         if isinstance(entries, list):
             self.assertLessEqual(len(entries), 2)
-        self.assertTrue(payload.get("truncated", True), f"max_results should report truncation: {payload!r}")
+        self.assertTrue(
+            payload.get("truncated", True),
+            f"max_results should report truncation: {payload!r}",
+        )
 
         all_files = self.client.call_tool("list_files", {"glob": "**/*"})
         all_text = self.tool_text(all_files)
@@ -72,7 +88,13 @@ class ListAndSearchGoldenTests(ComplianceTestCase):
     def test_search_text_query_glob_context_and_max_results(self) -> None:
         result = self.client.call_tool(
             "search_text",
-            {"query": "function add", "path": ".", "glob": "**/*.js", "context_lines": 1, "max_results": 10},
+            {
+                "query": "function add",
+                "path": ".",
+                "glob": "**/*.js",
+                "context_lines": 1,
+                "max_results": 10,
+            },
         )
         payload = self.assert_tool_success(result)
         self.assertEqual(payload.get("query"), "function add")
@@ -83,12 +105,19 @@ class ListAndSearchGoldenTests(ComplianceTestCase):
         self.assertIn("return a - b", text)
         assert_search_entries_have_shape(self, payload)
 
-        miss = self.client.call_tool("search_text", {"query": "function add", "glob": "**/*.py"})
+        miss = self.client.call_tool(
+            "search_text", {"query": "function add", "glob": "**/*.py"}
+        )
         self.assertNotIn("src/math.js", self.tool_text(miss))
 
-        truncated = self.client.call_tool("search_text", {"query": "common-token", "max_results": 3})
+        truncated = self.client.call_tool(
+            "search_text", {"query": "common-token", "max_results": 3}
+        )
         payload = self.assert_tool_success(truncated)
-        self.assertTrue(payload.get("truncated", True), f"search max_results should report truncation: {payload!r}")
+        self.assertTrue(
+            payload.get("truncated", True),
+            f"search max_results should report truncation: {payload!r}",
+        )
 
 
 class ApplyPatchGoldenTests(ComplianceTestCase):
@@ -100,10 +129,17 @@ class ApplyPatchGoldenTests(ComplianceTestCase):
 +Added by apply_patch golden test.
 *** End Patch
 """
-        add_payload = self.assert_tool_success(self.client.call_tool("apply_patch", {"patch": add}))
+        add_payload = self.assert_tool_success(
+            self.client.call_tool("apply_patch", {"patch": add})
+        )
         self.assertEqual(add_payload.get("additions"), 3)
         self.assertEqual(add_payload.get("removals"), 0)
-        self.assertIn("Added by apply_patch", self.tool_text(self.client.call_tool("read_file", {"path": "docs/NOTES.md"})))
+        self.assertIn(
+            "Added by apply_patch",
+            self.tool_text(
+                self.client.call_tool("read_file", {"path": "docs/NOTES.md"})
+            ),
+        )
         self.assert_tool_error("apply_patch", {"patch": add})
 
         with self.session_for_fixture("tiny-js-project") as (_workspace, client):
@@ -112,7 +148,9 @@ class ApplyPatchGoldenTests(ComplianceTestCase):
 +dry run only
 *** End Patch
 """
-            self.assert_tool_success(client.call_tool("apply_patch", {"patch": dry_run_add, "dry_run": True}))
+            self.assert_tool_success(
+                client.call_tool("apply_patch", {"patch": dry_run_add, "dry_run": True})
+            )
             self.assert_tool_error("read_file", {"path": "dry-run/new/NOPE.md"})
             self.assert_tool_error("list_dir", {"path": "dry-run"})
 
@@ -121,14 +159,19 @@ class ApplyPatchGoldenTests(ComplianceTestCase):
         self.assertEqual(update_payload.get("additions"), 1)
         self.assertEqual(update_payload.get("removals"), 1)
         self.assertIn("(+1 -1)", self.tool_text(update_result))
-        self.assertIn("return a + b", self.tool_text(self.client.call_tool("read_file", {"path": "src/math.js"})))
+        self.assertIn(
+            "return a + b",
+            self.tool_text(self.client.call_tool("read_file", {"path": "src/math.js"})),
+        )
 
         delete = """*** Begin Patch
     *** Delete File: TODO.md
     *** End Patch
     """
         self.assert_tool_error("apply_patch", {"patch": delete})
-        self.assert_tool_success(self.client.call_tool("read_file", {"path": "TODO.md"}))
+        self.assert_tool_success(
+            self.client.call_tool("read_file", {"path": "TODO.md"})
+        )
 
         with self.session_for_fixture("tiny-js-project") as (_workspace, client):
             move = """*** Begin Patch
@@ -174,8 +217,12 @@ class ApplyPatchGoldenTests(ComplianceTestCase):
 *** End Patch
 """
         payload = self.assert_tool_error("apply_patch", {"patch": ambiguous})
-        self.assertEqual(payload.get("error", {}).get("code"), "PATCH_CONTEXT_AMBIGUOUS")
-        self.assertEqual(payload.get("error", {}).get("details", {}).get("match_count"), 2)
+        self.assertEqual(
+            payload.get("error", {}).get("code"), "PATCH_CONTEXT_AMBIGUOUS"
+        )
+        self.assertEqual(
+            payload.get("error", {}).get("details", {}).get("match_count"), 2
+        )
         self.assertIn("retry_hint", payload.get("error", {}).get("details", {}))
         self.assertIn("matched", json_dump(payload).lower())
 
@@ -190,7 +237,9 @@ class ApplyPatchGoldenTests(ComplianceTestCase):
 *** End Patch
 """
         result = self.client.call_tool("apply_patch", {"patch": move})
-        self.assertTrue(result.get("isError", False), f"expected tool error, got {result!r}")
+        self.assertTrue(
+            result.get("isError", False), f"expected tool error, got {result!r}"
+        )
         self.assertIn("approval", str(result).lower())
 
     def test_apply_patch_rejects_absolute_traversal_and_symlink_escape(self) -> None:
@@ -220,23 +269,38 @@ class ApplyPatchGoldenTests(ComplianceTestCase):
                 result = client.call_tool("apply_patch", {"patch": symlink})
             except MCPError:
                 return
-            self.assertTrue(result.get("isError"), f"symlink escape patch must fail: {result!r}")
+            self.assertTrue(
+                result.get("isError"), f"symlink escape patch must fail: {result!r}"
+            )
 
 
 class ExecAndGitGoldenTests(ComplianceTestCase):
-    def test_exec_command_success_nonzero_timeout_output_cap_and_permissions(self) -> None:
+    def test_exec_command_success_nonzero_timeout_output_cap_and_permissions(
+        self,
+    ) -> None:
         result = self.client.call_tool(
             "exec_command",
-            {"cmd": "printf 'hello from exec\n'", "timeout_ms": 5000, "max_output_bytes": 4096},
+            {
+                "cmd": "printf 'hello from exec\n'",
+                "timeout_ms": 5000,
+                "max_output_bytes": 4096,
+            },
         )
         payload = self.assert_tool_success(result)
         self.assertEqual(payload.get("exit_code"), 0)
         self.assertIn("hello from exec", self.tool_text(result))
 
-        self.assert_tool_success(self.client.call_tool("apply_patch", {"patch": ADD_FIX_PATCH}))
+        self.assert_tool_success(
+            self.client.call_tool("apply_patch", {"patch": ADD_FIX_PATCH})
+        )
         npm = self.client.call_tool(
             "exec_command",
-            {"cmd": "npm test", "timeout_ms": 20000, "yield_time_ms": 20000, "max_output_bytes": 20000},
+            {
+                "cmd": "npm test",
+                "timeout_ms": 20000,
+                "yield_time_ms": 20000,
+                "max_output_bytes": 20000,
+            },
         )
         self.assertEqual(self.assert_tool_success(npm).get("exit_code"), 0)
 
@@ -255,7 +319,11 @@ class ExecAndGitGoldenTests(ComplianceTestCase):
             self.assert_tool_success(client.call_tool("apply_patch", {"patch": patch}))
             pytest = client.call_tool(
                 "exec_command",
-                {"cmd": "python -m pytest tests", "timeout_ms": 10000, "max_output_bytes": 20000},
+                {
+                    "cmd": "python -m pytest tests",
+                    "timeout_ms": 10000,
+                    "max_output_bytes": 20000,
+                },
             )
             self.assertEqual(self.assert_tool_success(pytest).get("exit_code"), 0)
 
@@ -268,7 +336,10 @@ class ExecAndGitGoldenTests(ComplianceTestCase):
             {"cmd": "sleep 5", "timeout_ms": 200},
         )
         timeout_payload = self.assert_tool_success(timeout)
-        self.assertTrue(timeout_payload.get("timed_out", True), f"timeout should be explicit: {timeout_payload!r}")
+        self.assertTrue(
+            timeout_payload.get("timed_out", True),
+            f"timeout should be explicit: {timeout_payload!r}",
+        )
 
         capped = self.client.call_tool(
             "exec_command",
@@ -279,7 +350,10 @@ class ExecAndGitGoldenTests(ComplianceTestCase):
             },
         )
         capped_payload = self.assert_tool_success(capped)
-        self.assertTrue(capped_payload.get("truncated", True), f"output cap should be explicit: {capped_payload!r}")
+        self.assertTrue(
+            capped_payload.get("truncated", True),
+            f"output cap should be explicit: {capped_payload!r}",
+        )
         self.assertLessEqual(len(self.tool_text(capped).encode("utf-8")), 512)
 
         tailed = self.client.call_tool(
@@ -291,37 +365,61 @@ class ExecAndGitGoldenTests(ComplianceTestCase):
             },
         )
         tailed_payload = self.assert_tool_success(tailed)
-        self.assertTrue(tailed_payload.get("stdout_truncated"), f"tail output should truncate: {tailed_payload!r}")
+        self.assertTrue(
+            tailed_payload.get("stdout_truncated"),
+            f"tail output should truncate: {tailed_payload!r}",
+        )
         self.assertIn("line-079", tailed_payload.get("stdout", ""))
         self.assertNotIn("line-000", tailed_payload.get("stdout", ""))
 
-        self.assert_denied_or_permission_required("exec_command", {"cmd": "pwd", "workdir": ".."})
+        self.assert_denied_or_permission_required(
+            "exec_command", {"cmd": "pwd", "workdir": ".."}
+        )
         self.assert_denied_or_permission_required("exec_command", {"cmd": "rm -rf /"})
         self.assert_denied_or_permission_required(
             "exec_command",
-            {"cmd": "python -c \"import urllib.request; urllib.request.urlopen('https://example.com')\""},
+            {
+                "cmd": "python -c \"import urllib.request; urllib.request.urlopen('https://example.com')\""
+            },
         )
 
     def test_write_stdin_kill_session_git_status_and_git_diff(self) -> None:
         with self.session_for_fixture("long-running-project") as (_workspace, client):
             started = client.call_tool(
                 "exec_command",
-                {"cmd": "python repl.py", "tty": True, "timeout_ms": 1000, "max_output_bytes": 4096},
+                {
+                    "cmd": "python repl.py",
+                    "tty": True,
+                    "timeout_ms": 1000,
+                    "max_output_bytes": 4096,
+                },
             )
             payload = self.assert_tool_success(started)
             session_id = payload.get("session_id")
-            self.assertIsInstance(session_id, str, f"long-running command must return session_id: {payload!r}")
+            self.assertIsInstance(
+                session_id,
+                str,
+                f"long-running command must return session_id: {payload!r}",
+            )
             self.assertIn("ready", self.tool_text(started))
-            hello = client.call_tool("write_stdin", {"session_id": session_id, "chars": "hello\n"})
+            hello = client.call_tool(
+                "write_stdin", {"session_id": session_id, "chars": "hello\n"}
+            )
             self.assertIn("echo:hello", self.tool_text(hello))
-            client.call_tool("write_stdin", {"session_id": session_id, "chars": "exit\n"})
+            client.call_tool(
+                "write_stdin", {"session_id": session_id, "chars": "exit\n"}
+            )
             killed = client.call_tool("kill_session", {"session_id": session_id})
             self.assertIn("content", killed)
 
-        self.assert_tool_success(self.client.call_tool("apply_patch", {"patch": ADD_FIX_PATCH}))
+        self.assert_tool_success(
+            self.client.call_tool("apply_patch", {"patch": ADD_FIX_PATCH})
+        )
         status = self.client.call_tool("git_status", {})
         self.assertIn("src/math.js", self.tool_text(status))
-        diff = self.client.call_tool("git_diff", {"path": "src/math.js", "max_bytes": 20000})
+        diff = self.client.call_tool(
+            "git_diff", {"path": "src/math.js", "max_bytes": 20000}
+        )
         diff_text = self.tool_text(diff)
         self.assertIn("-  return a - b;", diff_text)
         self.assertIn("+  return a + b;", diff_text)
@@ -329,9 +427,13 @@ class ExecAndGitGoldenTests(ComplianceTestCase):
         self.assertNotIn("src/math.js", self.tool_text(filtered))
 
 
-def assert_search_entries_have_shape(testcase: ComplianceTestCase, payload: dict[str, Any]) -> None:
+def assert_search_entries_have_shape(
+    testcase: ComplianceTestCase, payload: dict[str, Any]
+) -> None:
     entries = payload.get("matches") or payload.get("results") or []
-    testcase.assertIsInstance(entries, list, f"search result should expose matches/results: {payload!r}")
+    testcase.assertIsInstance(
+        entries, list, f"search result should expose matches/results: {payload!r}"
+    )
     if not entries:
         return
     first = entries[0]

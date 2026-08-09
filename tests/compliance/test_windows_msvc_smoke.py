@@ -42,7 +42,9 @@ class WindowsProcessSmokeTests(unittest.TestCase):
                 )
                 self.assertIs(result.get("isError"), True, result)
                 payload = structured_payload(result)
-                self.assertEqual(payload.get("error", {}).get("code"), "TTY_UNSUPPORTED")
+                self.assertEqual(
+                    payload.get("error", {}).get("code"), "TTY_UNSUPPORTED"
+                )
 
     def test_windows_force_kill_cleans_background_session(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -88,7 +90,9 @@ class WindowsMsvcEnvironmentSmokeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
             write_hello_c(workspace)
-            with StdioMCPClient(workspace, extra_args=["--shell-env-inherit", "core"]) as client:
+            with StdioMCPClient(
+                workspace, extra_args=["--shell-env-inherit", "core"]
+            ) as client:
                 info = structured_payload(client.call_tool("server_info", {}))
                 self.assertEqual(info.get("shell_env_inherit"), "core")
 
@@ -105,13 +109,19 @@ class WindowsMsvcEnvironmentSmokeTests(unittest.TestCase):
                 output = (payload.get("stdout") or "") + (payload.get("stderr") or "")
                 self.assertNotEqual(payload.get("exit_code"), 0, output)
                 self.assertFalse((workspace / "hello.exe").exists(), output)
-                self.assertRegex(output.lower(), r"(stdio\.h|c1083|include|cannot open)")
+                self.assertRegex(
+                    output.lower(), r"(stdio\.h|c1083|include|cannot open)"
+                )
 
-    def test_inherit_all_preserves_msvc_environment_for_single_file_compile(self) -> None:
+    def test_inherit_all_preserves_msvc_environment_for_single_file_compile(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
             write_hello_c(workspace)
-            with StdioMCPClient(workspace, extra_args=["--shell-env-inherit", "all"]) as client:
+            with StdioMCPClient(
+                workspace, extra_args=["--shell-env-inherit", "all"]
+            ) as client:
                 info = structured_payload(client.call_tool("server_info", {}))
                 self.assertEqual(info.get("shell_env_inherit"), "all")
 
@@ -125,7 +135,9 @@ class WindowsMsvcEnvironmentSmokeTests(unittest.TestCase):
                     },
                 )
                 compile_payload = assert_tool_success(self, compile_result)
-                compile_output = (compile_payload.get("stdout") or "") + (compile_payload.get("stderr") or "")
+                compile_output = (compile_payload.get("stdout") or "") + (
+                    compile_payload.get("stderr") or ""
+                )
                 self.assertEqual(compile_payload.get("exit_code"), 0, compile_output)
                 self.assertTrue((workspace / "hello.exe").exists(), compile_output)
 
@@ -142,6 +154,7 @@ class WindowsMsvcEnvironmentSmokeTests(unittest.TestCase):
                 self.assertEqual(run_payload.get("exit_code"), 0, run_payload)
                 self.assertIn("ok", str(run_payload.get("stdout") or ""))
 
+
 def write_hello_c(workspace: Path) -> None:
     (workspace / "hello.c").write_text(
         '#include <stdio.h>\n\nint main(void) {\n    puts("ok");\n    return 0;\n}\n',
@@ -149,7 +162,9 @@ def write_hello_c(workspace: Path) -> None:
     )
 
 
-def assert_tool_success(testcase: unittest.TestCase, result: dict[str, Any]) -> dict[str, Any]:
+def assert_tool_success(
+    testcase: unittest.TestCase, result: dict[str, Any]
+) -> dict[str, Any]:
     testcase.assertFalse(result.get("isError", False), result)
     payload = structured_payload(result)
     testcase.assertIsInstance(payload, dict, result)

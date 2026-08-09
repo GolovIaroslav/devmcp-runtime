@@ -50,9 +50,15 @@ class FileBaseline:
         if not path.exists():
             return cls(data=None, mode=None, digest=None)
         if path.is_dir():
-            raise ToolFailure("PATCH_FAILED", "Cannot patch a directory.", category="validation")
+            raise ToolFailure(
+                "PATCH_FAILED", "Cannot patch a directory.", category="validation"
+            )
         data = path.read_bytes()
-        return cls(data=data, mode=stat.S_IMODE(path.stat().st_mode), digest=hashlib.sha256(data).hexdigest())
+        return cls(
+            data=data,
+            mode=stat.S_IMODE(path.stat().st_mode),
+            digest=hashlib.sha256(data).hexdigest(),
+        )
 
     def matches(self, path: Path) -> bool:
         if self.data is None:
@@ -60,7 +66,9 @@ class FileBaseline:
         if not path.exists() or path.is_dir():
             return False
         current = path.read_bytes()
-        return self.digest == hashlib.sha256(current).hexdigest() and self.mode == stat.S_IMODE(path.stat().st_mode)
+        return self.digest == hashlib.sha256(
+            current
+        ).hexdigest() and self.mode == stat.S_IMODE(path.stat().st_mode)
 
     def text(self, path: str) -> str:
         if self.data is None:
@@ -132,7 +140,9 @@ class AtomicPatchCommitter:
                     _fsync_directory(change.path.parent)
 
         except Exception as exc:
-            rollback_errors = self._rollback(changes, prepared, backups, installed, created_dirs)
+            rollback_errors = self._rollback(
+                changes, prepared, backups, installed, created_dirs
+            )
             if rollback_errors:
                 preserve_backups = True
                 display_by_path = {change.path: change.display for change in changes}
@@ -173,7 +183,11 @@ class AtomicPatchCommitter:
     def _assert_unique_paths(changes: list[StagedFile]) -> None:
         paths = [change.path for change in changes]
         if len(paths) != len(set(paths)):
-            raise ToolFailure("PATCH_FAILED", "Patch staged the same path more than once.", category="validation")
+            raise ToolFailure(
+                "PATCH_FAILED",
+                "Patch staged the same path more than once.",
+                category="validation",
+            )
 
     @staticmethod
     def _assert_baseline(change: StagedFile) -> None:
@@ -275,8 +289,16 @@ def _fsync_directory(directory: Path) -> None:
 
 def parse_patch(patch: str) -> list[PatchOperation]:
     lines = patch.splitlines()
-    if not lines or lines[0].strip() != "*** Begin Patch" or lines[-1].strip() != "*** End Patch":
-        raise ToolFailure("PATCH_FAILED", "Patch must use *** Begin Patch / *** End Patch envelope.", category="validation")
+    if (
+        not lines
+        or lines[0].strip() != "*** Begin Patch"
+        or lines[-1].strip() != "*** End Patch"
+    ):
+        raise ToolFailure(
+            "PATCH_FAILED",
+            "Patch must use *** Begin Patch / *** End Patch envelope.",
+            category="validation",
+        )
     operations: list[PatchOperation] = []
     i = 1
     while i < len(lines) - 1:
@@ -290,13 +312,21 @@ def parse_patch(patch: str) -> list[PatchOperation]:
             content_lines: list[str] = []
             while i < len(lines) - 1 and not lines[i].startswith("*** "):
                 if not lines[i].startswith("+"):
-                    raise ToolFailure("PATCH_FAILED", "Add file lines must start with '+'.", category="validation")
+                    raise ToolFailure(
+                        "PATCH_FAILED",
+                        "Add file lines must start with '+'.",
+                        category="validation",
+                    )
                 content_lines.append(lines[i][1:])
                 i += 1
-            operations.append(PatchOperation("add", path, add_content="\n".join(content_lines) + "\n"))
+            operations.append(
+                PatchOperation("add", path, add_content="\n".join(content_lines) + "\n")
+            )
             continue
         if line.startswith("*** Delete File: "):
-            operations.append(PatchOperation("delete", line.removeprefix("*** Delete File: ").strip()))
+            operations.append(
+                PatchOperation("delete", line.removeprefix("*** Delete File: ").strip())
+            )
             i += 1
             continue
 
@@ -322,13 +352,19 @@ def parse_patch(patch: str) -> list[PatchOperation]:
                 i += 1
             if current:
                 hunks.append(current)
-            operations.append(PatchOperation("update", path, hunks=hunks, move_to=move_to))
+            operations.append(
+                PatchOperation("update", path, hunks=hunks, move_to=move_to)
+            )
             continue
-        raise ToolFailure("PATCH_FAILED", f"Unrecognized patch line: {line}", category="validation")
+        raise ToolFailure(
+            "PATCH_FAILED", f"Unrecognized patch line: {line}", category="validation"
+        )
     return operations
 
 
-def apply_update_hunks(content: str, hunks: list[list[str]], path: str = "<patch>") -> str:
+def apply_update_hunks(
+    content: str, hunks: list[list[str]], path: str = "<patch>"
+) -> str:
     if not hunks:
         return content
     bom, text = strip_bom(content)
@@ -385,7 +421,11 @@ def apply_update_hunks(content: str, hunks: list[list[str]], path: str = "<patch
 
     updated_lines = list(lines)
     for matched_hunk in sorted(matched, key=lambda item: item.start, reverse=True):
-        updated_lines = updated_lines[: matched_hunk.start] + matched_hunk.new + updated_lines[matched_hunk.end :]
+        updated_lines = (
+            updated_lines[: matched_hunk.start]
+            + matched_hunk.new
+            + updated_lines[matched_hunk.end :]
+        )
     updated = "\n".join(updated_lines)
     if had_trailing_newline and (updated_lines or updated == ""):
         updated += "\n"
@@ -401,7 +441,9 @@ def parse_update_hunk(hunk: list[str]) -> ParsedHunk:
         if raw == "*** End of File":
             continue
         if not raw:
-            raise ToolFailure("PATCH_FAILED", "Invalid empty patch line.", category="validation")
+            raise ToolFailure(
+                "PATCH_FAILED", "Invalid empty patch line.", category="validation"
+            )
         marker = raw[0]
         value = raw[1:] if marker in {" ", "-", "+"} else raw
         if marker == " ":
@@ -412,7 +454,11 @@ def parse_update_hunk(hunk: list[str]) -> ParsedHunk:
         elif marker == "+":
             new.append(value)
         else:
-            raise ToolFailure("PATCH_FAILED", "Update lines must start with space, '-' or '+'.", category="validation")
+            raise ToolFailure(
+                "PATCH_FAILED",
+                "Update lines must start with space, '-' or '+'.",
+                category="validation",
+            )
     return ParsedHunk(old=old, new=new)
 
 

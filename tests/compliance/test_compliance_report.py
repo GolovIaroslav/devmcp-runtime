@@ -36,7 +36,14 @@ class FakeResult:
                 traceback="Traceback tail for security failure",
             )
         ]
-        self.skipped = [(FakeTest("tests.compliance.test_e2e.DeterministicE2ETests.test_optional"), "optional")]
+        self.skipped = [
+            (
+                FakeTest(
+                    "tests.compliance.test_e2e.DeterministicE2ETests.test_optional"
+                ),
+                "optional",
+            )
+        ]
 
     def wasSuccessful(self) -> bool:
         return self._successful
@@ -56,9 +63,13 @@ class ComplianceReportTests(unittest.TestCase):
                 patch.object(runner, "MD_REPORT", md_report),
                 patch.object(runner, "git_commit", return_value="abc123"),
             ):
-                report = runner.write_reports(suite_name="all", result=result, elapsed_seconds=1.2345)
+                report = runner.write_reports(
+                    suite_name="all", result=result, elapsed_seconds=1.2345
+                )
 
-            self.assertEqual(json.loads(json_report.read_text(encoding="utf-8")), report)
+            self.assertEqual(
+                json.loads(json_report.read_text(encoding="utf-8")), report
+            )
             self.assertEqual(report["commit"], "abc123")
             self.assertEqual(report["suite"], "all")
             self.assertIs(report["passed"], False)
@@ -66,18 +77,28 @@ class ComplianceReportTests(unittest.TestCase):
             self.assertEqual(report["security"], "failed")
             self.assertEqual(report["e2e"], "passed")
             self.assertEqual(report["dogfood"], "passed")
-            self.assertTrue(all(report["required_tools"][tool] == "failed" for tool in REQUIRED_TOOLS))
+            self.assertTrue(
+                all(
+                    report["required_tools"][tool] == "failed"
+                    for tool in REQUIRED_TOOLS
+                )
+            )
             self.assertEqual(
                 report["skipped"],
                 ["tests.compliance.test_e2e.DeterministicE2ETests.test_optional"],
             )
 
             markdown = md_report.read_text(encoding="utf-8")
-            self.assertIn("tests.compliance.test_security.SecurityComplianceTests.test_escape", markdown)
+            self.assertIn(
+                "tests.compliance.test_security.SecurityComplianceTests.test_escape",
+                markdown,
+            )
             self.assertIn("AssertionError: denied path leaked", markdown)
             self.assertIn("Traceback tail for security failure", markdown)
 
-    def test_write_report_only_marks_not_run_without_repo_report_side_effects(self) -> None:
+    def test_write_report_only_marks_not_run_without_repo_report_side_effects(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory(prefix="coding-tools-mcp-report-") as tmp:
             report_dir = Path(tmp)
             json_report = report_dir / "latest.json"
@@ -102,8 +123,15 @@ class ComplianceReportTests(unittest.TestCase):
             self.assertIs(report["write_only"], True)
             self.assertEqual(report["failures"], [])
             self.assertEqual(report["skipped"], [])
-            self.assertTrue(all(report["required_tools"][tool] == "not_run" for tool in REQUIRED_TOOLS))
-            self.assertIn("No failures recorded.", md_report.read_text(encoding="utf-8"))
+            self.assertTrue(
+                all(
+                    report["required_tools"][tool] == "not_run"
+                    for tool in REQUIRED_TOOLS
+                )
+            )
+            self.assertIn(
+                "No failures recorded.", md_report.read_text(encoding="utf-8")
+            )
 
     def test_partial_suite_does_not_claim_required_tool_coverage(self) -> None:
         with tempfile.TemporaryDirectory(prefix="coding-tools-mcp-report-") as tmp:
@@ -123,4 +151,9 @@ class ComplianceReportTests(unittest.TestCase):
                     elapsed_seconds=1.0,
                 )
 
-            self.assertTrue(all(report["required_tools"][tool] == "not_measured" for tool in REQUIRED_TOOLS))
+            self.assertTrue(
+                all(
+                    report["required_tools"][tool] == "not_measured"
+                    for tool in REQUIRED_TOOLS
+                )
+            )

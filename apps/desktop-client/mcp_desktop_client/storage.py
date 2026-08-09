@@ -29,7 +29,9 @@ def _restrict_permissions(path: Path, mode: int) -> None:
 
 def write_private_json(path: Path, payload: Any) -> None:
     encoded = json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
-    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", dir=path.parent
+    )
     temporary_path = Path(temporary_name)
     try:
         try:
@@ -67,14 +69,26 @@ def load_profiles() -> list[WorkspaceProfile]:
         return []
     data = json.loads(PROFILES_FILE.read_text(encoding="utf-8"))
     profiles = [WorkspaceProfile.from_record(item) for item in data.get("profiles", [])]
-    secrets = json.loads(SECRETS_FILE.read_text(encoding="utf-8")) if SECRETS_FILE.exists() else {}
+    secrets = (
+        json.loads(SECRETS_FILE.read_text(encoding="utf-8"))
+        if SECRETS_FILE.exists()
+        else {}
+    )
     for profile in profiles:
         if profile.id in secrets:
             secret = secrets[profile.id]
-            profile.tunnel.cloudflare_token = secret.get("cloudflare_token", profile.tunnel.cloudflare_token)
-            profile.auth.oauth_password = secret.get("oauth_password", profile.auth.oauth_password)
-            profile.auth.oauth_token_secret = secret.get("oauth_token_secret", profile.auth.oauth_token_secret)
-            profile.auth.bearer_token = secret.get("bearer_token", profile.auth.bearer_token)
+            profile.tunnel.cloudflare_token = secret.get(
+                "cloudflare_token", profile.tunnel.cloudflare_token
+            )
+            profile.auth.oauth_password = secret.get(
+                "oauth_password", profile.auth.oauth_password
+            )
+            profile.auth.oauth_token_secret = secret.get(
+                "oauth_token_secret", profile.auth.oauth_token_secret
+            )
+            profile.auth.bearer_token = secret.get(
+                "bearer_token", profile.auth.bearer_token
+            )
     return profiles
 
 

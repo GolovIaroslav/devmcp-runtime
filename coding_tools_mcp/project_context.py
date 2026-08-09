@@ -53,7 +53,9 @@ class ProjectContext:
         ]
         for item in self.root_files:
             suffix = " [truncated]" if item.truncated else ""
-            sections.append(f"Project instructions from {item.path}{suffix}:\n{item.content}")
+            sections.append(
+                f"Project instructions from {item.path}{suffix}:\n{item.content}"
+            )
         if self.nested_files:
             paths = "\n".join(f"- {path}" for path in self.nested_files)
             sections.append(
@@ -61,7 +63,10 @@ class ProjectContext:
                 f"directories, read the applicable instruction file with read_file:\n{paths}"
             )
         if self.warnings:
-            sections.append("Project-context warnings:\n" + "\n".join(f"- {warning}" for warning in self.warnings))
+            sections.append(
+                "Project-context warnings:\n"
+                + "\n".join(f"- {warning}" for warning in self.warnings)
+            )
         return "\n\n".join(sections)
 
 
@@ -99,10 +104,16 @@ def load_project_context(root: Path) -> ProjectContext:
         remaining -= len(content.encode("utf-8"))
 
     loaded_names = {item.path for item in loaded}
-    nested = [path for path in _discover_context_files(resolved_root, warnings) if path not in loaded_names]
+    nested = [
+        path
+        for path in _discover_context_files(resolved_root, warnings)
+        if path not in loaded_names
+    ]
     if len(nested) > MAX_NESTED_CONTEXT_FILES:
         nested = nested[:MAX_NESTED_CONTEXT_FILES]
-        warnings.append(f"Nested instruction list truncated to {MAX_NESTED_CONTEXT_FILES} files.")
+        warnings.append(
+            f"Nested instruction list truncated to {MAX_NESTED_CONTEXT_FILES} files."
+        )
     return ProjectContext(tuple(loaded), tuple(nested), tuple(warnings))
 
 
@@ -123,7 +134,9 @@ def _discover_context_files(root: Path, warnings: list[str]) -> list[str]:
         for name in sorted(files):
             scanned += 1
             if scanned > MAX_CONTEXT_SCAN_FILES:
-                warnings.append(f"Project-context scan stopped after {MAX_CONTEXT_SCAN_FILES} files.")
+                warnings.append(
+                    f"Project-context scan stopped after {MAX_CONTEXT_SCAN_FILES} files."
+                )
                 return discovered
             if name not in CONTEXT_FILE_NAMES:
                 continue
@@ -168,7 +181,9 @@ def _git_context_files(root: Path) -> list[str] | None:
         except UnicodeDecodeError:
             continue
         parts = Path(path).parts
-        if len(parts) > MAX_CONTEXT_SCAN_DEPTH + 1 or any(part in SKIPPED_CONTEXT_DIRS for part in parts[:-1]):
+        if len(parts) > MAX_CONTEXT_SCAN_DEPTH + 1 or any(
+            part in SKIPPED_CONTEXT_DIRS for part in parts[:-1]
+        ):
             continue
         if parts and parts[-1] in CONTEXT_FILE_NAMES:
             paths.append(Path(path).as_posix())

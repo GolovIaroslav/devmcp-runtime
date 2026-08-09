@@ -27,23 +27,35 @@ def response_id(request: dict[str, Any]) -> str | int | None:
     """Return a response-safe JSON-RPC id, using null for invalid or absent ids."""
 
     value = request.get("id")
-    if isinstance(value, str) or (isinstance(value, int) and not isinstance(value, bool)):
+    if isinstance(value, str) or (
+        isinstance(value, int) and not isinstance(value, bool)
+    ):
         return value
     return None
 
 
 def validate_rpc_envelope(request: dict[str, Any]) -> None:
     if request.get("jsonrpc") != "2.0":
-        raise JsonRpcError(-32600, "Invalid Request: jsonrpc must be 2.0", {"reason": "jsonrpc_version"})
+        raise JsonRpcError(
+            -32600,
+            "Invalid Request: jsonrpc must be 2.0",
+            {"reason": "jsonrpc_version"},
+        )
     method = request.get("method")
     if not isinstance(method, str) or not method:
-        raise JsonRpcError(-32600, "Invalid Request: method must be a string", {"reason": "method"})
+        raise JsonRpcError(
+            -32600, "Invalid Request: method must be a string", {"reason": "method"}
+        )
     if "id" in request and not (
         request["id"] is None
         or isinstance(request["id"], str)
         or (isinstance(request["id"], int) and not isinstance(request["id"], bool))
     ):
-        raise JsonRpcError(-32600, "Invalid Request: id must be string, integer, or null", {"reason": "id"})
+        raise JsonRpcError(
+            -32600,
+            "Invalid Request: id must be string, integer, or null",
+            {"reason": "id"},
+        )
 
 
 def rpc_params(request: dict[str, Any]) -> dict[str, Any]:
@@ -70,7 +82,9 @@ def validate_initialize_params(params: dict[str, Any]) -> str:
 
 def validate_initialize_request(request: dict[str, Any]) -> None:
     if "id" not in request or request.get("id") is None:
-        raise JsonRpcError(-32600, "initialize must be a JSON-RPC request with a non-null id")
+        raise JsonRpcError(
+            -32600, "initialize must be a JSON-RPC request with a non-null id"
+        )
 
 
 def protocol_version_is_supported(version: Any) -> bool:
@@ -98,13 +112,17 @@ def dispatch_rpc(runtime: Any, request: dict[str, Any]) -> dict[str, Any] | None
             validate_initialize_request(request)
             runtime.protocol_version = validate_initialize_params(params)
             client_info = params.get("clientInfo")
-            result = runtime.initialize(client_info if isinstance(client_info, dict) else None)
+            result = runtime.initialize(
+                client_info if isinstance(client_info, dict) else None
+            )
             runtime.initialized = True
         elif method == "notifications/initialized":
             return None
         elif method == "notifications/cancelled":
             cancelled_request_id = params.get("requestId")
-            if isinstance(cancelled_request_id, (str, int)) and not isinstance(cancelled_request_id, bool):
+            if isinstance(cancelled_request_id, (str, int)) and not isinstance(
+                cancelled_request_id, bool
+            ):
                 runtime.cancel_request(cancelled_request_id)
             return None
         elif method == "ping":

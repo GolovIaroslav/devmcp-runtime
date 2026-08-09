@@ -67,27 +67,41 @@ class OAuthClientRegistry:
             client_id=client_id,
             redirect_uris=redirects,
             token_endpoint_auth_method=method,
-            secret_digest=_secret_digest(client_secret) if client_secret is not None else None,
+            secret_digest=_secret_digest(client_secret)
+            if client_secret is not None
+            else None,
         )
         with self._lock:
             self._clients[client_id] = client
 
     def register(self, metadata: dict[str, Any]) -> dict[str, Any]:
         redirects = validate_redirect_uris(metadata.get("redirect_uris"))
-        requested_grant_types = metadata.get("grant_types", list(OAUTH_GRANT_TYPES_SUPPORTED))
-        requested_response_types = metadata.get("response_types", list(OAUTH_RESPONSE_TYPES_SUPPORTED))
+        requested_grant_types = metadata.get(
+            "grant_types", list(OAUTH_GRANT_TYPES_SUPPORTED)
+        )
+        requested_response_types = metadata.get(
+            "response_types", list(OAUTH_RESPONSE_TYPES_SUPPORTED)
+        )
         if not isinstance(requested_grant_types, list) or not all(
             isinstance(item, str) for item in requested_grant_types
         ):
             raise ValueError("grant_types must be an array of strings")
-        grant_types = tuple(item for item in OAUTH_GRANT_TYPES_SUPPORTED if item in requested_grant_types)
+        grant_types = tuple(
+            item
+            for item in OAUTH_GRANT_TYPES_SUPPORTED
+            if item in requested_grant_types
+        )
         if not grant_types:
             raise ValueError("grant_types must include at least one supported value")
         if not isinstance(requested_response_types, list) or not all(
             isinstance(item, str) for item in requested_response_types
         ):
             raise ValueError("response_types must be an array of strings")
-        response_types = tuple(item for item in OAUTH_RESPONSE_TYPES_SUPPORTED if item in requested_response_types)
+        response_types = tuple(
+            item
+            for item in OAUTH_RESPONSE_TYPES_SUPPORTED
+            if item in requested_response_types
+        )
         if not response_types:
             raise ValueError("response_types must include at least one supported value")
         method = str(metadata.get("token_endpoint_auth_method") or "none")
@@ -105,7 +119,9 @@ class OAuthClientRegistry:
                 redirect_uris=redirects,
                 token_endpoint_auth_method=method,
                 client_name=_optional_text(metadata.get("client_name"), 200),
-                secret_digest=_secret_digest(client_secret) if client_secret is not None else None,
+                secret_digest=_secret_digest(client_secret)
+                if client_secret is not None
+                else None,
             )
             self._clients[client_id] = client
         response: dict[str, Any] = {
@@ -131,7 +147,9 @@ class OAuthClientRegistry:
         client = self.get(client_id)
         return client is not None and client.accepts_redirect(redirect_uri)
 
-    def authenticates(self, client_id: str, client_secret: str, auth_method: str) -> bool:
+    def authenticates(
+        self, client_id: str, client_secret: str, auth_method: str
+    ) -> bool:
         client = self.get(client_id)
         return (
             client is not None
@@ -153,18 +171,29 @@ class OAuthConfig:
 
 def validate_redirect_uris(value: Any) -> tuple[str, ...]:
     if not isinstance(value, list) or not value or len(value) > MAX_REDIRECT_URIS:
-        raise ValueError(f"redirect_uris must contain between 1 and {MAX_REDIRECT_URIS} entries")
+        raise ValueError(
+            f"redirect_uris must contain between 1 and {MAX_REDIRECT_URIS} entries"
+        )
     redirects: list[str] = []
     for item in value:
         if not isinstance(item, str) or len(item) > 2048:
             raise ValueError("redirect_uri must be a string of at most 2048 characters")
         parsed = urllib.parse.urlsplit(item)
-        if parsed.fragment or not parsed.scheme or not parsed.netloc or not parsed.hostname:
+        if (
+            parsed.fragment
+            or not parsed.scheme
+            or not parsed.netloc
+            or not parsed.hostname
+        ):
             raise ValueError("redirect_uri must be an absolute URI without a fragment")
         if parsed.username is not None or parsed.password is not None:
             raise ValueError("redirect_uri must not contain user information")
         hostname = (parsed.hostname or "").lower()
-        if parsed.scheme == "http" and hostname not in {"localhost", "127.0.0.1", "::1"}:
+        if parsed.scheme == "http" and hostname not in {
+            "localhost",
+            "127.0.0.1",
+            "::1",
+        }:
             raise ValueError("HTTP redirect_uri is allowed only for loopback hosts")
         if parsed.scheme not in {"http", "https"}:
             raise ValueError("redirect_uri must use HTTPS or loopback HTTP")

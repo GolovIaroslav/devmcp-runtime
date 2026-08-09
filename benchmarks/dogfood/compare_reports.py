@@ -28,7 +28,9 @@ def load_reports(paths: list[Path]) -> list[dict[str, Any]]:
     reports: list[dict[str, Any]] = []
     for path in paths:
         payload = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(payload, dict) or not isinstance(payload.get("metrics"), dict):
+        if not isinstance(payload, dict) or not isinstance(
+            payload.get("metrics"), dict
+        ):
             raise ValueError(f"Not a dogfood report: {path}")
         reports.append(payload)
     return reports
@@ -49,7 +51,8 @@ def summarize(reports: list[dict[str, Any]]) -> dict[str, Any]:
         "runs": len(reports),
         "versions": sorted({version_of(report) for report in reports}),
         "pass_rate": round(
-            sum(report.get("conclusion") == "PASS" for report in reports) / len(reports),
+            sum(report.get("conclusion") == "PASS" for report in reports)
+            / len(reports),
             3,
         ),
         "metrics": {},
@@ -70,7 +73,9 @@ def percent_change(before: float, after: float) -> float | None:
     return round((after - before) / before * 100, 3)
 
 
-def comparison(baseline: dict[str, Any], candidate: dict[str, Any]) -> list[dict[str, Any]]:
+def comparison(
+    baseline: dict[str, Any], candidate: dict[str, Any]
+) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for name in METRICS:
         before = float(baseline["metrics"][name]["median"])
@@ -142,7 +147,9 @@ def main() -> int:
     }
     args.output_json.parent.mkdir(parents=True, exist_ok=True)
     args.output_md.parent.mkdir(parents=True, exist_ok=True)
-    args.output_json.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    args.output_json.write_text(
+        json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
     args.output_md.write_text(render_markdown(report), encoding="utf-8")
     return 0 if baseline["pass_rate"] == 1.0 and candidate["pass_rate"] == 1.0 else 1
 

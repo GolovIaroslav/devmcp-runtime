@@ -29,21 +29,45 @@ def detect_sandbox_backend(preference: str = "bwrap") -> SandboxBackend:
     normalized = preference.strip().lower()
     if normalized == "bwrap":
         available = shutil.which("bwrap") is not None
-        return SandboxBackend("bwrap", True, available, "bubblewrap namespace and filesystem isolation")
+        return SandboxBackend(
+            "bwrap", True, available, "bubblewrap namespace and filesystem isolation"
+        )
     if normalized == "podman":
         available = shutil.which("podman") is not None
-        return SandboxBackend("podman", True, available, "optional rootless Podman backend; verify before enabling")
+        return SandboxBackend(
+            "podman",
+            True,
+            available,
+            "optional rootless Podman backend; verify before enabling",
+        )
     if normalized in {"unsafe", "host"}:
-        return SandboxBackend("unsafe", False, True, "UNSAFE HOST MODE: explicit local execution without sandbox isolation")
-    raise ToolFailure("INVALID_ARGUMENT", f"Unknown sandbox backend: {preference}", category="validation")
+        return SandboxBackend(
+            "unsafe",
+            False,
+            True,
+            "UNSAFE HOST MODE: explicit local execution without sandbox isolation",
+        )
+    raise ToolFailure(
+        "INVALID_ARGUMENT",
+        f"Unknown sandbox backend: {preference}",
+        category="validation",
+    )
 
 
 def _relative_parts(raw_path: str) -> tuple[str, ...]:
     if not isinstance(raw_path, str) or not raw_path or "\x00" in raw_path:
-        raise ToolFailure("INVALID_ARGUMENT", "Sandbox path must be a non-empty relative string.", category="validation")
+        raise ToolFailure(
+            "INVALID_ARGUMENT",
+            "Sandbox path must be a non-empty relative string.",
+            category="validation",
+        )
     pure = PurePosixPath(raw_path)
     if pure.is_absolute() or any(part in {"", ".", ".."} for part in pure.parts):
-        raise ToolFailure("PATH_OUTSIDE_WORKSPACE", "Sandbox path must stay beneath the sandbox root.", category="security")
+        raise ToolFailure(
+            "PATH_OUTSIDE_WORKSPACE",
+            "Sandbox path must stay beneath the sandbox root.",
+            category="security",
+        )
     return tuple(pure.parts)
 
 
@@ -83,15 +107,27 @@ def _portable_parent(root: Path, parts: tuple[str, ...], *, create: bool) -> Pat
     """Walk a directory without resolving symlinks on platforms without dirfd APIs."""
     current = root
     if current.is_symlink() or not current.is_dir():
-        raise ToolFailure("SANDBOX_FAILED", "Sandbox root is not a regular directory.", category="security")
+        raise ToolFailure(
+            "SANDBOX_FAILED",
+            "Sandbox root is not a regular directory.",
+            category="security",
+        )
     for part in parts:
         current /= part
         if current.is_symlink():
             if not create:
-                raise ToolFailure("SANDBOX_FAILED", "Sandbox path contains a symlink.", category="security")
+                raise ToolFailure(
+                    "SANDBOX_FAILED",
+                    "Sandbox path contains a symlink.",
+                    category="security",
+                )
             current.unlink()
         if current.exists() and not current.is_dir():
-            raise ToolFailure("SANDBOX_FAILED", "Sandbox path component is not a directory.", category="security")
+            raise ToolFailure(
+                "SANDBOX_FAILED",
+                "Sandbox path component is not a directory.",
+                category="security",
+            )
         if create:
             current.mkdir(mode=0o755, exist_ok=True)
         elif not current.exists():
@@ -99,7 +135,9 @@ def _portable_parent(root: Path, parts: tuple[str, ...], *, create: bool) -> Pat
     return current
 
 
-def _portable_write_relative(root: Path, parts: tuple[str, ...], data: bytes, mode: int | None) -> None:
+def _portable_write_relative(
+    root: Path, parts: tuple[str, ...], data: bytes, mode: int | None
+) -> None:
     parent = _portable_parent(root, parts[:-1], create=True)
     target = parent / parts[-1]
     if target.is_symlink():
@@ -108,7 +146,11 @@ def _portable_write_relative(root: Path, parts: tuple[str, ...], data: bytes, mo
         # from being mistaken for regular files.
         target.unlink()
     if target.exists() and target.is_dir():
-        raise ToolFailure("SANDBOX_FAILED", f"Sandbox target is a directory: {'/'.join(parts)}", category="security")
+        raise ToolFailure(
+            "SANDBOX_FAILED",
+            f"Sandbox target is a directory: {'/'.join(parts)}",
+            category="security",
+        )
 
     fd, temp_name = tempfile.mkstemp(prefix=".mcp-write-", dir=str(parent))
     try:
@@ -134,7 +176,9 @@ def _portable_write_relative(root: Path, parts: tuple[str, ...], data: bytes, mo
             pass
 
 
-def _safe_write_relative(root: Path, raw_path: str, data: bytes, mode: int | None) -> None:
+def _safe_write_relative(
+    root: Path, raw_path: str, data: bytes, mode: int | None
+) -> None:
     parts = _relative_parts(raw_path)
     if os.name == "nt":
         _portable_write_relative(root, parts, data, mode)
@@ -149,13 +193,21 @@ def _safe_write_relative(root: Path, raw_path: str, data: bytes, mode: int | Non
             except OSError as exc:
                 if exc.errno != errno.ELOOP:
                     if exc.errno == errno.EISDIR:
-                        raise ToolFailure("SANDBOX_FAILED", f"Sandbox target is a directory: {raw_path}", category="security") from exc
+                        raise ToolFailure(
+                            "SANDBOX_FAILED",
+                            f"Sandbox target is a directory: {raw_path}",
+                            category="security",
+                        ) from exc
                     raise
                 # Unlink only the directory entry itself, then retry with
                 # O_NOFOLLOW. A replacement symlink is still rejected.
                 os.unlink(parts[-1], dir_fd=parent_fd)
         else:
-            raise ToolFailure("SANDBOX_FAILED", f"Sandbox target remained a symlink: {raw_path}", category="security")
+            raise ToolFailure(
+                "SANDBOX_FAILED",
+                f"Sandbox target remained a symlink: {raw_path}",
+                category="security",
+            )
         try:
             written = 0
             while written < len(data):
@@ -180,7 +232,11 @@ def _safe_unlink_relative(root: Path, raw_path: str) -> None:
             target.unlink()
         elif target.exists():
             if target.is_dir():
-                raise ToolFailure("SANDBOX_FAILED", f"Sandbox target is a directory: {raw_path}", category="security")
+                raise ToolFailure(
+                    "SANDBOX_FAILED",
+                    f"Sandbox target is a directory: {raw_path}",
+                    category="security",
+                )
             target.unlink()
         return
     try:
@@ -193,7 +249,11 @@ def _safe_unlink_relative(root: Path, raw_path: str) -> None:
         except FileNotFoundError:
             return
         except IsADirectoryError as exc:
-            raise ToolFailure("SANDBOX_FAILED", f"Sandbox target is a directory: {raw_path}", category="security") from exc
+            raise ToolFailure(
+                "SANDBOX_FAILED",
+                f"Sandbox target is a directory: {raw_path}",
+                category="security",
+            ) from exc
     finally:
         os.close(parent_fd)
 
@@ -207,13 +267,27 @@ class ExecutionSandbox:
     @classmethod
     def create(cls, workspace: Path) -> "ExecutionSandbox":
         if not workspace.is_dir():
-            raise ToolFailure("INVALID_ARGUMENT", "Workspace must be a directory.", category="validation")
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                "Workspace must be a directory.",
+                category="validation",
+            )
         try:
-            sandbox_path = Path(tempfile.mkdtemp(prefix="chatgpt-dev-sandbox-")).resolve()
+            sandbox_path = Path(
+                tempfile.mkdtemp(prefix="chatgpt-dev-sandbox-")
+            ).resolve()
             cls._sync(workspace, sandbox_path)
         except OSError as exc:
-            raise ToolFailure("SANDBOX_FAILED", f"Failed to create sandbox: {exc}", category="internal") from exc
-        return cls(original_workspace=workspace, sandbox_dir=sandbox_path, created_at=time.time())
+            raise ToolFailure(
+                "SANDBOX_FAILED",
+                f"Failed to create sandbox: {exc}",
+                category="internal",
+            ) from exc
+        return cls(
+            original_workspace=workspace,
+            sandbox_dir=sandbox_path,
+            created_at=time.time(),
+        )
 
     def sync_from_authoritative(self) -> None:
         self.__class__._sync(self.original_workspace, self.sandbox_dir)
@@ -231,7 +305,11 @@ class ExecutionSandbox:
     @classmethod
     def _clear_destination(cls, dest: Path) -> None:
         if dest.is_symlink() or not dest.is_dir():
-            raise ToolFailure("SANDBOX_FAILED", "Sandbox root is not a regular directory.", category="security")
+            raise ToolFailure(
+                "SANDBOX_FAILED",
+                "Sandbox root is not a regular directory.",
+                category="security",
+            )
         for entry in os.scandir(dest):
             entry_path = Path(entry.path)
             if entry.is_symlink():
@@ -242,7 +320,9 @@ class ExecutionSandbox:
                 entry_path.unlink()
 
     @classmethod
-    def _copy_tree(cls, source: Path, dest: Path, relative: tuple[str, ...] = ()) -> None:
+    def _copy_tree(
+        cls, source: Path, dest: Path, relative: tuple[str, ...] = ()
+    ) -> None:
         for entry in os.scandir(source):
             if cls._is_secret_path(entry.name):
                 continue
@@ -273,7 +353,9 @@ class ExecutionSandbox:
                 source_mode = stat.S_IMODE(os.fstat(source_fd).st_mode)
             finally:
                 os.close(source_fd)
-            _safe_write_relative(dest, "/".join(child_rel), b"".join(chunks), source_mode)
+            _safe_write_relative(
+                dest, "/".join(child_rel), b"".join(chunks), source_mode
+            )
 
     @classmethod
     def _sync(cls, source: Path, dest: Path) -> None:
@@ -286,7 +368,9 @@ class ExecutionSandbox:
         cls._clear_destination(dest)
         cls._copy_tree(source, dest)
 
-    def safe_write_file(self, rel_path: str, content: bytes | str, mode: int | None = None) -> None:
+    def safe_write_file(
+        self, rel_path: str, content: bytes | str, mode: int | None = None
+    ) -> None:
         data = content.encode("utf-8") if isinstance(content, str) else content
         _safe_write_relative(self.sandbox_dir, rel_path, data, mode)
         # A patch can preserve both the byte length and the timestamp
@@ -294,7 +378,9 @@ class ExecutionSandbox:
         # Remove interpreter bytecode beside updated Python sources so a
         # registered test cannot execute stale code from the sandbox snapshot.
         if rel_path.endswith(".py"):
-            cache_dir = self.sandbox_dir.joinpath(*PurePosixPath(rel_path).parts[:-1], "__pycache__")
+            cache_dir = self.sandbox_dir.joinpath(
+                *PurePosixPath(rel_path).parts[:-1], "__pycache__"
+            )
             if cache_dir.is_symlink():
                 cache_dir.unlink()
             elif cache_dir.is_dir():
@@ -342,7 +428,15 @@ class ExecutionSandbox:
         if allow_network:
             # Keep the network namespace joined to the host only for an
             # explicitly granted operation. All other namespaces remain new.
-            args.extend(["--unshare-user", "--unshare-pid", "--unshare-ipc", "--unshare-uts", "--unshare-cgroup"])
+            args.extend(
+                [
+                    "--unshare-user",
+                    "--unshare-pid",
+                    "--unshare-ipc",
+                    "--unshare-uts",
+                    "--unshare-cgroup",
+                ]
+            )
         else:
             args.append("--unshare-all")
         args.extend(["--cap-drop", "ALL", "--new-session", "--die-with-parent"])
@@ -350,19 +444,28 @@ class ExecutionSandbox:
         for bind_dir in ["/usr", "/lib", "/lib64", "/bin", "/sbin", "/etc"]:
             if os.path.exists(bind_dir):
                 args.extend(["--ro-bind", bind_dir, bind_dir])
-        args.extend([
-            "--proc", "/proc",
-            "--dev", "/dev",
-            "--tmpfs", "/tmp",
-            "--bind", str(self.sandbox_dir), str(self.sandbox_dir),
-        ])
+        args.extend(
+            [
+                "--proc",
+                "/proc",
+                "--dev",
+                "/dev",
+                "--tmpfs",
+                "/tmp",
+                "--bind",
+                str(self.sandbox_dir),
+                str(self.sandbox_dir),
+            ]
+        )
 
         python_dir = str(Path(sys.executable).parent.parent)
         if not python_dir.startswith(("/usr", "/bin", "/lib")):
             args.extend(["--ro-bind", python_dir, python_dir])
         real_executable = Path(os.path.realpath(sys.executable))
         python_real_dir = str(real_executable.parent.parent)
-        if python_real_dir != python_dir and not python_real_dir.startswith(("/usr", "/bin", "/lib")):
+        if python_real_dir != python_dir and not python_real_dir.startswith(
+            ("/usr", "/bin", "/lib")
+        ):
             args.extend(["--ro-bind", python_real_dir, python_real_dir])
         uv_roots: list[Path] = []
         derived_uv_root = real_executable

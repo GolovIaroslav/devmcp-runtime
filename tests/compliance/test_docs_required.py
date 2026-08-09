@@ -84,19 +84,54 @@ class RequiredDocsTests(unittest.TestCase):
     def test_docs_contain_required_operational_topics(self) -> None:
         expectations = {
             "README.md": ["Quickstart", "Safety Boundary", "Dogfood", "SWE-bench"],
-            "SECURITY.md": ["bubblewrap", "Residual risk", "GitHub Private Vulnerability"],
+            "SECURITY.md": [
+                "bubblewrap",
+                "Residual risk",
+                "GitHub Private Vulnerability",
+            ],
             "COMPLIANCE.md": ["make compliance", "required_tools", "not_measured"],
-            "BENCHMARK.md": ["make dogfood-smoke", "make benchmark-latency", "PREFLIGHT_ONLY", "swebench-official-attempt"],
+            "BENCHMARK.md": [
+                "make dogfood-smoke",
+                "make benchmark-latency",
+                "PREFLIGHT_ONLY",
+                "swebench-official-attempt",
+            ],
             "docs/ci-and-tests.md": ["make ci", "workflow", "swebench-lite"],
-            "docs/dogfood.md": ["MCP-Only Rule", "view_image", "Direct filesystem/shell bypass"],
-            "docs/swe-bench.md": ["Official attempt report", "BLOCKED", "sympy__sympy-12419"],
+            "docs/dogfood.md": [
+                "MCP-Only Rule",
+                "view_image",
+                "Direct filesystem/shell bypass",
+            ],
+            "docs/swe-bench.md": [
+                "Official attempt report",
+                "BLOCKED",
+                "sympy__sympy-12419",
+            ],
             "docs/troubleshooting.md": ["SANDBOX_UNAVAILABLE", "MCP-Protocol-Version"],
             "docs/permission-modes.md": ["safe", "trusted", "dangerous"],
-            "docs/exec-command-recipes.md": ["MAVEN_USER_HOME", "npm_config_cache", "GOCACHE", "CARGO_HOME"],
-            "docs/troubleshooting-exec.md": ["DEV_NULL_DENIED", "DNS_RESOLUTION_FAILED", "OUTPUT_TRUNCATED"],
+            "docs/exec-command-recipes.md": [
+                "MAVEN_USER_HOME",
+                "npm_config_cache",
+                "GOCACHE",
+                "CARGO_HOME",
+            ],
+            "docs/troubleshooting-exec.md": [
+                "DEV_NULL_DENIED",
+                "DNS_RESOLUTION_FAILED",
+                "OUTPUT_TRUNCATED",
+            ],
             "docs/security-boundary.md": ["Landlock", "external container or VM"],
-            "docs/docker.md": ["permission-mode trusted", "permission_mode=dangerous", "mvn -version"],
-            "docs/competitive-analysis.md": ["Claude Code", "Aider", "OpenHands", "Cline"],
+            "docs/docker.md": [
+                "permission-mode trusted",
+                "permission_mode=dangerous",
+                "mvn -version",
+            ],
+            "docs/competitive-analysis.md": [
+                "Claude Code",
+                "Aider",
+                "OpenHands",
+                "Cline",
+            ],
         }
         for rel_path, needles in expectations.items():
             text = (ROOT / rel_path).read_text(encoding="utf-8")
@@ -105,7 +140,9 @@ class RequiredDocsTests(unittest.TestCase):
                     self.assertIn(needle, text)
 
     def test_ci_workflows_include_required_gates(self) -> None:
-        compliance = (ROOT / ".github/workflows/compliance.yml").read_text(encoding="utf-8")
+        compliance = (ROOT / ".github/workflows/compliance.yml").read_text(
+            encoding="utf-8"
+        )
         for needle in (
             "make lint",
             "make typecheck",
@@ -121,17 +158,28 @@ class RequiredDocsTests(unittest.TestCase):
             with self.subTest(workflow="compliance", needle=needle):
                 self.assertIn(needle, compliance)
 
-        swebench = (ROOT / ".github/workflows/swebench-lite.yml").read_text(encoding="utf-8")
-        for needle in ("workflow_dispatch", "--install-swebench", "--run-evaluation", "reports/benchmark/**"):
+        swebench = (ROOT / ".github/workflows/swebench-lite.yml").read_text(
+            encoding="utf-8"
+        )
+        for needle in (
+            "workflow_dispatch",
+            "--install-swebench",
+            "--run-evaluation",
+            "reports/benchmark/**",
+        ):
             with self.subTest(workflow="swebench-lite", needle=needle):
                 self.assertIn(needle, swebench)
 
-        docker_image = (ROOT / ".github/workflows/docker-image.yml").read_text(encoding="utf-8")
+        docker_image = (ROOT / ".github/workflows/docker-image.yml").read_text(
+            encoding="utf-8"
+        )
         for needle in ("docker/build-push-action", "ghcr.io", "devmcp-runtime-sandbox"):
             with self.subTest(workflow="docker-image", needle=needle):
                 self.assertIn(needle, docker_image)
 
-        docker_smoke = (ROOT / ".github/workflows/docker-smoke.yml").read_text(encoding="utf-8")
+        docker_smoke = (ROOT / ".github/workflows/docker-smoke.yml").read_text(
+            encoding="utf-8"
+        )
         for needle in ("docker build", "scripts/mcp_smoke.py"):
             with self.subTest(workflow="docker-smoke", needle=needle):
                 self.assertIn(needle, docker_smoke)
@@ -151,7 +199,9 @@ class RequiredDocsTests(unittest.TestCase):
             with self.subTest(workflow="release", needle=needle):
                 self.assertIn(needle, release)
 
-        final_audit = (ROOT / ".github/workflows/final-audit.yml").read_text(encoding="utf-8")
+        final_audit = (ROOT / ".github/workflows/final-audit.yml").read_text(
+            encoding="utf-8"
+        )
         for needle in (
             "actions/setup-python@v6.2.0",
             'expected_ref="refs/tags/$RELEASE_TAG"',

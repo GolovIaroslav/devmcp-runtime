@@ -45,7 +45,9 @@ def main(argv: list[str] | None = None) -> int:
     rc = int(landlock_libc().prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0))
     if rc != 0:
         err = ctypes.get_errno()
-        return fail(f"failed to set no_new_privs before Landlock restrict: {os.strerror(err)}")
+        return fail(
+            f"failed to set no_new_privs before Landlock restrict: {os.strerror(err)}"
+        )
     rc = libc_syscall(SYS_LANDLOCK_RESTRICT_SELF, ruleset_fd, 0)
     if rc != 0:
         err = ctypes.get_errno()

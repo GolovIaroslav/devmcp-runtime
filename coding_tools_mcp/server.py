@@ -78,7 +78,13 @@ from .protocol import (
     validate_rpc_envelope,
 )
 from .project_context import ProjectContext, load_project_context
-from .policy import PROFILE_NAMES, decision as policy_decision, effective_rules, legacy_profile, validate_rules
+from .policy import (
+    PROFILE_NAMES,
+    decision as policy_decision,
+    effective_rules,
+    legacy_profile,
+    validate_rules,
+)
 from .telemetry import SessionTelemetry
 from .textutils import DEFAULT_MAX_LINES, TextTruncation, truncate_text_head
 from .tool_results import make_tool_result
@@ -107,7 +113,9 @@ DEFAULT_EXCLUDED_NAMES = {
 }
 GREP_MAX_LINE_CHARS = 500
 IMAGE_RESIZE_MAX_DIMENSION = 2000
-SENSITIVE_ENV_RE = re.compile(r"(token|secret|credential|api[_-]?key|password|passwd|private)", re.I)
+SENSITIVE_ENV_RE = re.compile(
+    r"(token|secret|credential|api[_-]?key|password|passwd|private)", re.I
+)
 SENSITIVE_VALUE_RE = re.compile(
     r"(COMPLIANCE_SHOULD_NOT_LEAK|-----BEGIN [A-Z ]*PRIVATE KEY-----|gh[pousr]_[A-Za-z0-9_]+|sk-[A-Za-z0-9_-]{16,}|AKIA[0-9A-Z]{16})"
 )
@@ -253,7 +261,18 @@ ENV_FLAG_OPTIONS = {
     "--block-signal",
     "--list-signal-handling",
 }
-NETWORK_LITERAL_COMMANDS = {"echo", "printf", "grep", "egrep", "fgrep", "rg", "cat", "head", "tail", "wc"}
+NETWORK_LITERAL_COMMANDS = {
+    "echo",
+    "printf",
+    "grep",
+    "egrep",
+    "fgrep",
+    "rg",
+    "cat",
+    "head",
+    "tail",
+    "wc",
+}
 INLINE_SCRIPT_PERMISSION = "inline_script"
 RUNTIME_ROOT_DIR_NAME = "coding-tools-mcp"
 SPECIAL_DEVICE_PATHS = ("/dev/null", "/dev/zero", "/dev/random", "/dev/urandom")
@@ -310,6 +329,7 @@ ECOSYSTEM_CACHE_ENV_NAMES = {
     "CARGO_HOME",
     "RUSTUP_HOME",
 }
+
 
 @dataclass(frozen=True)
 class ShellEnvPolicy:
@@ -394,7 +414,11 @@ def _safe_external_host(host: str) -> str:
         _ = parsed.port
     except ValueError:
         return ""
-    if not parsed.hostname or parsed.username is not None or parsed.password is not None:
+    if (
+        not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
         return ""
     return host
 
@@ -410,14 +434,22 @@ def is_risky_env_name(name: str) -> bool:
 
 
 def is_filtered_env_var(name: str, value: str) -> bool:
-    return bool(SENSITIVE_ENV_RE.search(name) or is_risky_env_name(name) or SENSITIVE_VALUE_RE.search(value))
+    return bool(
+        SENSITIVE_ENV_RE.search(name)
+        or is_risky_env_name(name)
+        or SENSITIVE_VALUE_RE.search(value)
+    )
 
 
 def is_core_command_env_name(name: str) -> bool:
     upper = name.upper()
     if os.name == "nt":
         return upper in WINDOWS_CORE_ENV_NAMES
-    return upper in POSIX_CORE_ENV_NAMES or upper in GIT_ENV_NAMES or upper.startswith("LC_")
+    return (
+        upper in POSIX_CORE_ENV_NAMES
+        or upper in GIT_ENV_NAMES
+        or upper.startswith("LC_")
+    )
 
 
 def split_env_patterns(value: str | None) -> tuple[str, ...]:
@@ -454,7 +486,9 @@ def configured_runtime_root() -> Path | None:
 
 
 def runtime_parent_root() -> Path:
-    return configured_runtime_root() or Path(tempfile.gettempdir()) / RUNTIME_ROOT_DIR_NAME
+    return (
+        configured_runtime_root() or Path(tempfile.gettempdir()) / RUNTIME_ROOT_DIR_NAME
+    )
 
 
 def runtime_parent_fallback_root() -> Path | None:
@@ -476,7 +510,9 @@ def workspace_runtime_hash(workspace: Path) -> str:
 def runtime_dir_for_workspace(workspace: Path, instance_id: str) -> Path:
     root = runtime_parent_root()
     try:
-        root_in_workspace = is_relative_to(root.resolve(strict=False), workspace.expanduser().resolve(strict=False))
+        root_in_workspace = is_relative_to(
+            root.resolve(strict=False), workspace.expanduser().resolve(strict=False)
+        )
     except OSError:
         root_in_workspace = False
     if root_in_workspace:
@@ -490,7 +526,9 @@ def runtime_dir_for_workspace(workspace: Path, instance_id: str) -> Path:
     return root / workspace_runtime_hash(workspace) / instance_id
 
 
-def fallback_runtime_dir_for_workspace(workspace: Path, instance_id: str) -> Path | None:
+def fallback_runtime_dir_for_workspace(
+    workspace: Path, instance_id: str
+) -> Path | None:
     fallback = runtime_parent_fallback_root()
     if fallback is None:
         return None
@@ -498,23 +536,29 @@ def fallback_runtime_dir_for_workspace(workspace: Path, instance_id: str) -> Pat
 
 
 def shell_env_policy_from_args(args: argparse.Namespace) -> ShellEnvPolicy:
-    raw_inherit = args.shell_env_inherit or os.environ.get(f"{ENV_PREFIX}_SHELL_ENV_INHERIT") or "core"
+    raw_inherit = (
+        args.shell_env_inherit
+        or os.environ.get(f"{ENV_PREFIX}_SHELL_ENV_INHERIT")
+        or "core"
+    )
     inherit = raw_inherit.strip().lower()
     if inherit not in SHELL_ENV_INHERIT_CHOICES:
         supported = ", ".join(SHELL_ENV_INHERIT_CHOICES)
         raise ValueError(f"shell env inherit must be one of: {supported}")
     return ShellEnvPolicy(
         inherit=inherit,
-        include_only=split_env_patterns(os.environ.get(f"{ENV_PREFIX}_SHELL_ENV_INCLUDE_ONLY")),
+        include_only=split_env_patterns(
+            os.environ.get(f"{ENV_PREFIX}_SHELL_ENV_INCLUDE_ONLY")
+        ),
         exclude=split_env_patterns(os.environ.get(f"{ENV_PREFIX}_SHELL_ENV_EXCLUDE")),
         set=parse_shell_env_set(os.environ.get(f"{ENV_PREFIX}_SHELL_ENV_SET")),
     )
 
 
 def permission_mode_from_args(args: argparse.Namespace) -> str:
-    skip_all = bool(getattr(args, "dangerously_skip_all_permissions", False)) or truthy_env(
-        os.environ.get(f"{ENV_PREFIX}_DANGEROUSLY_SKIP_ALL_PERMISSIONS")
-    )
+    skip_all = bool(
+        getattr(args, "dangerously_skip_all_permissions", False)
+    ) or truthy_env(os.environ.get(f"{ENV_PREFIX}_DANGEROUSLY_SKIP_ALL_PERMISSIONS"))
     raw_mode = (
         getattr(args, "permission_mode", None)
         or os.environ.get(f"{ENV_PREFIX}_PERMISSION_MODE")
@@ -527,8 +571,12 @@ def permission_mode_from_args(args: argparse.Namespace) -> str:
     return "dangerous" if skip_all else mode
 
 
-def fake_readonly_annotations_from_args(args: argparse.Namespace, permission_mode: str) -> bool:
-    requested = bool(getattr(args, "dangerously_fake_readonly_annotations", False)) or truthy_env(
+def fake_readonly_annotations_from_args(
+    args: argparse.Namespace, permission_mode: str
+) -> bool:
+    requested = bool(
+        getattr(args, "dangerously_fake_readonly_annotations", False)
+    ) or truthy_env(
         os.environ.get(f"{ENV_PREFIX}_DANGEROUSLY_FAKE_READONLY_ANNOTATIONS")
     )
     if requested and permission_mode != "dangerous":
@@ -553,13 +601,17 @@ def runtime_policy_from_args(args: argparse.Namespace) -> RuntimePolicy:
         permission_mode=permission_mode,
         shell_env_policy=shell_env_policy_from_args(args),
         allow_network=allow_network,
-        fake_readonly_annotations=fake_readonly_annotations_from_args(args, permission_mode),
+        fake_readonly_annotations=fake_readonly_annotations_from_args(
+            args, permission_mode
+        ),
         policy_profile=policy_profile,
     )
 
 
 def policy_profile_from_args(args: argparse.Namespace) -> str | None:
-    raw = getattr(args, "policy_profile", None) or os.environ.get("DEVMCP_POLICY_PROFILE")
+    raw = getattr(args, "policy_profile", None) or os.environ.get(
+        "DEVMCP_POLICY_PROFILE"
+    )
     if raw is None:
         return None
     profile = str(raw).strip().lower()
@@ -568,7 +620,9 @@ def policy_profile_from_args(args: argparse.Namespace) -> str | None:
     return profile
 
 
-def policy_rules_from_config_file(path: str | None, profile: str) -> dict[str, str] | None:
+def policy_rules_from_config_file(
+    path: str | None, profile: str
+) -> dict[str, str] | None:
     """Load only non-secret custom policy data for a configured server process."""
 
     if profile != "custom" or not path:
@@ -622,44 +676,134 @@ def _image_content(payload: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 TOOL_REGISTRY: dict[str, ToolSpec] = {
-    "server_info": ToolSpec(title="Server info", description="Server info.", read_only=True, idempotent=True),
-    "health": ToolSpec(title="Health", description="Health check.", read_only=True, idempotent=True),
-    "workspace_info": ToolSpec(title="Workspace info", description="Workspace info.", read_only=True, idempotent=True),
-    "read_file": ToolSpec(title="Read file", description="Read file.", read_only=True, idempotent=True),
-    "read_files": ToolSpec(title="Read files", description="Read multiple files.", read_only=True, idempotent=True),
-    "list_dir": ToolSpec(title="List dir", description="List directory.", read_only=True, idempotent=True),
-    "list_files": ToolSpec(title="List files", description="List files.", read_only=True, idempotent=True),
-    "search_text": ToolSpec(title="Search text", description="Search text.", read_only=True, idempotent=True),
-    "view_image": ToolSpec(title="View image", description="View image.", read_only=True, idempotent=True, content_builder=_image_content),
-    "preview_patch": ToolSpec(title="Preview patch", description="Preview patch.", read_only=True, idempotent=True),
+    "server_info": ToolSpec(
+        title="Server info", description="Server info.", read_only=True, idempotent=True
+    ),
+    "health": ToolSpec(
+        title="Health", description="Health check.", read_only=True, idempotent=True
+    ),
+    "workspace_info": ToolSpec(
+        title="Workspace info",
+        description="Workspace info.",
+        read_only=True,
+        idempotent=True,
+    ),
+    "read_file": ToolSpec(
+        title="Read file", description="Read file.", read_only=True, idempotent=True
+    ),
+    "read_files": ToolSpec(
+        title="Read files",
+        description="Read multiple files.",
+        read_only=True,
+        idempotent=True,
+    ),
+    "list_dir": ToolSpec(
+        title="List dir", description="List directory.", read_only=True, idempotent=True
+    ),
+    "list_files": ToolSpec(
+        title="List files", description="List files.", read_only=True, idempotent=True
+    ),
+    "search_text": ToolSpec(
+        title="Search text", description="Search text.", read_only=True, idempotent=True
+    ),
+    "view_image": ToolSpec(
+        title="View image",
+        description="View image.",
+        read_only=True,
+        idempotent=True,
+        content_builder=_image_content,
+    ),
+    "preview_patch": ToolSpec(
+        title="Preview patch",
+        description="Preview patch.",
+        read_only=True,
+        idempotent=True,
+    ),
     "apply_patch": ToolSpec(
         title="Apply patch",
         description="Apply a previewed Add/Update patch. Small non-destructive updates run automatically; deletes, moves, and high-risk updates are blocked or require local approval.",
     ),
-    "git_status": ToolSpec(title="Git status", description="Git status.", read_only=True, idempotent=True),
-    "git_diff": ToolSpec(title="Git diff", description="Git diff.", read_only=True, idempotent=True),
-    "git_log": ToolSpec(title="Git log", description="Git log.", read_only=True, idempotent=True),
-    "git_show": ToolSpec(title="Git show", description="Git show.", read_only=True, idempotent=True),
-    "git_blame": ToolSpec(title="Git blame", description="Git blame.", read_only=True, idempotent=True),
-    "list_tasks": ToolSpec(title="List tasks", description="List tasks.", read_only=True, idempotent=True),
-    "describe_task": ToolSpec(title="Describe task", description="Describe task.", read_only=True, idempotent=True),
+    "git_status": ToolSpec(
+        title="Git status", description="Git status.", read_only=True, idempotent=True
+    ),
+    "git_diff": ToolSpec(
+        title="Git diff", description="Git diff.", read_only=True, idempotent=True
+    ),
+    "git_log": ToolSpec(
+        title="Git log", description="Git log.", read_only=True, idempotent=True
+    ),
+    "git_show": ToolSpec(
+        title="Git show", description="Git show.", read_only=True, idempotent=True
+    ),
+    "git_blame": ToolSpec(
+        title="Git blame", description="Git blame.", read_only=True, idempotent=True
+    ),
+    "list_tasks": ToolSpec(
+        title="List tasks", description="List tasks.", read_only=True, idempotent=True
+    ),
+    "describe_task": ToolSpec(
+        title="Describe task",
+        description="Describe task.",
+        read_only=True,
+        idempotent=True,
+    ),
     "run_task": ToolSpec(
         title="Run task",
         description="Run a registered local test, lint, typecheck, build, or check task in the isolated sandbox. Safe non-network tasks run automatically.",
     ),
-    "exec_command": ToolSpec(title="Exec command", description="Exec command.", destructive=True, open_world=True, error_status="failed"),
-    "job_status": ToolSpec(title="Job status", description="Job status.", read_only=True, idempotent=True),
-    "read_output": ToolSpec(title="Read output", description="Read output.", read_only=True, idempotent=True),
+    "exec_command": ToolSpec(
+        title="Exec command",
+        description="Exec command.",
+        destructive=True,
+        open_world=True,
+        error_status="failed",
+    ),
+    "job_status": ToolSpec(
+        title="Job status", description="Job status.", read_only=True, idempotent=True
+    ),
+    "read_output": ToolSpec(
+        title="Read output", description="Read output.", read_only=True, idempotent=True
+    ),
     "write_stdin": ToolSpec(title="Write stdin", description="Write stdin."),
-    "kill_session": ToolSpec(title="Kill session", description="Kill session.", destructive=True),
-    "job_output": ToolSpec(title="Job output", description="Job output.", read_only=True, idempotent=True),
-    "job_input": ToolSpec(title="Job input", description="Job input.", destructive=True),
-    "job_cancel": ToolSpec(title="Job cancel", description="Job cancel.", destructive=True),
-    "approval_status": ToolSpec(title="Approval status", description="Approval status.", read_only=True, idempotent=True),
-    "list_pending_approvals": ToolSpec(title="List pending approvals", description="List pending approvals.", read_only=True, idempotent=True),
-    "check_exec_environment": ToolSpec(title="Check exec environment", description="Check exec environment.", read_only=True, idempotent=True),
-    "get_default_cwd": ToolSpec(title="Get default cwd", description="Get default cwd.", read_only=True, idempotent=True),
-    "set_default_cwd": ToolSpec(title="Set default cwd", description="Set default cwd.", idempotent=True),
+    "kill_session": ToolSpec(
+        title="Kill session", description="Kill session.", destructive=True
+    ),
+    "job_output": ToolSpec(
+        title="Job output", description="Job output.", read_only=True, idempotent=True
+    ),
+    "job_input": ToolSpec(
+        title="Job input", description="Job input.", destructive=True
+    ),
+    "job_cancel": ToolSpec(
+        title="Job cancel", description="Job cancel.", destructive=True
+    ),
+    "approval_status": ToolSpec(
+        title="Approval status",
+        description="Approval status.",
+        read_only=True,
+        idempotent=True,
+    ),
+    "list_pending_approvals": ToolSpec(
+        title="List pending approvals",
+        description="List pending approvals.",
+        read_only=True,
+        idempotent=True,
+    ),
+    "check_exec_environment": ToolSpec(
+        title="Check exec environment",
+        description="Check exec environment.",
+        read_only=True,
+        idempotent=True,
+    ),
+    "get_default_cwd": ToolSpec(
+        title="Get default cwd",
+        description="Get default cwd.",
+        read_only=True,
+        idempotent=True,
+    ),
+    "set_default_cwd": ToolSpec(
+        title="Set default cwd", description="Set default cwd.", idempotent=True
+    ),
 }
 
 LANDLOCK_CREATE_RULESET_VERSION = 1
@@ -690,7 +834,9 @@ def json_response_payload(payload: Any) -> bytes:
 
 @functools.lru_cache(maxsize=8)
 def _configured_allowed_origins(raw: str) -> frozenset[str]:
-    return frozenset(item.strip().rstrip("/") for item in raw.split(",") if item.strip())
+    return frozenset(
+        item.strip().rstrip("/") for item in raw.split(",") if item.strip()
+    )
 
 
 def is_allowed_origin(origin: str) -> bool:
@@ -715,8 +861,12 @@ def is_allowed_origin(origin: str) -> bool:
     except ValueError:
         return False
     normalized = origin.rstrip("/")
-    configured = _configured_allowed_origins(os.environ.get(f"{ENV_PREFIX}_ALLOWED_ORIGINS", ""))
-    return parsed.hostname in {"localhost", "127.0.0.1", "::1"} or normalized in configured
+    configured = _configured_allowed_origins(
+        os.environ.get(f"{ENV_PREFIX}_ALLOWED_ORIGINS", "")
+    )
+    return (
+        parsed.hostname in {"localhost", "127.0.0.1", "::1"} or normalized in configured
+    )
 
 
 def is_loopback_bind_host(host: str) -> bool:
@@ -739,7 +889,9 @@ def truncate_bytes(data: bytes, limit: int) -> tuple[str, bool]:
     return data.decode("utf-8", errors="replace"), truncated
 
 
-def truncate_line_chars(line: str, max_chars: int = GREP_MAX_LINE_CHARS) -> tuple[str, bool]:
+def truncate_line_chars(
+    line: str, max_chars: int = GREP_MAX_LINE_CHARS
+) -> tuple[str, bool]:
     if len(line) <= max_chars:
         return line, False
     suffix = " ... [truncated]"
@@ -777,7 +929,9 @@ def file_entry(path: Path, rel: str, path_stat: os.stat_result) -> dict[str, Any
         "path": rel,
         "type": "symlink" if path.is_symlink() else "file",
         "size_bytes": path_stat.st_size,
-        "modified": datetime.fromtimestamp(path_stat.st_mtime, timezone.utc).isoformat().replace("+00:00", "Z"),
+        "modified": datetime.fromtimestamp(path_stat.st_mtime, timezone.utc)
+        .isoformat()
+        .replace("+00:00", "Z"),
     }
 
 
@@ -791,7 +945,9 @@ def search_match_item(
     max_preview_bytes: int,
 ) -> dict[str, Any]:
     preview, line_truncated = truncate_line_chars(line)
-    preview_truncation = truncate_text_head(preview, max_lines=1, max_bytes=max_preview_bytes)
+    preview_truncation = truncate_text_head(
+        preview, max_lines=1, max_bytes=max_preview_bytes
+    )
     item: dict[str, Any] = {
         "path": rel,
         "line": line_number,
@@ -802,7 +958,9 @@ def search_match_item(
     }
     if line_truncated or preview_truncation.truncated:
         item["preview_truncated"] = True
-        item["preview_truncated_by"] = "chars" if line_truncated else preview_truncation.truncated_by
+        item["preview_truncated_by"] = (
+            "chars" if line_truncated else preview_truncation.truncated_by
+        )
     return item
 
 
@@ -815,7 +973,9 @@ def truncation_fields(truncation: TextTruncation) -> dict[str, Any]:
     }
 
 
-def read_output_action(output_ref: str, *, offset: int = 0, limit: int | None = None) -> dict[str, Any]:
+def read_output_action(
+    output_ref: str, *, offset: int = 0, limit: int | None = None
+) -> dict[str, Any]:
     return {
         "tool": "read_output",
         "arguments": {
@@ -958,7 +1118,11 @@ def exec_output_diagnostics(payload: dict[str, Any]) -> list[dict[str, str]]:
                 suggested_fix="Increase timeout_ms only for trusted workloads, or run a narrower command.",
             )
         )
-    if payload.get("truncated") or payload.get("stdout_truncated") or payload.get("stderr_truncated"):
+    if (
+        payload.get("truncated")
+        or payload.get("stdout_truncated")
+        or payload.get("stderr_truncated")
+    ):
         diagnostics.append(
             diagnostic(
                 "OUTPUT_TRUNCATED",
@@ -975,7 +1139,11 @@ def exec_output_diagnostics(payload: dict[str, Any]) -> list[dict[str, str]]:
                 suggested_fix="Landlock special device rules should include WRITE_FILE, TRUNCATE, and IOCTL_DEV for /dev/null.",
             )
         )
-    if "could not resolve host" in lower or "temporary failure in name resolution" in lower or "name or service not known" in lower:
+    if (
+        "could not resolve host" in lower
+        or "temporary failure in name resolution" in lower
+        or "name or service not known" in lower
+    ):
         diagnostics.append(
             diagnostic(
                 "DNS_RESOLUTION_FAILED",
@@ -983,7 +1151,9 @@ def exec_output_diagnostics(payload: dict[str, Any]) -> list[dict[str, str]]:
                 suggested_next_command="cat /etc/resolv.conf && getent hosts repo.maven.apache.org",
             )
         )
-    if "java.security" in lower and ("permission denied" in lower or "could not" in lower or "error loading" in lower):
+    if "java.security" in lower and (
+        "permission denied" in lower or "could not" in lower or "error loading" in lower
+    ):
         diagnostics.append(
             diagnostic(
                 "JDK_SECURITY_CONFIG_BLOCKED",
@@ -991,12 +1161,16 @@ def exec_output_diagnostics(payload: dict[str, Any]) -> list[dict[str, str]]:
                 suggested_fix="Ensure the JDK security configuration path is included in Landlock read roots.",
             )
         )
-    if "tmpdir" in lower and ("permission denied" in lower or "not writable" in lower or "cannot write" in lower):
+    if "tmpdir" in lower and (
+        "permission denied" in lower
+        or "not writable" in lower
+        or "cannot write" in lower
+    ):
         diagnostics.append(
             diagnostic(
                 "TMPDIR_NOT_WRITABLE",
                 evidence=combined,
-                suggested_next_command="printf ok > \"$TMPDIR/coding-tools-write-test\"",
+                suggested_next_command='printf ok > "$TMPDIR/coding-tools-write-test"',
             )
         )
     home_error_terms = ("permission denied", "not writable", "cannot write", "eacces")
@@ -1019,10 +1193,13 @@ def exec_output_diagnostics(payload: dict[str, Any]) -> list[dict[str, str]]:
             diagnostic(
                 "HOME_NOT_WRITABLE",
                 evidence=combined,
-                suggested_next_command="printf ok > \"$HOME/coding-tools-write-test\"",
+                suggested_next_command='printf ok > "$HOME/coding-tools-write-test"',
             )
         )
-    if "permission denied" in lower and any(root in combined for root in ("/usr", "/bin", "/lib", "/etc", "/usr/local/sdkman")):
+    if "permission denied" in lower and any(
+        root in combined
+        for root in ("/usr", "/bin", "/lib", "/etc", "/usr/local/sdkman")
+    ):
         diagnostics.append(
             diagnostic(
                 "LANDLOCK_READ_ROOT_BLOCKED",
@@ -1030,7 +1207,11 @@ def exec_output_diagnostics(payload: dict[str, Any]) -> list[dict[str, str]]:
                 suggested_fix="Add the missing toolchain path to CODING_TOOLS_MCP_EXEC_ALLOW_ROOTS or the default read roots.",
             )
         )
-    if payload.get("exit_code") == 127 or "command not found" in lower or ("not found" in lower and "exec" in lower):
+    if (
+        payload.get("exit_code") == 127
+        or "command not found" in lower
+        or ("not found" in lower and "exec" in lower)
+    ):
         diagnostics.append(
             diagnostic(
                 "EXECUTABLE_NOT_FOUND",
@@ -1062,34 +1243,62 @@ class Workspace:
     def __init__(self, root: Path) -> None:
         self.root = root.expanduser().resolve(strict=True)
         if not self.root.is_dir():
-            raise ToolFailure("INVALID_ARGUMENT", "Workspace root must be a directory.", category="validation")
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                "Workspace root must be a directory.",
+                category="validation",
+            )
         unsafe_roots = {"/"}
         try:
             unsafe_roots.add(str(Path.home().resolve()))
         except RuntimeError:
             pass
         if str(self.root) in unsafe_roots:
-            raise ToolFailure("INVALID_ARGUMENT", "Unsafe workspace root rejected.", category="security")
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                "Unsafe workspace root rejected.",
+                category="security",
+            )
         self.git_path = shutil.which("git")
 
     def _reject_unsafe_text(self, raw_path: str) -> PurePosixPath:
         if not isinstance(raw_path, str) or not raw_path:
-            raise ToolFailure("INVALID_ARGUMENT", "Path must be a non-empty string.", category="validation")
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                "Path must be a non-empty string.",
+                category="validation",
+            )
         if "\x00" in raw_path:
-            raise ToolFailure("INVALID_ARGUMENT", "Path contains a NUL byte.", category="validation")
+            raise ToolFailure(
+                "INVALID_ARGUMENT", "Path contains a NUL byte.", category="validation"
+            )
         if raw_path.startswith("/") or re.match(r"^[A-Za-z]:[\\/]", raw_path):
-            raise ToolFailure("ABSOLUTE_PATH_DENIED", "Absolute paths are denied.", category="security")
+            raise ToolFailure(
+                "ABSOLUTE_PATH_DENIED",
+                "Absolute paths are denied.",
+                category="security",
+            )
         pure = PurePosixPath(raw_path)
         if any(part == ".." for part in pure.parts):
-            raise ToolFailure("PATH_OUTSIDE_WORKSPACE", "Path escapes the configured workspace.", category="security")
-            
+            raise ToolFailure(
+                "PATH_OUTSIDE_WORKSPACE",
+                "Path escapes the configured workspace.",
+                category="security",
+            )
+
         name = pure.name
         if name != ".env.example":
             if name == ".env" or name.startswith(".env."):
-                raise ToolFailure("ACCESS_DENIED", "Access to .env files is denied.", category="security")
+                raise ToolFailure(
+                    "ACCESS_DENIED",
+                    "Access to .env files is denied.",
+                    category="security",
+                )
             if name.endswith(".pem") or name.endswith(".key"):
-                raise ToolFailure("ACCESS_DENIED", f"Access to {name} is denied.", category="security")
-                
+                raise ToolFailure(
+                    "ACCESS_DENIED", f"Access to {name} is denied.", category="security"
+                )
+
         return pure
 
     def resolve_existing(self, raw_path: str = ".") -> ResolvedPath:
@@ -1102,10 +1311,16 @@ class Workspace:
         try:
             resolved = candidate.resolve(strict=True)
         except FileNotFoundError as exc:
-            raise ToolFailure("NOT_FOUND", f"Path not found: {raw_path}", category="not_found") from exc
+            raise ToolFailure(
+                "NOT_FOUND", f"Path not found: {raw_path}", category="not_found"
+            ) from exc
         if not is_relative_to(resolved, self.root):
-            code = "SYMLINK_ESCAPE" if candidate.is_symlink() else "PATH_OUTSIDE_WORKSPACE"
-            raise ToolFailure(code, "Path escapes the configured workspace.", category="security")
+            code = (
+                "SYMLINK_ESCAPE" if candidate.is_symlink() else "PATH_OUTSIDE_WORKSPACE"
+            )
+            raise ToolFailure(
+                code, "Path escapes the configured workspace.", category="security"
+            )
         return ResolvedPath(normalize_rel_display(resolved, self.root), resolved, True)
 
     def resolve_for_write(self, raw_path: str) -> ResolvedPath:
@@ -1114,14 +1329,22 @@ class Workspace:
     def resolve_for_write_at(self, base: Path, raw_path: str) -> ResolvedPath:
         pure = self._reject_unsafe_text(raw_path)
         if pure.name in {"", ".", ".."}:
-            raise ToolFailure("INVALID_ARGUMENT", "Invalid write target.", category="validation")
+            raise ToolFailure(
+                "INVALID_ARGUMENT", "Invalid write target.", category="validation"
+            )
         base = self._validate_base(base)
         candidate = base.joinpath(*pure.parts)
         if candidate.exists() or candidate.is_symlink():
             resolved = candidate.resolve(strict=True)
             if not is_relative_to(resolved, self.root):
-                raise ToolFailure("SYMLINK_ESCAPE", "Path escapes the configured workspace.", category="security")
-            return ResolvedPath(normalize_rel_display(resolved, self.root), resolved, True)
+                raise ToolFailure(
+                    "SYMLINK_ESCAPE",
+                    "Path escapes the configured workspace.",
+                    category="security",
+                )
+            return ResolvedPath(
+                normalize_rel_display(resolved, self.root), resolved, True
+            )
 
         parent = candidate.parent
         missing: list[Path] = []
@@ -1133,28 +1356,52 @@ class Workspace:
         try:
             resolved_parent = parent.resolve(strict=True)
         except FileNotFoundError as exc:
-            raise ToolFailure("NOT_FOUND", f"Parent directory not found: {raw_path}", category="not_found") from exc
+            raise ToolFailure(
+                "NOT_FOUND",
+                f"Parent directory not found: {raw_path}",
+                category="not_found",
+            ) from exc
         if not is_relative_to(resolved_parent, self.root):
-            raise ToolFailure("PATH_OUTSIDE_WORKSPACE", "Path escapes the configured workspace.", category="security")
-        target = resolved_parent.joinpath(*reversed([p.name for p in missing]), candidate.name)
+            raise ToolFailure(
+                "PATH_OUTSIDE_WORKSPACE",
+                "Path escapes the configured workspace.",
+                category="security",
+            )
+        target = resolved_parent.joinpath(
+            *reversed([p.name for p in missing]), candidate.name
+        )
         return ResolvedPath(normalize_rel_display(target, self.root), target, False)
 
     def _validate_base(self, base: Path) -> Path:
         try:
             resolved = base.resolve(strict=True)
         except FileNotFoundError as exc:
-            raise ToolFailure("NOT_FOUND", "Default cwd path no longer exists.", category="not_found") from exc
+            raise ToolFailure(
+                "NOT_FOUND", "Default cwd path no longer exists.", category="not_found"
+            ) from exc
         if not resolved.is_dir():
-            raise ToolFailure("NOT_A_DIRECTORY", "Default cwd is not a directory.", category="validation")
+            raise ToolFailure(
+                "NOT_A_DIRECTORY",
+                "Default cwd is not a directory.",
+                category="validation",
+            )
         if not is_relative_to(resolved, self.root):
-            raise ToolFailure("PATH_OUTSIDE_WORKSPACE", "Default cwd escapes the configured workspace.", category="security")
+            raise ToolFailure(
+                "PATH_OUTSIDE_WORKSPACE",
+                "Default cwd escapes the configured workspace.",
+                category="security",
+            )
         return resolved
 
     def reject_write_symlink(self, raw_path: str) -> None:
         pure = self._reject_unsafe_text(raw_path)
         candidate = self.root.joinpath(*pure.parts)
         if candidate.is_symlink():
-            raise ToolFailure("SYMLINK_ESCAPE", "Writing through symlinks is denied.", category="security")
+            raise ToolFailure(
+                "SYMLINK_ESCAPE",
+                "Writing through symlinks is denied.",
+                category="security",
+            )
 
     def is_ignored_path(
         self,
@@ -1169,14 +1416,22 @@ class Workspace:
         except ValueError:
             return True
         parts = rel.parts
-        if not include_hidden and any(part.startswith(".") for part in parts if part not in {".", ""}):
+        if not include_hidden and any(
+            part.startswith(".") for part in parts if part not in {".", ""}
+        ):
             return True
-        if not include_ignored and any(part in DEFAULT_EXCLUDED_NAMES for part in parts):
+        if not include_ignored and any(
+            part in DEFAULT_EXCLUDED_NAMES for part in parts
+        ):
             return True
         if include_ignored:
             return False
         rel_text = rel.as_posix()
-        if rel_text in (git_ignored if git_ignored is not None else self.git_ignored_paths([rel_text])):
+        if rel_text in (
+            git_ignored
+            if git_ignored is not None
+            else self.git_ignored_paths([rel_text])
+        ):
             return True
         return False
 
@@ -1231,6 +1486,7 @@ class Runtime:
     ) -> None:
         from .sandbox import ExecutionSandbox, detect_sandbox_backend
         from .tasks import TaskRegistry
+
         self.sandbox: ExecutionSandbox | None = None
         self.task_registry = TaskRegistry()
         self.workspace = Workspace(workspace)
@@ -1260,10 +1516,16 @@ class Runtime:
                 details={"supported": list(PROFILE_NAMES)},
             )
         self.policy_profile = policy_profile
-        self.policy_rules = validate_rules(policy_rules or {}) if policy_profile == "custom" else None
+        self.policy_rules = (
+            validate_rules(policy_rules or {}) if policy_profile == "custom" else None
+        )
         self.sandbox_backend = detect_sandbox_backend(sandbox_backend)
         if max_removed_lines < 0 or max_removed_percent < 0:
-            raise ToolFailure("INVALID_ARGUMENT", "Patch risk thresholds cannot be negative.", category="validation")
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                "Patch risk thresholds cannot be negative.",
+                category="validation",
+            )
         self.max_removed_lines = max_removed_lines
         self.max_removed_percent = max_removed_percent
         self.capabilities = PERMISSION_MODE_CAPABILITIES[permission_mode]
@@ -1297,8 +1559,12 @@ class Runtime:
         self.auth_token = auth_token or None
         self.oauth_config = oauth_config
         self.server_instance_id = secrets.token_urlsafe(12)
-        self._set_runtime_dir(runtime_dir_for_workspace(self.workspace.root, self.server_instance_id))
-        self.fallback_runtime_dir = fallback_runtime_dir_for_workspace(self.workspace.root, self.server_instance_id)
+        self._set_runtime_dir(
+            runtime_dir_for_workspace(self.workspace.root, self.server_instance_id)
+        )
+        self.fallback_runtime_dir = fallback_runtime_dir_for_workspace(
+            self.workspace.root, self.server_instance_id
+        )
         self.default_cwd = self.workspace.root
         self.sessions: dict[str, ExecSession] = {}
         self.output_sessions: dict[str, ExecSession] = {}
@@ -1314,13 +1580,17 @@ class Runtime:
         # per-session HTTP runtimes reuse the server's copy instead of re-running
         # discovery (git ls-files / directory walk) on every connect.
         self.project_context: ProjectContext = (
-            project_context if project_context is not None else load_project_context(self.workspace.root)
+            project_context
+            if project_context is not None
+            else load_project_context(self.workspace.root)
         )
         self.request_sessions: dict[str | int, str] = {}
         self.request_sessions_lock = threading.Lock()
         self.request_context = threading.local()
         self.initialized = False
-        self.telemetry = SessionTelemetry(permission_mode=self.permission_mode, transport=transport)
+        self.telemetry = SessionTelemetry(
+            permission_mode=self.permission_mode, transport=transport
+        )
         self._tool_handlers = {name: getattr(self, name) for name in TOOL_REGISTRY}
 
     def _set_runtime_dir(self, runtime_dir: Path) -> None:
@@ -1349,7 +1619,10 @@ class Runtime:
 
     def _ensure_runtime_dirs(self) -> None:
         candidates = [self.runtime_dir]
-        if self.fallback_runtime_dir is not None and self.fallback_runtime_dir not in candidates:
+        if (
+            self.fallback_runtime_dir is not None
+            and self.fallback_runtime_dir not in candidates
+        ):
             candidates.append(self.fallback_runtime_dir)
         errors: list[str] = []
         for runtime_dir in candidates:
@@ -1513,7 +1786,9 @@ class Runtime:
             },
             "auth_enabled": self.auth_enabled(),
             "dangerously_skip_all_permissions": self.dangerously_skip_all_permissions,
-            "annotation_override": "fake_readonly" if self.fake_readonly_annotations else None,
+            "annotation_override": "fake_readonly"
+            if self.fake_readonly_annotations
+            else None,
             "landlock": landlock,
             "exec_policy": {
                 "shell_expansion": self.shell_expansion_policy(),
@@ -1527,7 +1802,9 @@ class Runtime:
             "shell_env_exclude": list(self.shell_env_policy.exclude),
             "endpoint_path": MCP_ENDPOINT_PATH,
             "project_context": {
-                "root_instruction_files": [item.path for item in self.project_context.root_files],
+                "root_instruction_files": [
+                    item.path for item in self.project_context.root_files
+                ],
                 "nested_instruction_files": list(self.project_context.nested_files),
                 "warnings": list(self.project_context.warnings),
             },
@@ -1544,9 +1821,15 @@ class Runtime:
     ) -> dict[str, Any]:
         started_at = time.time()
         args = arguments or {}
-        handler = self._tool_handlers.get(name) if name in self._exposed_tool_name_set else None
+        handler = (
+            self._tool_handlers.get(name)
+            if name in self._exposed_tool_name_set
+            else None
+        )
         if handler is None:
-            raise JsonRpcError(-32602, f"Unknown tool: {name}", {"reason": "unknown_tool"})
+            raise JsonRpcError(
+                -32602, f"Unknown tool: {name}", {"reason": "unknown_tool"}
+            )
         spec = TOOL_REGISTRY[name]
         validate_arguments(name, args)
         try:
@@ -1561,7 +1844,9 @@ class Runtime:
             payload.setdefault("ok", True)
             self.emit_tool_trace(name, args, payload, started_at)
             content = spec.content_builder(payload) if spec.content_builder else None
-            return make_tool_result(name, payload, is_error=payload.get("ok") is False, content=content)
+            return make_tool_result(
+                name, payload, is_error=payload.get("ok") is False, content=content
+            )
         except ToolFailure as exc:
             payload = {
                 "ok": False,
@@ -1638,14 +1923,24 @@ class Runtime:
     def set_default_cwd(self, args: dict[str, Any]) -> dict[str, Any]:
         resolved = self.workspace.resolve_existing(str(args.get("path", ".")))
         if not resolved.path.is_dir():
-            raise ToolFailure("NOT_A_DIRECTORY", "Default cwd must be a directory.", category="validation")
+            raise ToolFailure(
+                "NOT_A_DIRECTORY",
+                "Default cwd must be a directory.",
+                category="validation",
+            )
         self.default_cwd = resolved.path
         return {
             "workspace": str(self.workspace.root),
             "default_cwd": resolved.display,
         }
 
-    def emit_tool_trace(self, name: str, args: dict[str, Any], payload: dict[str, Any], started_at: float) -> None:
+    def emit_tool_trace(
+        self,
+        name: str,
+        args: dict[str, Any],
+        payload: dict[str, Any],
+        started_at: float,
+    ) -> None:
         raw_error = payload.get("error")
         error = raw_error if isinstance(raw_error, dict) else {}
         duration_ms = int((time.time() - started_at) * 1000)
@@ -1667,7 +1962,9 @@ class Runtime:
             return
         event = {
             "event": "tool_call",
-            "timestamp": datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+            "timestamp": datetime.now(timezone.utc)
+            .isoformat(timespec="milliseconds")
+            .replace("+00:00", "Z"),
             "tool": name,
             "ok": bool(payload.get("ok", False)),
             "status": payload.get("status"),
@@ -1677,13 +1974,19 @@ class Runtime:
             "truncated": payload.get("truncated"),
             "args": redact_for_trace(args),
         }
-        print(json.dumps(event, sort_keys=True, separators=(",", ":")), file=sys.stderr, flush=True)
+        print(
+            json.dumps(event, sort_keys=True, separators=(",", ":")),
+            file=sys.stderr,
+            flush=True,
+        )
 
     def read_file(self, args: dict[str, Any]) -> dict[str, Any]:
         requested_path = str(args.get("path", ""))
         resolved = self.resolve_existing(requested_path)
         if resolved.path.is_dir():
-            raise ToolFailure("IS_DIRECTORY", "Path is a directory.", category="validation")
+            raise ToolFailure(
+                "IS_DIRECTORY", "Path is a directory.", category="validation"
+            )
         max_bytes = int(args.get("max_bytes", 131072))
         start_line = int(args.get("start_line", 1))
         end_line = args.get("end_line")
@@ -1691,25 +1994,41 @@ class Runtime:
         if end_line is not None and max_lines is not None:
             calculated_end_line = start_line + int(max_lines) - 1
             if int(end_line) != calculated_end_line:
-                raise ToolFailure("INVALID_ARGUMENT", "end_line and max_lines select different ranges.", category="validation")
+                raise ToolFailure(
+                    "INVALID_ARGUMENT",
+                    "end_line and max_lines select different ranges.",
+                    category="validation",
+                )
         if end_line is None and max_lines is not None:
             end_line = start_line + int(max_lines) - 1
         encoding = args.get("encoding", "utf-8")
         if encoding != "utf-8":
-            raise ToolFailure("UNSUPPORTED_ENCODING", "Only utf-8 is supported.", category="validation")
+            raise ToolFailure(
+                "UNSUPPORTED_ENCODING",
+                "Only utf-8 is supported.",
+                category="validation",
+            )
         total_bytes = resolved.path.stat().st_size
         with resolved.path.open("rb") as raw_handle:
             if b"\x00" in raw_handle.read(4096):
-                raise ToolFailure("BINARY_FILE", "Binary file read blocked for text tool.", category="validation")
+                raise ToolFailure(
+                    "BINARY_FILE",
+                    "Binary file read blocked for text tool.",
+                    category="validation",
+                )
         if start_line < 1:
-            raise ToolFailure("INVALID_ARGUMENT", "start_line must be >= 1.", category="validation")
+            raise ToolFailure(
+                "INVALID_ARGUMENT", "start_line must be >= 1.", category="validation"
+            )
         requested_end = int(end_line) if end_line is not None else None
         selected_parts: list[str] = []
         selected_bytes = 0
         total_lines = 0
         selection_complete = False
         try:
-            with resolved.path.open("r", encoding="utf-8", errors="strict", newline="") as handle:
+            with resolved.path.open(
+                "r", encoding="utf-8", errors="strict", newline=""
+            ) as handle:
                 for total_lines, line in enumerate(handle, start=1):
                     if total_lines < start_line:
                         continue
@@ -1719,12 +2038,21 @@ class Runtime:
                         continue
                     selected_parts.append(line)
                     selected_bytes += len(line.encode("utf-8"))
-                    if len(selected_parts) > DEFAULT_MAX_LINES or selected_bytes > max_bytes:
+                    if (
+                        len(selected_parts) > DEFAULT_MAX_LINES
+                        or selected_bytes > max_bytes
+                    ):
                         selection_complete = True
         except UnicodeDecodeError as exc:
-            raise ToolFailure("UNSUPPORTED_ENCODING", "File is not valid utf-8.", category="validation") from exc
+            raise ToolFailure(
+                "UNSUPPORTED_ENCODING",
+                "File is not valid utf-8.",
+                category="validation",
+            ) from exc
         selected = "".join(selected_parts)
-        truncation = truncate_text_head(selected, max_lines=DEFAULT_MAX_LINES, max_bytes=max_bytes)
+        truncation = truncate_text_head(
+            selected, max_lines=DEFAULT_MAX_LINES, max_bytes=max_bytes
+        )
         selected = truncation.content
         truncated = truncation.truncated or selection_complete
         end = requested_end if requested_end is not None else total_lines
@@ -1733,7 +2061,9 @@ class Runtime:
         actual_end = min(end, total_lines)
         if truncated and truncation.output_lines > 0:
             actual_end = min(total_lines, start_line + truncation.output_lines - 1)
-        next_start_line = actual_end + 1 if truncated and actual_end < total_lines else None
+        next_start_line = (
+            actual_end + 1 if truncated and actual_end < total_lines else None
+        )
         warnings = []
         if truncated:
             warnings.append("content truncated")
@@ -1750,7 +2080,8 @@ class Runtime:
             "total_bytes": total_bytes,
             "bytes_read": len(selected.encode("utf-8")),
             "truncated": truncated,
-            "truncated_by": truncation.truncated_by or ("bytes" if selection_complete else None),
+            "truncated_by": truncation.truncated_by
+            or ("bytes" if selection_complete else None),
             "first_line_exceeds_limit": truncation.first_line_exceeds_limit,
             "output_lines": truncation.output_lines,
             "output_bytes": truncation.output_bytes,
@@ -1771,7 +2102,9 @@ class Runtime:
     def list_dir(self, args: dict[str, Any]) -> dict[str, Any]:
         resolved = self.resolve_existing(str(args.get("path", ".")))
         if not resolved.path.is_dir():
-            raise ToolFailure("NOT_A_DIRECTORY", "Path is not a directory.", category="validation")
+            raise ToolFailure(
+                "NOT_A_DIRECTORY", "Path is not a directory.", category="validation"
+            )
         recursive = bool(args.get("recursive", False))
         max_depth = int(args.get("max_depth", 1))
         max_entries = int(args.get("max_entries", 1000))
@@ -1789,8 +2122,14 @@ class Runtime:
                 children = list(directory.iterdir())
             except OSError:
                 return
-            child_rel_paths = [normalize_rel_display(child, self.workspace.root) for child in children]
-            ignored = set() if include_ignored else self.workspace.git_ignored_paths(child_rel_paths)
+            child_rel_paths = [
+                normalize_rel_display(child, self.workspace.root) for child in children
+            ]
+            ignored = (
+                set()
+                if include_ignored
+                else self.workspace.git_ignored_paths(child_rel_paths)
+            )
             for child in children:
                 if self.workspace.is_ignored_path(
                     child,
@@ -1803,7 +2142,12 @@ class Runtime:
                 if len(entries) >= max_entries:
                     truncated = True
                     return
-                if recursive and depth < max_depth and child.is_dir() and not child.is_symlink():
+                if (
+                    recursive
+                    and depth < max_depth
+                    and child.is_dir()
+                    and not child.is_symlink()
+                ):
                     visit(child, depth + 1)
 
         visit(resolved.path, 1)
@@ -1818,7 +2162,9 @@ class Runtime:
     def list_files(self, args: dict[str, Any]) -> dict[str, Any]:
         resolved = self.resolve_existing(str(args.get("path", ".")))
         if not resolved.path.is_dir():
-            raise ToolFailure("NOT_A_DIRECTORY", "Path is not a directory.", category="validation")
+            raise ToolFailure(
+                "NOT_A_DIRECTORY", "Path is not a directory.", category="validation"
+            )
         patterns_arg = args.get("patterns")
         glob_arg = args.get("glob")
         if isinstance(patterns_arg, list) and patterns_arg:
@@ -1848,10 +2194,18 @@ class Runtime:
             # Filter by glob first so git check-ignore only sees candidates.
             candidates = [
                 (path, rel)
-                for path, rel in ((path, normalize_rel_display(path, self.workspace.root)) for path in batch)
-                if matches_any_glob(rel, patterns) and not matches_any_glob(rel, exclude_patterns)
+                for path, rel in (
+                    (path, normalize_rel_display(path, self.workspace.root))
+                    for path in batch
+                )
+                if matches_any_glob(rel, patterns)
+                and not matches_any_glob(rel, exclude_patterns)
             ]
-            ignored = set() if include_ignored else self.workspace.git_ignored_paths([rel for _, rel in candidates])
+            ignored = (
+                set()
+                if include_ignored
+                else self.workspace.git_ignored_paths([rel for _, rel in candidates])
+            )
             for path, rel in candidates:
                 if path.is_symlink() and not self.workspace.is_safe_existing_path(path):
                     continue
@@ -1868,7 +2222,11 @@ class Runtime:
                     break
             if truncated:
                 break
-        files.sort(key=lambda item: item["modified"] if args.get("sort") == "modified" else item["path"])
+        files.sort(
+            key=lambda item: (
+                item["modified"] if args.get("sort") == "modified" else item["path"]
+            )
+        )
         return {
             "path": resolved.display,
             "files": files,
@@ -1918,7 +2276,11 @@ class Runtime:
             args = list(args_base)
             if "/" in pattern:
                 args.append("--full-path")
-                if not pattern.startswith("/") and not pattern.startswith("**/") and pattern != "**":
+                if (
+                    not pattern.startswith("/")
+                    and not pattern.startswith("**/")
+                    and pattern != "**"
+                ):
                     effective = f"**/{pattern}"
             args.extend(["--", effective, "."])
             try:
@@ -1949,7 +2311,9 @@ class Runtime:
                     break
             if len(paths) >= max_results:
                 break
-        ignored = set() if include_ignored else self.workspace.git_ignored_paths(list(paths))
+        ignored = (
+            set() if include_ignored else self.workspace.git_ignored_paths(list(paths))
+        )
         files: list[dict[str, Any]] = []
         for rel, path in paths.items():
             if self.workspace.is_ignored_path(
@@ -1964,7 +2328,11 @@ class Runtime:
             except OSError:
                 continue
             files.append(file_entry(path, rel, stat))
-        files.sort(key=lambda item: item["modified"] if sort_key == "modified" else item["path"])
+        files.sort(
+            key=lambda item: (
+                item["modified"] if sort_key == "modified" else item["path"]
+            )
+        )
         truncated = len(paths) >= max_results
         return {
             "path": resolved.display,
@@ -1977,7 +2345,9 @@ class Runtime:
     def search_text(self, args: dict[str, Any]) -> dict[str, Any]:
         query = str(args.get("query", ""))
         if not query:
-            raise ToolFailure("INVALID_ARGUMENT", "query is required.", category="validation")
+            raise ToolFailure(
+                "INVALID_ARGUMENT", "query is required.", category="validation"
+            )
         resolved = self.resolve_existing(str(args.get("path", ".")))
         regex = bool(args.get("is_regex", False))
         case_sensitive = bool(args.get("case_sensitive", False))
@@ -2007,10 +2377,14 @@ class Runtime:
         try:
             compiled = re.compile(query, flags) if regex else None
         except re.error as exc:
-            raise ToolFailure("INVALID_ARGUMENT", f"Invalid regex: {exc}", category="validation") from exc
+            raise ToolFailure(
+                "INVALID_ARGUMENT", f"Invalid regex: {exc}", category="validation"
+            ) from exc
         needle = query if case_sensitive else query.lower()
 
-        roots = [resolved.path] if resolved.path.is_file() else walk_files(resolved.path)
+        roots = (
+            [resolved.path] if resolved.path.is_file() else walk_files(resolved.path)
+        )
         for batch in path_batches(iter(roots), 256):
             # Filter by glob first so git check-ignore runs once per batch of
             # candidates instead of once per walked file.
@@ -2056,7 +2430,17 @@ class Runtime:
                         continue
                     before = lines[max(0, index - context_lines) : index]
                     after = lines[index + 1 : index + 1 + context_lines]
-                    matches.append(search_match_item(rel, index + 1, column, line, before, after, max_preview_bytes))
+                    matches.append(
+                        search_match_item(
+                            rel,
+                            index + 1,
+                            column,
+                            line,
+                            before,
+                            after,
+                            max_preview_bytes,
+                        )
+                    )
         return {
             "query": query,
             "matches": matches,
@@ -2130,9 +2514,17 @@ class Runtime:
                 if event.get("type") != "match":
                     continue
                 data = event.get("data") if isinstance(event.get("data"), dict) else {}
-                path_text = data.get("path", {}).get("text") if isinstance(data.get("path"), dict) else None
+                path_text = (
+                    data.get("path", {}).get("text")
+                    if isinstance(data.get("path"), dict)
+                    else None
+                )
                 line_number = data.get("line_number")
-                line_text = data.get("lines", {}).get("text") if isinstance(data.get("lines"), dict) else ""
+                line_text = (
+                    data.get("lines", {}).get("text")
+                    if isinstance(data.get("lines"), dict)
+                    else ""
+                )
                 if not isinstance(path_text, str) or not isinstance(line_number, int):
                     continue
                 total += 1
@@ -2140,24 +2532,50 @@ class Runtime:
                     truncated = True
                     process.terminate()
                     break
-                rel = normalize_rel_display((self.workspace.root / path_text).resolve(), self.workspace.root)
-                submatches = data.get("submatches") if isinstance(data.get("submatches"), list) else []
-                first_submatch = submatches[0] if submatches and isinstance(submatches[0], dict) else {}
+                rel = normalize_rel_display(
+                    (self.workspace.root / path_text).resolve(), self.workspace.root
+                )
+                submatches = (
+                    data.get("submatches")
+                    if isinstance(data.get("submatches"), list)
+                    else []
+                )
+                first_submatch = (
+                    submatches[0]
+                    if submatches and isinstance(submatches[0], dict)
+                    else {}
+                )
                 column = int(first_submatch.get("start", 0)) + 1
-                sanitized = str(line_text).replace("\r\n", "\n").replace("\r", "").rstrip("\n")
+                sanitized = (
+                    str(line_text).replace("\r\n", "\n").replace("\r", "").rstrip("\n")
+                )
                 lines: list[str] = []
                 if context_lines > 0:
                     lines = file_cache.get(rel, [])
                     if rel not in file_cache:
                         try:
-                            lines = (self.workspace.root / rel).read_text(encoding="utf-8").splitlines()
+                            lines = (
+                                (self.workspace.root / rel)
+                                .read_text(encoding="utf-8")
+                                .splitlines()
+                            )
                         except OSError:
                             lines = []
                         file_cache[rel] = lines
                 index = line_number - 1
                 before = lines[max(0, index - context_lines) : index] if lines else []
                 after = lines[index + 1 : index + 1 + context_lines] if lines else []
-                matches.append(search_match_item(rel, line_number, column, sanitized, before, after, max_preview_bytes))
+                matches.append(
+                    search_match_item(
+                        rel,
+                        line_number,
+                        column,
+                        sanitized,
+                        before,
+                        after,
+                        max_preview_bytes,
+                    )
+                )
         finally:
             timeout.cancel()
             try:
@@ -2180,11 +2598,14 @@ class Runtime:
             "total_matches_exact": not truncated,
             "truncated": truncated,
             "engine": "rg",
-            "warnings": ["result limit reached; search stopped early"] if truncated else [],
+            "warnings": ["result limit reached; search stopped early"]
+            if truncated
+            else [],
         }
 
     def _analyze_patch(self, patch_text: str) -> dict[str, Any]:
         import difflib
+
         operations = parse_patch(patch_text)
         staged: dict[str, StagedFile] = {}
         summaries: list[str] = []
@@ -2198,7 +2619,9 @@ class Runtime:
         policy_capabilities: set[str] = set()
 
         for op in operations:
-            self._validate_patch_path(op.path, require_existing=op.kind in {"update", "delete"})
+            self._validate_patch_path(
+                op.path, require_existing=op.kind in {"update", "delete"}
+            )
             if op.kind in {"add", "update", "delete"}:
                 self.workspace.reject_write_symlink(op.path)
             if op.move_to:
@@ -2208,10 +2631,16 @@ class Runtime:
             if op.kind == "add":
                 target = self.workspace.resolve_for_write(op.path)
                 if target.existed:
-                    raise ToolFailure("PATCH_FAILED", "Cannot add file that already exists.", category="validation")
+                    raise ToolFailure(
+                        "PATCH_FAILED",
+                        "Cannot add file that already exists.",
+                        category="validation",
+                    )
                 baseline = FileBaseline.capture(target.path)
                 new_content = op.add_content or ""
-                staged[target.display] = StagedFile(target.display, target.path, new_content, baseline, None)
+                staged[target.display] = StagedFile(
+                    target.display, target.path, new_content, baseline, None
+                )
                 orig_lines = 0
                 add_lines = len(new_content.splitlines())
                 rem_lines = 0
@@ -2223,15 +2652,21 @@ class Runtime:
                     policy_capabilities.update(required)
                     decision = self._policy_decision_for_capabilities(required)
                     if decision == "deny":
-                        raise ToolFailure("ACCESS_DENIED", "Create is disabled by the active policy profile.", category="security")
+                        raise ToolFailure(
+                            "ACCESS_DENIED",
+                            "Create is disabled by the active policy profile.",
+                            category="security",
+                        )
                     file_risk = "ASK" if decision == "ask" else "ALLOW"
 
-                diff_lines = list(difflib.unified_diff(
-                    [],
-                    new_content.splitlines(keepends=True),
-                    fromfile="/dev/null",
-                    tofile="b/" + target.display,
-                ))
+                diff_lines = list(
+                    difflib.unified_diff(
+                        [],
+                        new_content.splitlines(keepends=True),
+                        fromfile="/dev/null",
+                        tofile="b/" + target.display,
+                    )
+                )
                 diff_chunks.append("".join(diff_lines))
                 affected.append({"path": target.display, "operation": "add"})
                 summaries.append(f"A {target.display}")
@@ -2239,62 +2674,116 @@ class Runtime:
             elif op.kind == "update":
                 source = self.workspace.resolve_existing(op.path)
                 if source.path.is_dir():
-                    raise ToolFailure("PATCH_FAILED", "Cannot update a directory.", category="validation")
+                    raise ToolFailure(
+                        "PATCH_FAILED",
+                        "Cannot update a directory.",
+                        category="validation",
+                    )
                 prior = staged.get(source.display)
                 if prior is not None and prior.content is None:
-                    raise ToolFailure("PATCH_FAILED", "Cannot update a deleted file.", category="validation")
-                baseline = prior.baseline if prior is not None else FileBaseline.capture(source.path)
-                orig_text = prior.content if prior is not None else baseline.text(source.display)
+                    raise ToolFailure(
+                        "PATCH_FAILED",
+                        "Cannot update a deleted file.",
+                        category="validation",
+                    )
+                baseline = (
+                    prior.baseline
+                    if prior is not None
+                    else FileBaseline.capture(source.path)
+                )
+                orig_text = (
+                    prior.content
+                    if prior is not None
+                    else baseline.text(source.display)
+                )
                 assert orig_text is not None
                 updated_text = apply_update_hunks(orig_text, op.hunks, op.path)
 
                 orig_list = orig_text.splitlines(keepends=True)
                 new_list = updated_text.splitlines(keepends=True)
-                diff_lines = list(difflib.unified_diff(
-                    orig_list,
-                    new_list,
-                    fromfile="a/" + source.display,
-                    tofile="b/" + source.display,
-                ))
+                diff_lines = list(
+                    difflib.unified_diff(
+                        orig_list,
+                        new_list,
+                        fromfile="a/" + source.display,
+                        tofile="b/" + source.display,
+                    )
+                )
                 diff_chunks.append("".join(diff_lines))
 
                 orig_lines = len(orig_text.splitlines())
-                add_lines = sum(1 for line in diff_lines if line.startswith("+") and not line.startswith("+++"))
-                rem_lines = sum(1 for line in diff_lines if line.startswith("-") and not line.startswith("---"))
+                add_lines = sum(
+                    1
+                    for line in diff_lines
+                    if line.startswith("+") and not line.startswith("+++")
+                )
+                rem_lines = sum(
+                    1
+                    for line in diff_lines
+                    if line.startswith("-") and not line.startswith("---")
+                )
                 # A replacement removes lines from the unified diff but is not
                 # destructive when the file keeps the same line count. Risk is
                 # based on net existing lines removed, so a one-line surgical
                 # fix in a two-line file remains an automatic operation.
                 removed_existing_lines = max(0, orig_lines - len(new_list))
-                pct_rem = round((removed_existing_lines / orig_lines) * 100, 2) if orig_lines > 0 else 0.0
+                pct_rem = (
+                    round((removed_existing_lines / orig_lines) * 100, 2)
+                    if orig_lines > 0
+                    else 0.0
+                )
 
                 file_risk = "ALLOW"
                 if self._profile_managed:
                     required = {"workspace.patch_small"}
-                    if removed_existing_lines > self.max_removed_lines or pct_rem > self.max_removed_percent:
+                    if (
+                        removed_existing_lines > self.max_removed_lines
+                        or pct_rem > self.max_removed_percent
+                    ):
                         required.add("workspace.patch_destructive")
                     policy_capabilities.update(required)
                     decision = self._policy_decision_for_capabilities(required)
                     if decision == "deny":
-                        raise ToolFailure("ACCESS_DENIED", "Patch is disabled by the active policy profile.", category="security")
+                        raise ToolFailure(
+                            "ACCESS_DENIED",
+                            "Patch is disabled by the active policy profile.",
+                            category="security",
+                        )
                     file_risk = "ASK" if decision == "ask" else "ALLOW"
-                elif removed_existing_lines > self.max_removed_lines or pct_rem > self.max_removed_percent:
+                elif (
+                    removed_existing_lines > self.max_removed_lines
+                    or pct_rem > self.max_removed_percent
+                ):
                     file_risk = "ASK"
 
-                staged[source.display] = StagedFile(source.display, source.path, updated_text, baseline, baseline.mode)
+                staged[source.display] = StagedFile(
+                    source.display, source.path, updated_text, baseline, baseline.mode
+                )
                 affected.append({"path": source.display, "operation": "update"})
                 summaries.append(f"M {source.display}")
 
             elif op.kind == "delete":
                 source = self.workspace.resolve_existing(op.path)
                 if source.path.is_dir():
-                    raise ToolFailure("PATCH_FAILED", "Cannot delete a directory with Delete File.", category="validation")
-                operation_decision = policy_decision(self.policy_profile, "workspace.delete", self.policy_rules)
+                    raise ToolFailure(
+                        "PATCH_FAILED",
+                        "Cannot delete a directory with Delete File.",
+                        category="validation",
+                    )
+                operation_decision = policy_decision(
+                    self.policy_profile, "workspace.delete", self.policy_rules
+                )
                 policy_capabilities.add("workspace.delete")
                 if operation_decision == "deny":
-                    raise ToolFailure("ACCESS_DENIED", "Delete is disabled by the active policy profile.", category="security")
+                    raise ToolFailure(
+                        "ACCESS_DENIED",
+                        "Delete is disabled by the active policy profile.",
+                        category="security",
+                    )
                 baseline = FileBaseline.capture(source.path)
-                staged[source.display] = StagedFile(source.display, source.path, None, baseline, None)
+                staged[source.display] = StagedFile(
+                    source.display, source.path, None, baseline, None
+                )
                 original_text = (baseline.data or b"").decode("utf-8", errors="replace")
                 orig_lines = len(original_text.splitlines())
                 add_lines = 0
@@ -2302,30 +2791,54 @@ class Runtime:
                 removed_existing_lines = orig_lines
                 pct_rem = 100.0 if orig_lines else 0.0
                 file_risk = "ASK" if operation_decision == "ask" else "ALLOW"
-                diff_chunks.append("".join(difflib.unified_diff(
-                    original_text.splitlines(keepends=True),
-                    [],
-                    fromfile="a/" + source.display,
-                    tofile="/dev/null",
-                )))
+                diff_chunks.append(
+                    "".join(
+                        difflib.unified_diff(
+                            original_text.splitlines(keepends=True),
+                            [],
+                            fromfile="a/" + source.display,
+                            tofile="/dev/null",
+                        )
+                    )
+                )
                 affected.append({"path": source.display, "operation": "delete"})
                 summaries.append(f"D {source.display}")
 
             elif op.kind == "move":
                 if not op.move_to:
-                    raise ToolFailure("PATCH_FAILED", "Move target is required.", category="validation")
+                    raise ToolFailure(
+                        "PATCH_FAILED",
+                        "Move target is required.",
+                        category="validation",
+                    )
                 source = self.workspace.resolve_existing(op.path)
                 target = self.workspace.resolve_for_write(op.move_to)
                 if source.path.is_dir():
-                    raise ToolFailure("PATCH_FAILED", "Cannot move a directory with Move File.", category="validation")
+                    raise ToolFailure(
+                        "PATCH_FAILED",
+                        "Cannot move a directory with Move File.",
+                        category="validation",
+                    )
                 if target.existed:
-                    raise ToolFailure("PATCH_FAILED", "Move target already exists.", category="validation")
-                operation_decision = policy_decision(self.policy_profile, "workspace.move", self.policy_rules)
+                    raise ToolFailure(
+                        "PATCH_FAILED",
+                        "Move target already exists.",
+                        category="validation",
+                    )
+                operation_decision = policy_decision(
+                    self.policy_profile, "workspace.move", self.policy_rules
+                )
                 policy_capabilities.add("workspace.move")
                 if operation_decision == "deny":
-                    raise ToolFailure("ACCESS_DENIED", "Move is disabled by the active policy profile.", category="security")
+                    raise ToolFailure(
+                        "ACCESS_DENIED",
+                        "Move is disabled by the active policy profile.",
+                        category="security",
+                    )
                 baseline = FileBaseline.capture(source.path)
-                staged[source.display] = StagedFile(source.display, source.path, None, baseline, None)
+                staged[source.display] = StagedFile(
+                    source.display, source.path, None, baseline, None
+                )
                 staged[target.display] = StagedFile(
                     target.display,
                     target.path,
@@ -2339,44 +2852,62 @@ class Runtime:
                 removed_existing_lines = 0
                 pct_rem = 0.0
                 file_risk = "ASK" if operation_decision == "ask" else "ALLOW"
-                diff_chunks.append("".join(difflib.unified_diff(
-                    baseline.text(source.display).splitlines(keepends=True),
-                    [],
-                    fromfile="a/" + source.display,
-                    tofile="/dev/null",
-                )))
-                diff_chunks.append("".join(difflib.unified_diff(
-                    [],
-                    baseline.text(source.display).splitlines(keepends=True),
-                    fromfile="/dev/null",
-                    tofile="b/" + target.display,
-                )))
-                affected.extend([
-                    {"path": source.display, "operation": "move_from"},
-                    {"path": target.display, "operation": "move_to"},
-                ])
+                diff_chunks.append(
+                    "".join(
+                        difflib.unified_diff(
+                            baseline.text(source.display).splitlines(keepends=True),
+                            [],
+                            fromfile="a/" + source.display,
+                            tofile="/dev/null",
+                        )
+                    )
+                )
+                diff_chunks.append(
+                    "".join(
+                        difflib.unified_diff(
+                            [],
+                            baseline.text(source.display).splitlines(keepends=True),
+                            fromfile="/dev/null",
+                            tofile="b/" + target.display,
+                        )
+                    )
+                )
+                affected.extend(
+                    [
+                        {"path": source.display, "operation": "move_from"},
+                        {"path": target.display, "operation": "move_to"},
+                    ]
+                )
                 summaries.append(f"M {source.display} -> {target.display}")
 
             total_additions += add_lines
             total_removals += rem_lines
             total_orig_lines += orig_lines
-            file_metrics.append({
-                "path": op.path,
-                "operation": op.kind,
-                "additions": add_lines,
-                "removals": rem_lines,
-                "removed_existing_lines": removed_existing_lines if op.kind == "update" else rem_lines,
-                "original_line_count": orig_lines,
-                "percentage_removed": pct_rem,
-                "risk": file_risk,
-                "risk_class": "high" if file_risk == "ASK" else "normal",
-            })
+            file_metrics.append(
+                {
+                    "path": op.path,
+                    "operation": op.kind,
+                    "additions": add_lines,
+                    "removals": rem_lines,
+                    "removed_existing_lines": removed_existing_lines
+                    if op.kind == "update"
+                    else rem_lines,
+                    "original_line_count": orig_lines,
+                    "percentage_removed": pct_rem,
+                    "risk": file_risk,
+                    "risk_class": "high" if file_risk == "ASK" else "normal",
+                }
+            )
             if file_risk == "ASK" and overall_risk != "DENY":
                 overall_risk = "ASK"
 
         if not file_metrics:
-            raise ToolFailure("PATCH_FAILED", "No files were modified.", category="validation")
-        total_removed_existing_lines = sum(int(item.get("removed_existing_lines", 0)) for item in file_metrics)
+            raise ToolFailure(
+                "PATCH_FAILED", "No files were modified.", category="validation"
+            )
+        total_removed_existing_lines = sum(
+            int(item.get("removed_existing_lines", 0)) for item in file_metrics
+        )
         total_pct_rem = (
             round((total_removed_existing_lines / total_orig_lines) * 100, 2)
             if total_orig_lines > 0
@@ -2408,20 +2939,27 @@ class Runtime:
             analysis = self._analyze_patch(patch_text)
 
             if analysis["risk"] == "DENY":
-                raise ToolFailure("ACCESS_DENIED", "Patch operation is unconditionally denied.", category="security")
+                raise ToolFailure(
+                    "ACCESS_DENIED",
+                    "Patch operation is unconditionally denied.",
+                    category="security",
+                )
             elif analysis["risk"] == "ASK":
                 if approval_id:
                     from .approval import ApprovalEngine
+
                     approval_engine = ApprovalEngine()
                     approval_engine.consume(
                         approval_id,
                         patch_text,
                         str(self.workspace.root),
                         sandbox_id=self.server_instance_id,
-                        capabilities=analysis["policy_capabilities"] or ["high_risk_patch"],
+                        capabilities=analysis["policy_capabilities"]
+                        or ["high_risk_patch"],
                     )
                 else:
                     from .approval import ApprovalEngine
+
                     approval_engine = ApprovalEngine()
                     return approval_engine.request_approval(
                         action=patch_text,
@@ -2430,7 +2968,8 @@ class Runtime:
                         risk="high_risk_patch",
                         network=False,
                         sandbox_id=self.server_instance_id,
-                        capabilities=analysis["policy_capabilities"] or ["high_risk_patch"],
+                        capabilities=analysis["policy_capabilities"]
+                        or ["high_risk_patch"],
                     )
 
             if not dry_run:
@@ -2465,43 +3004,68 @@ class Runtime:
             if change.display in self.patch_baselines:
                 continue
             self.patch_baselines[change.display] = (
-                None if change.baseline.data is None else change.baseline.data.decode("utf-8", errors="replace")
+                None
+                if change.baseline.data is None
+                else change.baseline.data.decode("utf-8", errors="replace")
             )
-            
+
         if self.sandbox is not None:
             for change in staged:
                 if change.content is None:
                     self.sandbox.safe_delete_file(change.display)
                 else:
-                    self.sandbox.safe_write_file(change.display, change.content, change.mode)
+                    self.sandbox.safe_write_file(
+                        change.display, change.content, change.mode
+                    )
 
     def _operation_workdir(self, args: dict[str, Any]) -> ResolvedPath:
         workdir_arg = args.get("workdir", args.get("cwd", "."))
-        if "workdir" in args and "cwd" in args and str(args["workdir"]) != str(args["cwd"]):
-            raise ToolFailure("INVALID_ARGUMENT", "workdir and cwd refer to different directories.", category="validation")
+        if (
+            "workdir" in args
+            and "cwd" in args
+            and str(args["workdir"]) != str(args["cwd"])
+        ):
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                "workdir and cwd refer to different directories.",
+                category="validation",
+            )
         workdir = self.resolve_existing(str(workdir_arg))
         if not workdir.path.is_dir():
-            raise ToolFailure("NOT_A_DIRECTORY", "workdir is not a directory.", category="validation")
+            raise ToolFailure(
+                "NOT_A_DIRECTORY", "workdir is not a directory.", category="validation"
+            )
         return workdir
 
-    def _required_command_capabilities(self, cmd: str, args: dict[str, Any]) -> set[str]:
+    def _required_command_capabilities(
+        self, cmd: str, args: dict[str, Any]
+    ) -> set[str]:
         if self.dangerously_skip_all_permissions:
             return set()
         self._check_command_paths(cmd)
         required: set[str] = set()
         env = args.get("env", {})
-        if isinstance(env, dict) and any(is_filtered_env_var(str(key), str(value)) for key, value in env.items()):
+        if isinstance(env, dict) and any(
+            is_filtered_env_var(str(key), str(value)) for key, value in env.items()
+        ):
             required.add("sensitive_env")
-        if not self.capabilities.inline_script and inline_script_command(cmd) is not None:
+        if (
+            not self.capabilities.inline_script
+            and inline_script_command(cmd) is not None
+        ):
             required.add(INLINE_SCRIPT_PERMISSION)
         if not self.capabilities.shell_expansion and SHELL_EXPANSION_RE.search(cmd):
             required.add("shell_expansion")
         compact = " ".join(cmd.split()).lower()
-        if re.search(r"(^|[;&|]\s*)rm\s+(-[^\s]*r[^\s]*f|-?[^\s]*f[^\s]*r)\s+/", compact) or DESTRUCTIVE_RE.search(cmd):
+        if re.search(
+            r"(^|[;&|]\s*)rm\s+(-[^\s]*r[^\s]*f|-?[^\s]*f[^\s]*r)\s+/", compact
+        ) or DESTRUCTIVE_RE.search(cmd):
             required.add("destructive_command")
-        if (
-            not self.allow_network
-            and (bool(args.get("network_required", False)) or (NETWORK_RE.search(cmd) and not is_literal_network_reference_command(cmd)))
+        if not self.allow_network and (
+            bool(args.get("network_required", False))
+            or (
+                NETWORK_RE.search(cmd) and not is_literal_network_reference_command(cmd)
+            )
         ):
             required.add("network")
         return required
@@ -2510,11 +3074,17 @@ class Runtime:
     def _network_capability(cmd: str, args: dict[str, Any]) -> str | None:
         if not (
             bool(args.get("network_required", False))
-            or (NETWORK_RE.search(cmd) and not is_literal_network_reference_command(cmd))
+            or (
+                NETWORK_RE.search(cmd) and not is_literal_network_reference_command(cmd)
+            )
         ):
             return None
         local_markers = ("localhost", "127.0.0.1", "[::1]", "::1")
-        return "network.host_local" if any(marker in cmd.lower() for marker in local_markers) else "network.public"
+        return (
+            "network.host_local"
+            if any(marker in cmd.lower() for marker in local_markers)
+            else "network.public"
+        )
 
     @staticmethod
     def _command_domain_capabilities(cmd: str) -> set[str]:
@@ -2522,9 +3092,15 @@ class Runtime:
 
         compact = " ".join(cmd.split()).lower()
         required: set[str] = set()
-        if re.search(r"\b(?:npm|pnpm|yarn|bun|pip|uv|poetry|cargo|go)\s+(?:install|add|sync|tidy)\b", compact):
+        if re.search(
+            r"\b(?:npm|pnpm|yarn|bun|pip|uv|poetry|cargo|go)\s+(?:install|add|sync|tidy)\b",
+            compact,
+        ):
             required.add("deps.install")
-        if re.search(r"\b(?:alembic\s+upgrade|prisma\s+db\s+(?:push|migrate)|\w*migrate\b)", compact):
+        if re.search(
+            r"\b(?:alembic\s+upgrade|prisma\s+db\s+(?:push|migrate)|\w*migrate\b)",
+            compact,
+        ):
             required.add("db.migrate")
         if re.search(r"\bgit\s+(?:branch|switch|checkout\s+-b)\b", compact):
             required.add("git.branch")
@@ -2534,14 +3110,20 @@ class Runtime:
             required.add("git.push")
         return required
 
-    def _profile_command_capabilities(self, cmd: str, args: dict[str, Any], registered_task: Any = None) -> set[str]:
-        required = {"exec.registered" if registered_task is not None else "exec.arbitrary"}
+    def _profile_command_capabilities(
+        self, cmd: str, args: dict[str, Any], registered_task: Any = None
+    ) -> set[str]:
+        required = {
+            "exec.registered" if registered_task is not None else "exec.arbitrary"
+        }
         required.update(self._command_domain_capabilities(cmd))
         network = self._network_capability(cmd, args)
         if network:
             required.add(network)
         env = args.get("env", {})
-        if isinstance(env, dict) and any(is_filtered_env_var(str(key), str(value)) for key, value in env.items()):
+        if isinstance(env, dict) and any(
+            is_filtered_env_var(str(key), str(value)) for key, value in env.items()
+        ):
             required.add("env.sensitive")
         return required
 
@@ -2564,7 +3146,12 @@ class Runtime:
         required = self._profile_command_capabilities(cmd, args, registered_task)
         decision = self._policy_decision_for_capabilities(required)
         if decision == "deny":
-            blocked = sorted(capability for capability in required if policy_decision(self.policy_profile, capability, self.policy_rules) == "deny")
+            blocked = sorted(
+                capability
+                for capability in required
+                if policy_decision(self.policy_profile, capability, self.policy_rules)
+                == "deny"
+            )
             raise ToolFailure(
                 "ACCESS_DENIED",
                 "Operation is disabled by the active policy profile.",
@@ -2584,7 +3171,9 @@ class Runtime:
                     str(workdir.path),
                     env=args.get("env", {}),
                     task_id=task_id,
-                    network=any(capability.startswith("network.") for capability in required),
+                    network=any(
+                        capability.startswith("network.") for capability in required
+                    ),
                     sandbox=True,
                     sandbox_id=self.server_instance_id,
                 )
@@ -2595,8 +3184,12 @@ class Runtime:
                 action=action,
                 cwd=str(workdir.path),
                 reason="Permission required by the active policy profile.",
-                risk="high" if required & {"env.sensitive", "git.push", "db.migrate"} else "medium",
-                network=any(capability.startswith("network.") for capability in required),
+                risk="high"
+                if required & {"env.sensitive", "git.push", "db.migrate"}
+                else "medium",
+                network=any(
+                    capability.startswith("network.") for capability in required
+                ),
                 env=args.get("env", {}),
                 task_id=task_id,
                 sandbox=True,
@@ -2626,7 +3219,11 @@ class Runtime:
         approval_id = args.get("approval_id")
         if approval_id:
             approval_engine.consume(
-                str(approval_id), action, str(self.workspace.root), sandbox_id=self.server_instance_id, capabilities=[capability]
+                str(approval_id),
+                action,
+                str(self.workspace.root),
+                sandbox_id=self.server_instance_id,
+                capabilities=[capability],
             )
             return None
         return approval_engine.request_approval(
@@ -2642,9 +3239,18 @@ class Runtime:
     def _profile_exec_command(self, args: dict[str, Any]) -> dict[str, Any]:
         cmd = args.get("cmd", "")
         if not isinstance(cmd, str) or not cmd:
-            raise ToolFailure("INVALID_ARGUMENT", "cmd is required and must be a string.", category="validation")
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                "cmd is required and must be a string.",
+                category="validation",
+            )
         registered_task = self._registered_direct_task(cmd)
-        authorized = self._profile_authorize_command(cmd, args, registered_task=registered_task, task_id=str(args.get("task_id", "")))
+        authorized = self._profile_authorize_command(
+            cmd,
+            args,
+            registered_task=registered_task,
+            task_id=str(args.get("task_id", "")),
+        )
         if isinstance(authorized, dict):
             return authorized
         internal_args = dict(args)
@@ -2665,7 +3271,11 @@ class Runtime:
             return self._profile_exec_command(args)
         cmd = args.get("cmd", "")
         if not isinstance(cmd, str) or not cmd:
-            raise ToolFailure("INVALID_ARGUMENT", "cmd is required and must be a string.", category="validation")
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                "cmd is required and must be a string.",
+                category="validation",
+            )
         workdir = self._operation_workdir(args)
         from .approval import ApprovalEngine
 
@@ -2683,15 +3293,29 @@ class Runtime:
             )
         registered_task = self._registered_direct_task(cmd)
         if registered_task is not None and registered_task.approval_class == "DENY":
-            raise ToolFailure("ACCESS_DENIED", "The registered task is unconditionally denied.", category="security")
+            raise ToolFailure(
+                "ACCESS_DENIED",
+                "The registered task is unconditionally denied.",
+                category="security",
+            )
         if self.dangerously_skip_all_permissions or self.permission_mode == "trusted":
             decision = "ALLOW"
-        elif registered_task is not None and not registered_task.network_requirement and registered_task.approval_class == "ALLOW":
+        elif (
+            registered_task is not None
+            and not registered_task.network_requirement
+            and registered_task.approval_class == "ALLOW"
+        ):
             decision = "ALLOW"
         else:
-            decision = str(args.get("approval_class") or approval_engine.evaluate_command(cmd))
+            decision = str(
+                args.get("approval_class") or approval_engine.evaluate_command(cmd)
+            )
         if decision == "DENY":
-            raise ToolFailure("ACCESS_DENIED", "Command is unconditionally denied.", category="security")
+            raise ToolFailure(
+                "ACCESS_DENIED",
+                "Command is unconditionally denied.",
+                category="security",
+            )
 
         internal_args = dict(args)
         if approval_id:
@@ -2732,9 +3356,15 @@ class Runtime:
         internal_args["_resolved_workdir"] = workdir.path
         return self._execute_command_legacy(internal_args)
 
-    def _execute_task_argv(self, argv: list[str], args: dict[str, Any], capabilities: set[str]) -> dict[str, Any]:
+    def _execute_task_argv(
+        self, argv: list[str], args: dict[str, Any], capabilities: set[str]
+    ) -> dict[str, Any]:
         if not argv or any(not isinstance(item, str) or not item for item in argv):
-            raise ToolFailure("INVALID_ARGUMENT", "Task produced an invalid argv.", category="validation")
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                "Task produced an invalid argv.",
+                category="validation",
+            )
         task_args = dict(args)
         task_args["_resolved_workdir"] = self._operation_workdir(args).path
         task_args["cmd"] = argv
@@ -2756,12 +3386,17 @@ class Runtime:
             cmd_str = cmd
 
         if not cmd:
-            raise ToolFailure("INVALID_ARGUMENT", "cmd is required.", category="validation")
-            
+            raise ToolFailure(
+                "INVALID_ARGUMENT", "cmd is required.", category="validation"
+            )
+
         approval_id = args.get("approval_id")
         from .approval import ApprovalEngine
+
         approval_engine = ApprovalEngine()
-        approved_caps: list[str] = [str(item) for item in args.get("_approved_capabilities", [])]
+        approved_caps: list[str] = [
+            str(item) for item in args.get("_approved_capabilities", [])
+        ]
         network_required = bool(args.get("network_required", False))
 
         if approval_id:
@@ -2775,11 +3410,21 @@ class Runtime:
                 sandbox=True,
             )
         else:
-            decision = args.get("approval_class") or approval_engine.evaluate_command(cmd_str)
+            decision = args.get("approval_class") or approval_engine.evaluate_command(
+                cmd_str
+            )
             if decision == "DENY":
-                raise ToolFailure("ACCESS_DENIED", "Command is unconditionally denied.", category="security")
+                raise ToolFailure(
+                    "ACCESS_DENIED",
+                    "Command is unconditionally denied.",
+                    category="security",
+                )
             elif decision == "ASK":
-                req_caps = ["destructive_command"] if "rm " in cmd_str or "reset" in cmd_str else ["exec"]
+                req_caps = (
+                    ["destructive_command"]
+                    if "rm " in cmd_str or "reset" in cmd_str
+                    else ["exec"]
+                )
                 if network_required:
                     req_caps.append("network")
                 return approval_engine.request_approval(
@@ -2795,23 +3440,40 @@ class Runtime:
 
         resolved_workdir = args.get("_resolved_workdir")
         if isinstance(resolved_workdir, Path):
-            workdir = ResolvedPath(normalize_rel_display(resolved_workdir, self.workspace.root), resolved_workdir, True)
+            workdir = ResolvedPath(
+                normalize_rel_display(resolved_workdir, self.workspace.root),
+                resolved_workdir,
+                True,
+            )
         else:
             workdir_arg = args.get("workdir", args.get("cwd", "."))
-            if "workdir" in args and "cwd" in args and str(args["workdir"]) != str(args["cwd"]):
-                raise ToolFailure("INVALID_ARGUMENT", "workdir and cwd refer to different directories.", category="validation")
+            if (
+                "workdir" in args
+                and "cwd" in args
+                and str(args["workdir"]) != str(args["cwd"])
+            ):
+                raise ToolFailure(
+                    "INVALID_ARGUMENT",
+                    "workdir and cwd refer to different directories.",
+                    category="validation",
+                )
             workdir = self.resolve_existing(str(workdir_arg))
         if not workdir.path.is_dir():
-            raise ToolFailure("NOT_A_DIRECTORY", "workdir is not a directory.", category="validation")
+            raise ToolFailure(
+                "NOT_A_DIRECTORY", "workdir is not a directory.", category="validation"
+            )
         if not args.get("_argv_task"):
-            self._check_command_policy(cmd_str, args, granted_capabilities=set(approved_caps))
-        
+            self._check_command_policy(
+                cmd_str, args, granted_capabilities=set(approved_caps)
+            )
+
         if self.sandbox is None:
             from .sandbox import ExecutionSandbox
+
             self.sandbox = ExecutionSandbox.create(self.workspace.root)
 
         sandbox_workdir = self.sandbox.translate_path_for_exec(workdir.path)
-        
+
         timeout_ms = int(args.get("timeout_ms", 30000))
         yield_ms = int(args.get("yield_time_ms", 10000))
         max_output_bytes = int(args.get("max_output_bytes", 65536))
@@ -2824,7 +3486,11 @@ class Runtime:
             allow_sensitive=(
                 "sensitive_env" in approved_capabilities
                 or "env.sensitive" in approved_capabilities
-                or (self._profile_managed and self._policy_decision_for_capabilities({"env.sensitive"}) == "auto")
+                or (
+                    self._profile_managed
+                    and self._policy_decision_for_capabilities({"env.sensitive"})
+                    == "auto"
+                )
             ),
         )
         start = time.time()
@@ -2834,14 +3500,18 @@ class Runtime:
         popen_cmd: Any = cmd
         popen_shell = False
         popen_extra = process_group_popen_kwargs()
-        
+
         import shutil
+
         if tty and os.name == "nt":
             raise ToolFailure(
                 "TTY_UNSUPPORTED",
                 "tty=true requires ConPTY support, which is not available in this build.",
                 category="runtime",
-                details={"platform": os.name, "retry_hint": "Run the command without tty=true."},
+                details={
+                    "platform": os.name,
+                    "retry_hint": "Run the command without tty=true.",
+                },
             )
         # Windows has no bubblewrap. Permit process-only execution only when
         # the operator explicitly selected trusted mode; safe mode remains a
@@ -2852,19 +3522,29 @@ class Runtime:
                 "The optional Podman backend is detected but not implemented in this release.",
                 category="security",
             )
-        bwrap_available = self.sandbox_backend.name == "bwrap" and shutil.which("bwrap") is not None
+        bwrap_available = (
+            self.sandbox_backend.name == "bwrap" and shutil.which("bwrap") is not None
+        )
         if self.sandbox_backend.name == "unsafe":
             bwrap_available = False
             sandbox_workdir = workdir.path
-        if self.sandbox_backend.name != "unsafe" and not bwrap_available and not (os.name == "nt" and self.permission_mode == "trusted"):
-            raise ToolFailure("SANDBOX_UNAVAILABLE", "bwrap is required for execution sandbox but not found.", category="security")
+        if (
+            self.sandbox_backend.name != "unsafe"
+            and not bwrap_available
+            and not (os.name == "nt" and self.permission_mode == "trusted")
+        ):
+            raise ToolFailure(
+                "SANDBOX_UNAVAILABLE",
+                "bwrap is required for execution sandbox but not found.",
+                category="security",
+            )
         if not bwrap_available and os.name == "nt":
             # Windows has no bwrap equivalent in this runtime. This path is
             # intentionally available only in explicit trusted mode; use the
             # requested workspace so compiler outputs and process semantics
             # remain compatible with the trusted host execution contract.
             sandbox_workdir = workdir.path
-            
+
         network_capability = args.get("_network_capability")
         allow_network = (
             "network" in approved_capabilities
@@ -2873,19 +3553,28 @@ class Runtime:
             or (
                 self._profile_managed
                 and isinstance(network_capability, str)
-                and self._policy_decision_for_capabilities({network_capability}) == "auto"
+                and self._policy_decision_for_capabilities({network_capability})
+                == "auto"
             )
             or (not self._profile_managed and self.permission_mode == "trusted")
         )
-        bwrap_args = self.sandbox.get_bwrap_args(allow_network=allow_network) if bwrap_available else []
+        bwrap_args = (
+            self.sandbox.get_bwrap_args(allow_network=allow_network)
+            if bwrap_available
+            else []
+        )
         if isinstance(cmd, str):
-            actual_cmd = (["cmd.exe", "/d", "/s", "/c", cmd] if os.name == "nt" else ["/bin/sh", "-c", cmd])
+            actual_cmd = (
+                ["cmd.exe", "/d", "/s", "/c", cmd]
+                if os.name == "nt"
+                else ["/bin/sh", "-c", cmd]
+            )
             popen_shell = False
         else:
             actual_cmd = cmd
             popen_shell = False
-            
-        # We still initialize landlock as defense in depth if bwrap is missing somehow, 
+
+        # We still initialize landlock as defense in depth if bwrap is missing somehow,
         # but bwrap provides the primary namespace isolation.
         if self.landlock_enabled():
             try:
@@ -2907,7 +3596,9 @@ class Runtime:
             if self._closed:
                 if landlock_fd is not None:
                     os.close(landlock_fd)
-                raise ToolFailure("SESSION_CLOSED", "Runtime is closed.", category="runtime")
+                raise ToolFailure(
+                    "SESSION_CLOSED", "Runtime is closed.", category="runtime"
+                )
             if len(self.sessions) + self.starting_sessions >= MAX_ACTIVE_EXEC_SESSIONS:
                 if landlock_fd is not None:
                     os.close(landlock_fd)
@@ -2923,7 +3614,6 @@ class Runtime:
         session: ExecSession | None = None
         registered = False
         slot_released = False
-
 
         try:
             process, pty_master_fd = spawn_process(
@@ -2947,7 +3637,11 @@ class Runtime:
                     self.sessions[session.session_id] = session
                     registered = True
             if not registered:
-                raise ToolFailure("SESSION_CLOSED", "Runtime closed while the command was starting.", category="runtime")
+                raise ToolFailure(
+                    "SESSION_CLOSED",
+                    "Runtime closed while the command was starting.",
+                    category="runtime",
+                )
         except Exception:
             with self.sessions_lock:
                 if not registered and not slot_released:
@@ -3026,14 +3720,21 @@ class Runtime:
             return
         self._check_command_paths(cmd)
         env = args.get("env", {})
-        if "sensitive_env" not in granted and isinstance(env, dict) and any(
-            is_filtered_env_var(str(key), str(value)) for key, value in env.items()
+        if (
+            "sensitive_env" not in granted
+            and isinstance(env, dict)
+            and any(
+                is_filtered_env_var(str(key), str(value)) for key, value in env.items()
+            )
         ):
             raise ToolFailure(
                 "PERMISSION_REQUIRED",
                 "Sensitive or loader/startup environment variables require explicit permission.",
                 category="permission",
-                details={"permission": "sensitive_env", "env_keys": sorted(str(key) for key in env)},
+                details={
+                    "permission": "sensitive_env",
+                    "env_keys": sorted(str(key) for key in env),
+                },
             )
         if "inline_script" not in granted and not self.capabilities.inline_script:
             inline_script = inline_script_command(cmd)
@@ -3045,14 +3746,20 @@ class Runtime:
                     details={"permission": INLINE_SCRIPT_PERMISSION, **inline_script},
                 )
         compact = " ".join(cmd.split()).lower()
-        if "shell_expansion" not in granted and not self.capabilities.shell_expansion and SHELL_EXPANSION_RE.search(cmd):
+        if (
+            "shell_expansion" not in granted
+            and not self.capabilities.shell_expansion
+            and SHELL_EXPANSION_RE.search(cmd)
+        ):
             raise ToolFailure(
                 "PERMISSION_REQUIRED",
                 "Shell command substitution and parameter expansion require explicit permission.",
                 category="permission",
                 details={"permission": "shell_expansion", "command": compact},
             )
-        if "destructive_command" not in granted and re.search(r"(^|[;&|]\s*)rm\s+(-[^\s]*r[^\s]*f|-?[^\s]*f[^\s]*r)\s+/", compact):
+        if "destructive_command" not in granted and re.search(
+            r"(^|[;&|]\s*)rm\s+(-[^\s]*r[^\s]*f|-?[^\s]*f[^\s]*r)\s+/", compact
+        ):
             raise ToolFailure(
                 "PERMISSION_REQUIRED",
                 "Destructive commands are blocked without explicit permission.",
@@ -3066,7 +3773,12 @@ class Runtime:
                 category="permission",
                 details={"permission": "destructive_command", "command": compact},
             )
-        if "network" not in granted and not self.allow_network and NETWORK_RE.search(cmd) and not is_literal_network_reference_command(cmd):
+        if (
+            "network" not in granted
+            and not self.allow_network
+            and NETWORK_RE.search(cmd)
+            and not is_literal_network_reference_command(cmd)
+        ):
             raise ToolFailure(
                 "PERMISSION_REQUIRED",
                 "Network access is denied by default.",
@@ -3124,7 +3836,11 @@ class Runtime:
                 "INVALID_ARGUMENT",
                 "Command path could not be inspected safely.",
                 category="validation",
-                details={"path": candidate[:200], "errno": exc.errno, "reason": exc.strerror},
+                details={
+                    "path": candidate[:200],
+                    "errno": exc.errno,
+                    "reason": exc.strerror,
+                },
             ) from exc
         except ToolFailure as exc:
             if exc.code == "NOT_FOUND":
@@ -3133,24 +3849,42 @@ class Runtime:
                 except ToolFailure as write_exc:
                     if write_exc.code == "NOT_FOUND":
                         return
-                    if write_exc.code in {"PATH_OUTSIDE_WORKSPACE", "ABSOLUTE_PATH_DENIED", "SYMLINK_ESCAPE"}:
+                    if write_exc.code in {
+                        "PATH_OUTSIDE_WORKSPACE",
+                        "ABSOLUTE_PATH_DENIED",
+                        "SYMLINK_ESCAPE",
+                    }:
                         raise escape_failure() from write_exc
                     raise
                 return
-            if exc.code in {"PATH_OUTSIDE_WORKSPACE", "ABSOLUTE_PATH_DENIED", "SYMLINK_ESCAPE"}:
+            if exc.code in {
+                "PATH_OUTSIDE_WORKSPACE",
+                "ABSOLUTE_PATH_DENIED",
+                "SYMLINK_ESCAPE",
+            }:
                 raise escape_failure() from exc
 
     @staticmethod
     def _contains_always_denied_command(cmd: str) -> bool:
         normalized = cmd.replace("\\", "/").lower()
-        if any(marker in normalized for marker in ("docker.sock", "podman.sock", "/var/run/docker", "/run/docker")):
+        if any(
+            marker in normalized
+            for marker in (
+                "docker.sock",
+                "podman.sock",
+                "/var/run/docker",
+                "/run/docker",
+            )
+        ):
             return True
         try:
             tokens = shlex_split(strip_heredoc_payloads(cmd))
         except ValueError:
             tokens = cmd.split()
         denied = {"sudo", "su", "doas", "mount", "umount", "docker", "podman"}
-        return any(PurePosixPath(token.replace("\\", "/")).name in denied for token in tokens)
+        return any(
+            PurePosixPath(token.replace("\\", "/")).name in denied for token in tokens
+        )
 
     def _registered_direct_task(self, cmd: str):
         try:
@@ -3162,7 +3896,11 @@ class Runtime:
     def _reject_setuid_executable(self, executable: str) -> None:
         if not executable:
             return
-        executable_path = Path(executable) if "/" in executable else Path(shutil.which(executable) or "")
+        executable_path = (
+            Path(executable)
+            if "/" in executable
+            else Path(shutil.which(executable) or "")
+        )
         if not str(executable_path):
             return
         try:
@@ -3174,7 +3912,10 @@ class Runtime:
                 "PERMISSION_REQUIRED",
                 "Setuid/setgid executables are denied because they can bypass runtime process guards.",
                 category="permission",
-                details={"permission": "privileged_executable", "path": str(executable_path)},
+                details={
+                    "permission": "privileged_executable",
+                    "path": str(executable_path),
+                },
             )
 
     def _command_env(
@@ -3186,8 +3927,16 @@ class Runtime:
     ) -> dict[str, str]:
         env = self._base_command_env()
         if not self.dangerously_skip_all_permissions and not allow_sensitive:
-            env = {key: value for key, value in env.items() if not is_filtered_env_var(key, value)}
-            env = {key: value for key, value in env.items() if key not in ECOSYSTEM_CACHE_ENV_NAMES}
+            env = {
+                key: value
+                for key, value in env.items()
+                if not is_filtered_env_var(key, value)
+            }
+            env = {
+                key: value
+                for key, value in env.items()
+                if key not in ECOSYSTEM_CACHE_ENV_NAMES
+            }
         if self.shell_env_policy.exclude:
             env = {
                 key: value
@@ -3200,13 +3949,19 @@ class Runtime:
                 for key, value in env.items()
                 if env_pattern_matches(key, self.shell_env_policy.include_only)
             }
-        env.update({str(key): str(value) for key, value in self.shell_env_policy.set.items()})
+        env.update(
+            {str(key): str(value) for key, value in self.shell_env_policy.set.items()}
+        )
         self._ensure_runtime_dirs()
         if isinstance(extra, dict):
             for key, value in extra.items():
                 key_text = str(key)
                 value_text = str(value)
-                if not self.dangerously_skip_all_permissions and not allow_sensitive and is_filtered_env_var(key_text, value_text):
+                if (
+                    not self.dangerously_skip_all_permissions
+                    and not allow_sensitive
+                    and is_filtered_env_var(key_text, value_text)
+                ):
                     continue
                 env[key_text] = value_text
         if sandboxed and self.sandbox_backend.name == "bwrap":
@@ -3234,7 +3989,11 @@ class Runtime:
         return self._command_env({})
 
     def _run_git_text(
-        self, cmd: list[str], *, timeout: int | None = None, env: dict[str, str] | None = None
+        self,
+        cmd: list[str],
+        *,
+        timeout: int | None = None,
+        env: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             cmd,
@@ -3246,7 +4005,11 @@ class Runtime:
         )
 
     def _run_git_bytes(
-        self, cmd: list[str], *, timeout: int | None = None, env: dict[str, str] | None = None
+        self,
+        cmd: list[str],
+        *,
+        timeout: int | None = None,
+        env: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess[bytes]:
         return subprocess.run(
             cmd,
@@ -3257,21 +4020,34 @@ class Runtime:
             env=self._git_env() if env is None else env,
         )
 
-    def _git_status_not_repo(self, completed: subprocess.CompletedProcess[str]) -> dict[str, Any]:
+    def _git_status_not_repo(
+        self, completed: subprocess.CompletedProcess[str]
+    ) -> dict[str, Any]:
         warnings = []
         stderr = completed.stderr.strip()
         if stderr:
             warnings.append(f"git rev-parse failed: {stderr}")
-        return {"is_repo": False, "clean": True, "entries": [], "truncated": False, "warnings": warnings}
+        return {
+            "is_repo": False,
+            "clean": True,
+            "entries": [],
+            "truncated": False,
+            "warnings": warnings,
+        }
 
     def _is_git_repo(self, path: Path, *, env: dict[str, str] | None = None) -> bool:
         completed = self._run_git_text(
-            [require_git(), "-C", str(path), "rev-parse", "--is-inside-work-tree"], env=env
+            [require_git(), "-C", str(path), "rev-parse", "--is-inside-work-tree"],
+            env=env,
         )
         return completed.returncode == 0 and completed.stdout.strip() == "true"
 
-    def _git_rev_parse(self, path: Path, rev: str, *, env: dict[str, str] | None = None) -> str:
-        completed = self._run_git_text([require_git(), "-C", str(path), "rev-parse", rev], env=env)
+    def _git_rev_parse(
+        self, path: Path, rev: str, *, env: dict[str, str] | None = None
+    ) -> str:
+        completed = self._run_git_text(
+            [require_git(), "-C", str(path), "rev-parse", rev], env=env
+        )
         return completed.stdout.strip() if completed.returncode == 0 else ""
 
     def _git_path_filters(self, args: dict[str, Any]) -> list[str]:
@@ -3360,13 +4136,21 @@ class Runtime:
         self._prune_sessions()
         with self.sessions_lock:
             with open("/tmp/debug_sessions.txt", "a") as f:
-                f.write(f"LOOKING FOR {session_id} IN SESSIONS: {list(self.sessions.keys())} OUTPUT: {list(self.output_sessions.keys())}\n")
-            session = self.sessions.get(session_id) or self.output_sessions.get(session_id)
+                f.write(
+                    f"LOOKING FOR {session_id} IN SESSIONS: {list(self.sessions.keys())} OUTPUT: {list(self.output_sessions.keys())}\n"
+                )
+            session = self.sessions.get(session_id) or self.output_sessions.get(
+                session_id
+            )
         if session is None:
-            raise ToolFailure("SESSION_NOT_FOUND", "Output session not found.", category="runtime")
+            raise ToolFailure(
+                "SESSION_NOT_FOUND", "Output session not found.", category="runtime"
+            )
         return session
 
-    def _format_session_output(self, session: ExecSession, payload: dict[str, Any], args: dict[str, Any]) -> dict[str, Any]:
+    def _format_session_output(
+        self, session: ExecSession, payload: dict[str, Any], args: dict[str, Any]
+    ) -> dict[str, Any]:
         terminal = payload.get("status") != "running"
         if terminal:
             self._complete_session(session)
@@ -3409,7 +4193,9 @@ class Runtime:
             payload["output_refs"] = output_refs
             payload["output_truncated"] = True
             payload["truncated_output_streams"] = truncated_streams
-            read_actions = [read_output_action(output_refs[stream]) for stream in truncated_streams]
+            read_actions = [
+                read_output_action(output_refs[stream]) for stream in truncated_streams
+            ]
             payload["next_actions"] = read_actions
             if terminal:
                 payload["next_action"] = read_actions[0]
@@ -3451,7 +4237,9 @@ class Runtime:
         }
         if verbosity == "preview":
             preview_limit = int(args.get("preview_bytes", EXEC_PREVIEW_BYTES))
-            preview, preview_truncated = truncate_bytes(session.retained_output_bytes(), preview_limit)
+            preview, preview_truncated = truncate_bytes(
+                session.retained_output_bytes(), preview_limit
+            )
             compact["preview"] = preview
             compact["preview_truncated"] = preview_truncated
             compact["truncated"] = bool(compact.get("truncated") or preview_truncated)
@@ -3462,13 +4250,18 @@ class Runtime:
                     if session.retained_stream_bytes(stream)[2] > 0
                 ]
                 compact["truncated_output_streams"] = preview_streams
-                preview_actions = [read_output_action(output_refs[stream]) for stream in preview_streams]
+                preview_actions = [
+                    read_output_action(output_refs[stream])
+                    for stream in preview_streams
+                ]
                 compact["next_actions"] = preview_actions
                 if terminal and preview_actions:
                     compact["next_action"] = preview_actions[0]
         return compact
 
-    def _session_output_summary(self, session: ExecSession, payload: dict[str, Any]) -> str:
+    def _session_output_summary(
+        self, session: ExecSession, payload: dict[str, Any]
+    ) -> str:
         retained = session.retained_output_bytes().decode("utf-8", errors="replace")
         lines = retained.splitlines()
         tail = next((line.strip() for line in reversed(lines) if line.strip()), "")
@@ -3476,7 +4269,11 @@ class Runtime:
             tail = tail[:117] + "..."
         elapsed = float(payload.get("elapsed_ms") or 0) / 1000.0
         exit_code = payload.get("exit_code")
-        status = f"exit {exit_code}" if exit_code is not None else str(payload.get("status", "running"))
+        status = (
+            f"exit {exit_code}"
+            if exit_code is not None
+            else str(payload.get("status", "running"))
+        )
         parts = [status, f"{elapsed:.1f}s", f"{len(lines)} lines"]
         if tail:
             parts.append(f"tail: {tail!r}")
@@ -3496,25 +4293,51 @@ class Runtime:
         ref_stream = match.group(2)
         requested_stream = str(args.get("stream", "") or "")
         if requested_stream and requested_stream not in {"stdout", "stderr"}:
-            raise ToolFailure("INVALID_ARGUMENT", "stream must be stdout or stderr.", category="validation")
-        if ref_stream in {"stdout", "stderr"} and requested_stream and requested_stream != ref_stream:
-            raise ToolFailure("INVALID_ARGUMENT", "stream does not match output_ref.", category="validation")
-        stream = ref_stream if ref_stream in {"stdout", "stderr"} else requested_stream or "stdout"
-        data, retained_start_offset, total_stream_bytes, dropped_bytes = session.retained_stream_bytes(stream)
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                "stream must be stdout or stderr.",
+                category="validation",
+            )
+        if (
+            ref_stream in {"stdout", "stderr"}
+            and requested_stream
+            and requested_stream != ref_stream
+        ):
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                "stream does not match output_ref.",
+                category="validation",
+            )
+        stream = (
+            ref_stream
+            if ref_stream in {"stdout", "stderr"}
+            else requested_stream or "stdout"
+        )
+        data, retained_start_offset, total_stream_bytes, dropped_bytes = (
+            session.retained_stream_bytes(stream)
+        )
         requested_offset = max(0, int(args.get("offset", 0)))
         offset = max(requested_offset, retained_start_offset)
-        limit = max(1, min(int(args.get("limit", EXEC_PREVIEW_BYTES)), SESSION_BUFFER_BYTES))
+        limit = max(
+            1, min(int(args.get("limit", EXEC_PREVIEW_BYTES)), SESSION_BUFFER_BYTES)
+        )
         buffer_offset = max(0, offset - retained_start_offset)
         chunk = data[buffer_offset : buffer_offset + limit]
-        next_offset = offset + len(chunk) if offset + len(chunk) < total_stream_bytes else None
+        next_offset = (
+            offset + len(chunk) if offset + len(chunk) < total_stream_bytes else None
+        )
         omitted_bytes = max(0, retained_start_offset - requested_offset)
         warnings: list[str] = []
         if omitted_bytes:
             warnings.append(f"{stream} offset skipped dropped bytes")
         if dropped_bytes:
-            warnings.append(f"older {stream} output was dropped from the rolling session buffer")
+            warnings.append(
+                f"older {stream} output was dropped from the rolling session buffer"
+            )
         if ref_stream == "full":
-            warnings.append("legacy full output_ref defaults to stdout; use output_refs for stable stream paging")
+            warnings.append(
+                "legacy full output_ref defaults to stdout; use output_refs for stable stream paging"
+            )
         result = {
             "output_ref": output_ref,
             "stream_output_ref": f"session:{session.session_id}:{stream}",
@@ -3548,8 +4371,14 @@ class Runtime:
         chars = str(args.get("chars", ""))
         if session.process.poll() is not None:
             if chars:
-                raise ToolFailure("SESSION_CLOSED", "Session is closed; stdin write blocked.", category="runtime")
-            payload = session.snapshot_since_cursor(int(args.get("max_output_bytes", 65536)))
+                raise ToolFailure(
+                    "SESSION_CLOSED",
+                    "Session is closed; stdin write blocked.",
+                    category="runtime",
+                )
+            payload = session.snapshot_since_cursor(
+                int(args.get("max_output_bytes", 65536))
+            )
             return self._format_session_output(session, payload, args)
         if chars:
             session.write_input(chars.encode("utf-8"))
@@ -3558,7 +4387,10 @@ class Runtime:
         while time.time() < wait_until and session.process.poll() is None:
             time.sleep(0.02)
             with session.lock:
-                has_new_output = len(session.stdout) > session.stdout_cursor or len(session.stderr) > session.stderr_cursor
+                has_new_output = (
+                    len(session.stdout) > session.stdout_cursor
+                    or len(session.stderr) > session.stderr_cursor
+                )
                 if has_new_output and not chars:
                     break
                 if has_new_output and chars:
@@ -3566,7 +4398,9 @@ class Runtime:
                         first_output_at = time.time()
                     if time.time() - first_output_at >= 0.05:
                         break
-        payload = session.snapshot_since_cursor(int(args.get("max_output_bytes", 65536)))
+        payload = session.snapshot_since_cursor(
+            int(args.get("max_output_bytes", 65536))
+        )
         return self._format_session_output(session, payload, args)
 
     def _wait_for_session_exit(self, session: ExecSession, wait_seconds: float) -> bool:
@@ -3583,7 +4417,11 @@ class Runtime:
         session = self._get_session(session_id)
         signal_name = str(args.get("signal", "TERM"))
         force = signal_name == "KILL"
-        signum = {"TERM": signal.SIGTERM, "KILL": HARD_KILL_SIGNAL, "INT": signal.SIGINT}.get(
+        signum = {
+            "TERM": signal.SIGTERM,
+            "KILL": HARD_KILL_SIGNAL,
+            "INT": signal.SIGINT,
+        }.get(
             signal_name,
             signal.SIGTERM,
         )
@@ -3591,11 +4429,15 @@ class Runtime:
         if session.process.poll() is None:
             session.terminating = True
             terminate_process_group(session.process, signum, force=force)
-            exited = self._wait_for_session_exit(session, int(args.get("wait_ms", 5000)) / 1000.0)
+            exited = self._wait_for_session_exit(
+                session, int(args.get("wait_ms", 5000)) / 1000.0
+            )
             if not exited and not force:
                 force = True
                 terminate_process_group(session.process, HARD_KILL_SIGNAL, force=True)
-                exited = self._wait_for_session_exit(session, int(args.get("kill_wait_ms", 2000)) / 1000.0)
+                exited = self._wait_for_session_exit(
+                    session, int(args.get("kill_wait_ms", 2000)) / 1000.0
+                )
             if exited:
                 killed = True
                 status = "killed" if force else "terminated"
@@ -3607,12 +4449,23 @@ class Runtime:
             killed = False
             status = "exited"
         signal_sent = "SIGKILL" if force else signal.Signals(signum).name
-        payload = session.snapshot_since_cursor(int(args.get("max_output_bytes", 65536)))
-        payload.update({"killed": killed, "status": status, "evicted": evict, "signal_sent": signal_sent})
+        payload = session.snapshot_since_cursor(
+            int(args.get("max_output_bytes", 65536))
+        )
+        payload.update(
+            {
+                "killed": killed,
+                "status": status,
+                "evicted": evict,
+                "signal_sent": signal_sent,
+            }
+        )
         payload = self._format_session_output(session, payload, args)
         if status == "terminating":
             warnings = list(payload.get("warnings", []))
-            warnings.append("Process did not exit after TERM/SIGKILL; session retained for retry or watchdog cleanup.")
+            warnings.append(
+                "Process did not exit after TERM/SIGKILL; session retained for retry or watchdog cleanup."
+            )
             payload["warnings"] = warnings
             payload["next_action"] = "retry kill_session or wait for watchdog cleanup"
         if evict:
@@ -3638,9 +4491,15 @@ class Runtime:
     def _get_session(self, session_id: str) -> ExecSession:
         self._prune_sessions()
         with self.sessions_lock:
-            session = self.sessions.get(session_id) or self.output_sessions.get(session_id)
+            session = self.sessions.get(session_id) or self.output_sessions.get(
+                session_id
+            )
         if session is None:
-            raise ToolFailure("SESSION_NOT_FOUND", "Session not found; stdin access denied.", category="not_found")
+            raise ToolFailure(
+                "SESSION_NOT_FOUND",
+                "Session not found; stdin access denied.",
+                category="not_found",
+            )
         return session
 
     def git_status(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -3659,7 +4518,11 @@ class Runtime:
             status_cmd.append("--untracked-files=no")
         completed = self._run_git_text(status_cmd, timeout=10, env=git_env)
         if completed.returncode != 0:
-            raise ToolFailure("GIT_ERROR", completed.stderr.strip() or "git status failed", category="runtime")
+            raise ToolFailure(
+                "GIT_ERROR",
+                completed.stderr.strip() or "git status failed",
+                category="runtime",
+            )
         lines = completed.stdout.splitlines()
         branch = ""
         upstream = ""
@@ -3710,15 +4573,25 @@ class Runtime:
             return self._fallback_diff(path_filters, max_bytes)
         chunks: list[bytes] = []
         if unstaged:
-            chunks.append(self._run_git_diff(git, context, path_filters, cached=False, env=git_env))
+            chunks.append(
+                self._run_git_diff(
+                    git, context, path_filters, cached=False, env=git_env
+                )
+            )
         if staged:
-            chunks.append(self._run_git_diff(git, context, path_filters, cached=True, env=git_env))
+            chunks.append(
+                self._run_git_diff(git, context, path_filters, cached=True, env=git_env)
+            )
         combined = b""
         for chunk in chunks:
             if combined and chunk and not combined.endswith(b"\n"):
                 combined += b"\n"
             combined += chunk
-        diff_truncation = truncate_text_head(combined.decode("utf-8", errors="replace"), max_lines=DEFAULT_MAX_LINES, max_bytes=max_bytes)
+        diff_truncation = truncate_text_head(
+            combined.decode("utf-8", errors="replace"),
+            max_lines=DEFAULT_MAX_LINES,
+            max_bytes=max_bytes,
+        )
         diff_text = diff_truncation.content
         truncated = diff_truncation.truncated
         return {
@@ -3729,7 +4602,13 @@ class Runtime:
         }
 
     def _run_git_diff(
-        self, git: str, context: int, path_filters: list[str], *, cached: bool, env: dict[str, str] | None = None
+        self,
+        git: str,
+        context: int,
+        path_filters: list[str],
+        *,
+        cached: bool,
+        env: dict[str, str] | None = None,
     ) -> bytes:
         cmd = [git, "-C", str(self.workspace.root), "diff", f"--unified={context}"]
         if cached:
@@ -3739,7 +4618,11 @@ class Runtime:
             cmd.extend(path_filters)
         completed = self._run_git_bytes(cmd, timeout=10, env=env)
         if completed.returncode not in {0, 1}:
-            raise ToolFailure("GIT_ERROR", completed.stderr.decode("utf-8", errors="replace"), category="runtime")
+            raise ToolFailure(
+                "GIT_ERROR",
+                completed.stderr.decode("utf-8", errors="replace"),
+                category="runtime",
+            )
         return completed.stdout
 
     def _fallback_diff(self, path_filters: list[str], max_bytes: int) -> dict[str, Any]:
@@ -3750,7 +4633,11 @@ class Runtime:
             if selected and rel not in selected:
                 continue
             current_path = self.workspace.resolve_for_write(rel).path
-            after = read_text_preserve_newlines(current_path) if current_path.exists() and not current_path.is_dir() else None
+            after = (
+                read_text_preserve_newlines(current_path)
+                if current_path.exists() and not current_path.is_dir()
+                else None
+            )
             if before == after:
                 continue
             before_lines = [] if before is None else before.splitlines(keepends=True)
@@ -3764,19 +4651,28 @@ class Runtime:
                     lineterm="",
                 )
             )
-            status = "added" if before is None else "deleted" if after is None else "modified"
+            status = (
+                "added"
+                if before is None
+                else "deleted"
+                if after is None
+                else "modified"
+            )
             files.append({"path": rel, "status": status, "binary": False})
         diff = "\n".join(chunks)
         if diff and not diff.endswith("\n"):
             diff += "\n"
-        diff_truncation = truncate_text_head(diff, max_lines=DEFAULT_MAX_LINES, max_bytes=max_bytes)
+        diff_truncation = truncate_text_head(
+            diff, max_lines=DEFAULT_MAX_LINES, max_bytes=max_bytes
+        )
         diff_text = diff_truncation.content
         truncated = diff_truncation.truncated
         return {
             "diff": diff_text,
             "files": files,
             **truncation_fields(diff_truncation),
-            "warnings": ["non-git diff fallback"] + (["diff truncated"] if truncated else []),
+            "warnings": ["non-git diff fallback"]
+            + (["diff truncated"] if truncated else []),
         }
 
     def git_log(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -3805,7 +4701,11 @@ class Runtime:
             cmd.extend(["--", path_filter])
         completed = self._run_git_text(cmd, timeout=10, env=git_env)
         if completed.returncode != 0:
-            raise ToolFailure("GIT_ERROR", completed.stderr.strip() or "git log failed", category="runtime")
+            raise ToolFailure(
+                "GIT_ERROR",
+                completed.stderr.strip() or "git log failed",
+                category="runtime",
+            )
         commits: list[dict[str, Any]] = []
         for record in completed.stdout.split("\x1e"):
             fields = record.strip("\n").split("\x1f")
@@ -3848,7 +4748,13 @@ class Runtime:
         git = require_git()
         git_env = self._git_env()
         if not self._is_git_repo(self.workspace.root, env=git_env):
-            return {"is_repo": False, "content": "", "files": [], "truncated": False, "warnings": []}
+            return {
+                "is_repo": False,
+                "content": "",
+                "files": [],
+                "truncated": False,
+                "warnings": [],
+            }
         rev = validate_git_ref(str(args.get("rev", "HEAD")))
         context = int(args.get("context_lines", 3))
         max_bytes = int(args.get("max_bytes", 262144))
@@ -3871,8 +4777,17 @@ class Runtime:
             cmd.extend(normalized_filters)
         completed = self._run_git_bytes(cmd, timeout=10, env=git_env)
         if completed.returncode != 0:
-            raise ToolFailure("GIT_ERROR", completed.stderr.decode("utf-8", errors="replace").strip() or "git show failed", category="runtime")
-        truncation = truncate_text_head(completed.stdout.decode("utf-8", errors="replace"), max_lines=DEFAULT_MAX_LINES, max_bytes=max_bytes)
+            raise ToolFailure(
+                "GIT_ERROR",
+                completed.stderr.decode("utf-8", errors="replace").strip()
+                or "git show failed",
+                category="runtime",
+            )
+        truncation = truncate_text_head(
+            completed.stdout.decode("utf-8", errors="replace"),
+            max_lines=DEFAULT_MAX_LINES,
+            max_bytes=max_bytes,
+        )
         content = truncation.content
         return {
             "is_repo": True,
@@ -3889,11 +4804,23 @@ class Runtime:
         requested_path = str(args.get("path", ""))
         resolved = self.resolve_existing(requested_path)
         if resolved.path.is_dir():
-            raise ToolFailure("IS_DIRECTORY", "Path is a directory.", category="validation")
+            raise ToolFailure(
+                "IS_DIRECTORY", "Path is a directory.", category="validation"
+            )
         if not self._is_git_repo(self.workspace.root, env=git_env):
-            return {"is_repo": False, "path": resolved.display, "lines": [], "truncated": False, "warnings": []}
+            return {
+                "is_repo": False,
+                "path": resolved.display,
+                "lines": [],
+                "truncated": False,
+                "warnings": [],
+            }
         ref_arg = args.get("rev")
-        ref = validate_git_ref(str(ref_arg)) if isinstance(ref_arg, str) and ref_arg else None
+        ref = (
+            validate_git_ref(str(ref_arg))
+            if isinstance(ref_arg, str) and ref_arg
+            else None
+        )
         start_line = int(args.get("start_line", 1))
         end_line = args.get("end_line")
         max_lines = int(args.get("max_lines", 200))
@@ -3902,7 +4829,11 @@ class Runtime:
         else:
             requested_final_line = int(end_line)
         if requested_final_line < start_line:
-            raise ToolFailure("INVALID_ARGUMENT", "end_line must be >= start_line.", category="validation")
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                "end_line must be >= start_line.",
+                category="validation",
+            )
         requested_lines = requested_final_line - start_line + 1
         truncated = requested_lines > max_lines
         final_line = min(requested_final_line, start_line + max_lines - 1)
@@ -3920,7 +4851,11 @@ class Runtime:
         cmd.extend(["--", resolved.display])
         completed = self._run_git_text(cmd, timeout=10, env=git_env)
         if completed.returncode != 0:
-            raise ToolFailure("GIT_ERROR", completed.stderr.strip() or "git blame failed", category="runtime")
+            raise ToolFailure(
+                "GIT_ERROR",
+                completed.stderr.strip() or "git blame failed",
+                category="runtime",
+            )
         lines = parse_git_blame_porcelain(completed.stdout)
         if len(lines) > max_lines:
             lines = lines[:max_lines]
@@ -3960,24 +4895,46 @@ class Runtime:
         data = resolved.path.read_bytes()
         mime_type, width, height = identify_image(data, resolved.path)
         if mime_type is None:
-            raise ToolFailure("BINARY_FILE", "File is not a supported image.", category="validation")
-        original = {"bytes": len(data), "width": width, "height": height, "mime_type": mime_type}
+            raise ToolFailure(
+                "BINARY_FILE", "File is not a supported image.", category="validation"
+            )
+        original = {
+            "bytes": len(data),
+            "width": width,
+            "height": height,
+            "mime_type": mime_type,
+        }
         resized = False
         warnings: list[str] = []
-        if auto_resize and should_resize_image(len(data), width, height, max_bytes, max_width, max_height):
-            resized_data = resize_image_bytes(data, mime_type, max_width=max_width, max_height=max_height, max_bytes=max_bytes)
+        if auto_resize and should_resize_image(
+            len(data), width, height, max_bytes, max_width, max_height
+        ):
+            resized_data = resize_image_bytes(
+                data,
+                mime_type,
+                max_width=max_width,
+                max_height=max_height,
+                max_bytes=max_bytes,
+            )
             if resized_data is not None:
                 data, mime_type = resized_data
                 mime_type, width, height = identify_image(data, resolved.path)
                 resized = True
             else:
-                warnings.append("auto_resize requested but Pillow is not installed or image resize failed")
+                warnings.append(
+                    "auto_resize requested but Pillow is not installed or image resize failed"
+                )
         if len(data) > max_bytes:
             raise ToolFailure(
                 "OUTPUT_TOO_LARGE",
                 "Image exceeds max_bytes.",
                 category="validation",
-                details={"bytes": len(data), "max_bytes": max_bytes, "resize_attempted": auto_resize, "warnings": warnings},
+                details={
+                    "bytes": len(data),
+                    "max_bytes": max_bytes,
+                    "resize_attempted": auto_resize,
+                    "warnings": warnings,
+                },
             )
         payload: dict[str, Any] = {
             "path": resolved.display,
@@ -3992,35 +4949,46 @@ class Runtime:
         }
         return payload
 
-
     def health(self, args: dict[str, Any]) -> dict[str, Any]:
         return {"status": "ok"}
-        
+
     def workspace_info(self, args: dict[str, Any]) -> dict[str, Any]:
         return {"workspace": str(self.workspace.root)}
-        
+
     def read_files(self, args: dict[str, Any]) -> dict[str, Any]:
         if self._profile_managed:
-            approval = self._profile_authorize_operation("workspace.read", args, "read_files")
+            approval = self._profile_authorize_operation(
+                "workspace.read", args, "read_files"
+            )
             if approval is not None:
                 return approval
         raw_paths = args.get("paths", [])
         if not isinstance(raw_paths, list):
-            raise ToolFailure("INVALID_ARGUMENT", "paths argument must be a list of path strings.", category="validation")
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                "paths argument must be a list of path strings.",
+                category="validation",
+            )
         files = []
         for raw_path in raw_paths:
             res = self.workspace.resolve_existing(str(raw_path))
             try:
                 content = res.path.read_text(encoding="utf-8")
             except UnicodeDecodeError as exc:
-                raise ToolFailure("UNSUPPORTED_ENCODING", "File is not valid utf-8.", category="validation") from exc
-            files.append({
-                "path": res.display,
-                "content": content,
-                "bytes": len(content.encode("utf-8")),
-            })
+                raise ToolFailure(
+                    "UNSUPPORTED_ENCODING",
+                    "File is not valid utf-8.",
+                    category="validation",
+                ) from exc
+            files.append(
+                {
+                    "path": res.display,
+                    "content": content,
+                    "bytes": len(content.encode("utf-8")),
+                }
+            )
         return {"files": files}
-        
+
     def preview_patch(self, args: dict[str, Any]) -> dict[str, Any]:
         patch_text = str(args.get("patch", ""))
         with self.patch_lock:
@@ -4041,22 +5009,35 @@ class Runtime:
             "risk_class": analysis["risk_class"],
             "warnings": [],
         }
-        
+
     def list_tasks(self, args: dict[str, Any]) -> dict[str, Any]:
-        return {"tasks": self.task_registry.list_tasks(args.get("category"), args.get("query"))}
-        
+        return {
+            "tasks": self.task_registry.list_tasks(
+                args.get("category"), args.get("query")
+            )
+        }
+
     def describe_task(self, args: dict[str, Any]) -> dict[str, Any]:
         return self.task_registry.describe_task(args.get("task_id", ""))
-        
+
     def run_task(self, args: dict[str, Any]) -> dict[str, Any]:
         task_id = str(args.get("task_id", ""))
         template = self.task_registry.get_task(task_id)
         if not template:
-            raise ToolFailure("NOT_FOUND", f"Task '{task_id}' not found.", category="validation")
+            raise ToolFailure(
+                "NOT_FOUND", f"Task '{task_id}' not found.", category="validation"
+            )
         if self._profile_managed:
             cwd = self._operation_workdir(args)
-            if template.cwd_policy == "workspace_root" and cwd.path != self.workspace.root:
-                raise ToolFailure("ACCESS_DENIED", f"Task '{task_id}' only runs at the workspace root.", category="security")
+            if (
+                template.cwd_policy == "workspace_root"
+                and cwd.path != self.workspace.root
+            ):
+                raise ToolFailure(
+                    "ACCESS_DENIED",
+                    f"Task '{task_id}' only runs at the workspace root.",
+                    category="security",
+                )
             cmd_argv = self.task_registry.build_argv(template, args)
             exec_args = {
                 "cwd": cwd.display,
@@ -4079,20 +5060,34 @@ class Runtime:
                 {
                     "_policy_authorized": True,
                     "_approved_capabilities": sorted(authorized),
-                    "_network_capability": self._network_capability(" ".join(cmd_argv), exec_args),
+                    "_network_capability": self._network_capability(
+                        " ".join(cmd_argv), exec_args
+                    ),
                 }
             )
             return self._execute_task_argv(cmd_argv, exec_args, authorized)
         if template.approval_class == "DENY":
-            raise ToolFailure("ACCESS_DENIED", f"Task '{task_id}' is unconditionally denied.", category="security")
+            raise ToolFailure(
+                "ACCESS_DENIED",
+                f"Task '{task_id}' is unconditionally denied.",
+                category="security",
+            )
         cwd = self._operation_workdir(args)
         if template.cwd_policy == "workspace_root" and cwd.path != self.workspace.root:
-            raise ToolFailure("ACCESS_DENIED", f"Task '{task_id}' only runs at the workspace root.", category="security")
+            raise ToolFailure(
+                "ACCESS_DENIED",
+                f"Task '{task_id}' only runs at the workspace root.",
+                category="security",
+            )
         path_arg = args.get("path")
         if isinstance(path_arg, str):
             pure_path = PurePosixPath(path_arg)
             if pure_path.is_absolute() or ".." in pure_path.parts:
-                raise ToolFailure("PATH_OUTSIDE_WORKSPACE", "Task path must stay inside the workspace.", category="security")
+                raise ToolFailure(
+                    "PATH_OUTSIDE_WORKSPACE",
+                    "Task path must stay inside the workspace.",
+                    category="security",
+                )
         cmd_argv = self.task_registry.build_argv(template, args)
         from .approval import ApprovalEngine
 
@@ -4145,61 +5140,68 @@ class Runtime:
             runtime_bin = str(Path(sys.executable).parent)
             env["PATH"] = runtime_bin + os.pathsep + os.environ.get("PATH", os.defpath)
         return env
-        
+
     def job_status(self, args: dict[str, Any]) -> dict[str, Any]:
         session_id = args.get("session_id", "")
         with self.sessions_lock:
-            session = self.sessions.get(session_id) or self.output_sessions.get(session_id)
+            session = self.sessions.get(session_id) or self.output_sessions.get(
+                session_id
+            )
             if session is None:
                 return {"status": "not_found", "session_id": session_id}
             session.refresh_status()
             poll = session.process.poll()
-            status_str = "running" if poll is None else ("success" if poll == 0 else "failed")
-            return {
-                "status": status_str,
-                "session_id": session_id,
-                "exit_code": poll
-            }
-        
+            status_str = (
+                "running" if poll is None else ("success" if poll == 0 else "failed")
+            )
+            return {"status": status_str, "session_id": session_id, "exit_code": poll}
+
     def job_output(self, args: dict[str, Any]) -> dict[str, Any]:
         args["output_ref"] = "session:" + args.get("session_id", "") + ":stdout"
         return self.read_output(args)
-        
+
     def job_input(self, args: dict[str, Any]) -> dict[str, Any]:
         if "input" in args and "chars" not in args:
             args["chars"] = args["input"]
         return self.write_stdin(args)
-        
+
     def job_cancel(self, args: dict[str, Any]) -> dict[str, Any]:
         return self.kill_session(args)
-        
+
     def approval_status(self, args: dict[str, Any]) -> dict[str, Any]:
         approval_id = args.get("approval_id")
         if not approval_id:
             return {"error": "approval_id is required"}
         from .approval import ApprovalEngine
+
         engine = ApprovalEngine()
         status = engine.get_status(approval_id)
         return {"approval_id": approval_id, "status": status}
-        
+
     def list_pending_approvals(self, args: dict[str, Any]) -> dict[str, Any]:
         from .approval import ApprovalEngine
+
         engine = ApprovalEngine()
         pending = engine.list_pending()
         return {"pending_approvals": pending}
-        
+
+
 def lsp_definition(self, args: dict[str, Any]) -> dict[str, Any]:
-        return {"error": "Not implemented"}
-        
+    return {"error": "Not implemented"}
+
+
 def lsp_diagnostics(self, args: dict[str, Any]) -> dict[str, Any]:
-        return {"error": "Not implemented"}
-        
+    return {"error": "Not implemented"}
+
+
 def antigravity_status(self, args: dict[str, Any]) -> dict[str, Any]:
-        return {"error": "Not implemented"}
-        
+    return {"error": "Not implemented"}
+
+
 def antigravity_result(self, args: dict[str, Any]) -> dict[str, Any]:
-        return {"error": "Not implemented"}
-        
+    return {"error": "Not implemented"}
+
+
 def walk_files(root: Path) -> Iterator[Path]:
     if root.is_file() or root.is_symlink():
         yield root
@@ -4336,7 +5338,9 @@ def strip_heredoc_payloads(command: str) -> str:
             index += 3
             continue
         if char == "<" and command[index : index + 2] == "<<":
-            operator_end, delimiter, strip_tabs = parse_heredoc_delimiter(command, index + 2)
+            operator_end, delimiter, strip_tabs = parse_heredoc_delimiter(
+                command, index + 2
+            )
             live.append(command[index:operator_end])
             index = operator_end
             if delimiter:
@@ -4373,7 +5377,11 @@ def command_executables(tokens: list[str]) -> list[str]:
         if token in REDIRECTION_TOKENS or token in HEREDOC_TOKENS:
             expect_command = False
             continue
-        if token.isdigit() and index + 1 < len(tokens) and tokens[index + 1] in REDIRECTION_TOKENS:
+        if (
+            token.isdigit()
+            and index + 1 < len(tokens)
+            and tokens[index + 1] in REDIRECTION_TOKENS
+        ):
             continue
         if expect_command:
             if is_env_assignment_token(token):
@@ -4391,12 +5399,18 @@ def explicit_command_path_candidates(tokens: list[str]) -> list[str]:
     while index < len(tokens):
         token = tokens[index]
         if token in SHELL_CONTROL_TOKENS:
-            candidates.extend(command_argument_path_candidates(current_command, current_args))
+            candidates.extend(
+                command_argument_path_candidates(current_command, current_args)
+            )
             current_command = None
             current_args = []
             index += 1
             continue
-        if token.isdigit() and index + 1 < len(tokens) and tokens[index + 1] in REDIRECTION_TOKENS:
+        if (
+            token.isdigit()
+            and index + 1 < len(tokens)
+            and tokens[index + 1] in REDIRECTION_TOKENS
+        ):
             index += 1
             continue
         if token in REDIRECTION_TOKENS:
@@ -4424,7 +5438,9 @@ def command_argument_path_candidates(command: str | None, args: list[str]) -> li
     if name == "env":
         candidates, wrapped_command, wrapped_args = env_wrapped_command(args)
         if wrapped_command is not None:
-            candidates.extend(command_argument_path_candidates(wrapped_command, wrapped_args))
+            candidates.extend(
+                command_argument_path_candidates(wrapped_command, wrapped_args)
+            )
         return candidates
     if name in PATH_ARGUMENT_COMMANDS:
         return [arg for arg in args if is_inspectable_path_argument(arg)]
@@ -4455,7 +5471,11 @@ def inline_script_command(command: str) -> dict[str, str] | None:
             current_args = []
             index += 1
             continue
-        if token.isdigit() and index + 1 < len(tokens) and tokens[index + 1] in REDIRECTION_TOKENS:
+        if (
+            token.isdigit()
+            and index + 1 < len(tokens)
+            and tokens[index + 1] in REDIRECTION_TOKENS
+        ):
             index += 1
             continue
         if token in HEREDOC_TOKENS:
@@ -4476,7 +5496,9 @@ def inline_script_command(command: str) -> dict[str, str] | None:
     return inline_script_segment(current_command, current_args)
 
 
-def inline_script_segment(command: str | None, args: list[str]) -> dict[str, str] | None:
+def inline_script_segment(
+    command: str | None, args: list[str]
+) -> dict[str, str] | None:
     if not command:
         return None
     name = PurePosixPath(command.replace("\\", "/")).name.lower()
@@ -4536,13 +5558,21 @@ def env_wrapped_command(args: list[str]) -> tuple[list[str], str | None, list[st
         if arg in ENV_OPTIONS_WITH_ARGUMENT:
             index += 2
             continue
-        if any(arg.startswith(f"{option}=") for option in ENV_LONG_OPTIONS_WITH_ARGUMENT):
+        if any(
+            arg.startswith(f"{option}=") for option in ENV_LONG_OPTIONS_WITH_ARGUMENT
+        ):
             index += 1
             continue
-        if any(arg.startswith(f"{option}=") for option in ENV_LONG_OPTIONS_WITH_OPTIONAL_ARGUMENT):
+        if any(
+            arg.startswith(f"{option}=")
+            for option in ENV_LONG_OPTIONS_WITH_OPTIONAL_ARGUMENT
+        ):
             index += 1
             continue
-        if any(arg.startswith(prefix) and arg != prefix for prefix in ENV_SHORT_OPTIONS_WITH_ATTACHED_ARGUMENT):
+        if any(
+            arg.startswith(prefix) and arg != prefix
+            for prefix in ENV_SHORT_OPTIONS_WITH_ATTACHED_ARGUMENT
+        ):
             index += 1
             continue
         if arg in ENV_FLAG_OPTIONS:
@@ -4557,7 +5587,9 @@ def env_wrapped_command(args: list[str]) -> tuple[list[str], str | None, list[st
     return candidates, None, []
 
 
-def env_split_command(candidates: list[str], command: str) -> tuple[list[str], str | None, list[str]]:
+def env_split_command(
+    candidates: list[str], command: str
+) -> tuple[list[str], str | None, list[str]]:
     try:
         tokens = shlex_split(command)
     except ValueError:
@@ -4567,7 +5599,9 @@ def env_split_command(candidates: list[str], command: str) -> tuple[list[str], s
     return candidates, tokens[0], tokens[1:]
 
 
-def stdin_script_segment(command: str | None, args: list[str], redirection: str) -> dict[str, str] | None:
+def stdin_script_segment(
+    command: str | None, args: list[str], redirection: str
+) -> dict[str, str] | None:
     if not command:
         return None
     name = PurePosixPath(command.replace("\\", "/")).name.lower()
@@ -4618,7 +5652,11 @@ def script_command_path_candidates(command_name: str, args: list[str]) -> list[s
         if skip_next:
             skip_next = False
             continue
-        if command_name in {"bash", "sh", "zsh"} and arg.startswith("-") and "c" in arg.lstrip("-"):
+        if (
+            command_name in {"bash", "sh", "zsh"}
+            and arg.startswith("-")
+            and "c" in arg.lstrip("-")
+        ):
             return []
         if command_name in {"python", "python3"} and arg == "-c":
             return []
@@ -4647,7 +5685,9 @@ def is_inspectable_path_argument(token: str) -> bool:
     normalized = token.replace("\\", "/")
     if re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://", normalized):
         return False
-    if normalized.startswith(("/", "~", "./", "../")) or re.match(r"^[A-Za-z]:/", normalized):
+    if normalized.startswith(("/", "~", "./", "../")) or re.match(
+        r"^[A-Za-z]:/", normalized
+    ):
         return True
     if "/" in normalized:
         return True
@@ -4663,7 +5703,8 @@ def is_literal_network_reference_command(command: str) -> bool:
     if not executables:
         return False
     return all(
-        PurePosixPath(executable.replace("\\", "/")).name.lower() in NETWORK_LITERAL_COMMANDS
+        PurePosixPath(executable.replace("\\", "/")).name.lower()
+        in NETWORK_LITERAL_COMMANDS
         for executable in executables
     )
 
@@ -4683,7 +5724,9 @@ def entry_for_path(path: Path, root: Path) -> dict[str, Any]:
         "path": normalize_rel_display(path, root),
         "type": kind,
         "size_bytes": stat.st_size,
-        "modified": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat().replace("+00:00", "Z"),
+        "modified": datetime.fromtimestamp(stat.st_mtime, timezone.utc)
+        .isoformat()
+        .replace("+00:00", "Z"),
         "is_hidden": path.name.startswith("."),
         "is_ignored": False,
     }
@@ -4729,7 +5772,9 @@ def require_git() -> str:
 
 def validate_git_ref(ref: str) -> str:
     if not ref or ref.startswith("-") or "\x00" in ref or "\n" in ref or "\r" in ref:
-        raise ToolFailure("INVALID_ARGUMENT", "Invalid git revision.", category="validation")
+        raise ToolFailure(
+            "INVALID_ARGUMENT", "Invalid git revision.", category="validation"
+        )
     return ref
 
 
@@ -4768,7 +5813,9 @@ def parse_git_blame_porcelain(output: str) -> list[dict[str, Any]]:
 def redact_for_trace(value: Any) -> Any:
     if isinstance(value, dict):
         return {
-            str(key): "[REDACTED]" if SENSITIVE_ENV_RE.search(str(key)) else redact_for_trace(item)
+            str(key): "[REDACTED]"
+            if SENSITIVE_ENV_RE.search(str(key))
+            else redact_for_trace(item)
             for key, item in value.items()
         }
     if isinstance(value, list):
@@ -4799,7 +5846,9 @@ def landlock_abi_version() -> int:
             "Linux Landlock filesystem confinement is unavailable on this platform.",
             category="security",
         )
-    version = libc_syscall(SYS_LANDLOCK_CREATE_RULESET, 0, 0, LANDLOCK_CREATE_RULESET_VERSION)
+    version = libc_syscall(
+        SYS_LANDLOCK_CREATE_RULESET, 0, 0, LANDLOCK_CREATE_RULESET_VERSION
+    )
     if version <= 0:
         err = ctypes.get_errno()
         raise ToolFailure(
@@ -4837,7 +5886,9 @@ def landlock_handled_access(version: int) -> int:
 
 
 def landlock_device_access(handled: int) -> int:
-    readonly_file_access = handled & (LANDLOCK_ACCESS_FS_EXECUTE | LANDLOCK_ACCESS_FS_READ_FILE)
+    readonly_file_access = handled & (
+        LANDLOCK_ACCESS_FS_EXECUTE | LANDLOCK_ACCESS_FS_READ_FILE
+    )
     return readonly_file_access | (
         handled
         & (
@@ -4848,7 +5899,9 @@ def landlock_device_access(handled: int) -> int:
     )
 
 
-def open_landlock_ruleset(workspace: Path, read_roots: list[str], *, write_roots: list[Path] | None = None) -> int:
+def open_landlock_ruleset(
+    workspace: Path, read_roots: list[str], *, write_roots: list[Path] | None = None
+) -> int:
     version = landlock_abi_version()
     handled = landlock_handled_access(version)
     ruleset_attr = LandlockRulesetAttr(handled)
@@ -4869,25 +5922,33 @@ def open_landlock_ruleset(workspace: Path, read_roots: list[str], *, write_roots
     try:
         workspace_access = handled
         readonly_access = handled & (
-            LANDLOCK_ACCESS_FS_EXECUTE | LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR
+            LANDLOCK_ACCESS_FS_EXECUTE
+            | LANDLOCK_ACCESS_FS_READ_FILE
+            | LANDLOCK_ACCESS_FS_READ_DIR
         )
         device_access = landlock_device_access(handled)
         add_landlock_path(ruleset_fd, workspace, workspace_access)
         for write_root in write_roots or []:
             add_landlock_path(ruleset_fd, write_root, workspace_access, required=False)
         for read_root in read_roots:
-            add_landlock_path(ruleset_fd, Path(read_root), readonly_access, required=False)
+            add_landlock_path(
+                ruleset_fd, Path(read_root), readonly_access, required=False
+            )
         for special in SPECIAL_DEVICE_PATHS:
             add_landlock_path(ruleset_fd, Path(special), device_access, required=False)
         for special_dir in ("/proc/self", "/proc/thread-self", "/dev/fd"):
-            add_landlock_path(ruleset_fd, Path(special_dir), readonly_access, required=False)
+            add_landlock_path(
+                ruleset_fd, Path(special_dir), readonly_access, required=False
+            )
     except Exception:
         os.close(ruleset_fd)
         raise
     return ruleset_fd
 
 
-def add_landlock_path(ruleset_fd: int, path: Path, allowed_access: int, *, required: bool = True) -> None:
+def add_landlock_path(
+    ruleset_fd: int, path: Path, allowed_access: int, *, required: bool = True
+) -> None:
     try:
         fd = os.open(path, getattr(os, "O_PATH", os.O_RDONLY) | os.O_CLOEXEC)
     except OSError as exc:
@@ -4900,15 +5961,27 @@ def add_landlock_path(ruleset_fd: int, path: Path, allowed_access: int, *, requi
             ) from exc
         return
     try:
-        path_attr = LandlockPathBeneathAttr(allowed_access & landlock_path_allowed_access(path), fd)
-        rc = libc_syscall(SYS_LANDLOCK_ADD_RULE, ruleset_fd, LANDLOCK_RULE_PATH_BENEATH, ctypes.byref(path_attr), 0)
+        path_attr = LandlockPathBeneathAttr(
+            allowed_access & landlock_path_allowed_access(path), fd
+        )
+        rc = libc_syscall(
+            SYS_LANDLOCK_ADD_RULE,
+            ruleset_fd,
+            LANDLOCK_RULE_PATH_BENEATH,
+            ctypes.byref(path_attr),
+            0,
+        )
         if rc < 0 and required:
             err = ctypes.get_errno()
             raise ToolFailure(
                 "SANDBOX_UNAVAILABLE",
                 "Failed to add path to Landlock sandbox.",
                 category="security",
-                details={"path": str(path), "errno": err, "reason": os.strerror(err) if err else "unknown"},
+                details={
+                    "path": str(path),
+                    "errno": err,
+                    "reason": os.strerror(err) if err else "unknown",
+                },
             )
     finally:
         os.close(fd)
@@ -4970,7 +6043,9 @@ def guard_allow_roots() -> list[str]:
 
 
 @functools.lru_cache(maxsize=8)
-def _guard_allow_roots_cached(java_home: str, path_env: str, extra_roots: str) -> tuple[str, ...]:
+def _guard_allow_roots_cached(
+    java_home: str, path_env: str, extra_roots: str
+) -> tuple[str, ...]:
     roots = set(TOOLCHAIN_READ_ROOTS)
     roots.update(OS_METADATA_READ_FILES)
     roots.update(GIT_READ_ROOTS)
@@ -5029,7 +6104,9 @@ def parse_diff_files(diff_text: str) -> list[dict[str, Any]]:
     return files
 
 
-def identify_image(data: bytes, path: Path) -> tuple[str | None, int | None, int | None]:
+def identify_image(
+    data: bytes, path: Path
+) -> tuple[str | None, int | None, int | None]:
     if data.startswith(b"\x89PNG\r\n\x1a\n") and len(data) >= 24:
         width = int.from_bytes(data[16:20], "big")
         height = int.from_bytes(data[20:24], "big")
@@ -5066,21 +6143,25 @@ def identify_jpeg_size(data: bytes) -> tuple[int | None, int | None]:
         segment_length = int.from_bytes(data[index : index + 2], "big")
         if segment_length < 2 or index + segment_length > len(data):
             break
-        if marker in {
-            0xC0,
-            0xC1,
-            0xC2,
-            0xC3,
-            0xC5,
-            0xC6,
-            0xC7,
-            0xC9,
-            0xCA,
-            0xCB,
-            0xCD,
-            0xCE,
-            0xCF,
-        } and segment_length >= 7:
+        if (
+            marker
+            in {
+                0xC0,
+                0xC1,
+                0xC2,
+                0xC3,
+                0xC5,
+                0xC6,
+                0xC7,
+                0xC9,
+                0xCA,
+                0xCB,
+                0xCD,
+                0xCE,
+                0xCF,
+            }
+            and segment_length >= 7
+        ):
             height = int.from_bytes(data[index + 3 : index + 5], "big")
             width = int.from_bytes(data[index + 5 : index + 7], "big")
             return width, height
@@ -5142,7 +6223,13 @@ def resize_image_bytes(
         image: Any = Image.open(BytesIO(data))
         image.thumbnail((max_width, max_height))
         output = BytesIO()
-        output_format = "JPEG" if mime_type == "image/jpeg" else "PNG" if mime_type == "image/png" else "WEBP"
+        output_format = (
+            "JPEG"
+            if mime_type == "image/jpeg"
+            else "PNG"
+            if mime_type == "image/png"
+            else "WEBP"
+        )
         save_kwargs: dict[str, Any] = {}
         if output_format in {"JPEG", "WEBP"}:
             save_kwargs["quality"] = 85
@@ -5163,7 +6250,9 @@ def resize_image_bytes(
         return None
 
 
-def object_schema(properties: dict[str, Any] | None = None, required: list[str] | None = None) -> dict[str, Any]:
+def object_schema(
+    properties: dict[str, Any] | None = None, required: list[str] | None = None
+) -> dict[str, Any]:
     return {
         "type": "object",
         "properties": properties or {},
@@ -5200,28 +6289,50 @@ def validate_arguments(tool_name: str, args: dict[str, Any]) -> None:
     try:
         validate_schema_value(args, schema, path="arguments")
     except ToolFailure as exc:
-        raise JsonRpcError(-32602, exc.message, {"reason": "invalid_arguments", "code": exc.code}) from exc
+        raise JsonRpcError(
+            -32602, exc.message, {"reason": "invalid_arguments", "code": exc.code}
+        ) from exc
 
 
 def validate_schema_value(value: Any, schema: dict[str, Any], *, path: str) -> None:
     expected_type = schema.get("type")
     if expected_type is not None and not schema_type_matches(value, expected_type):
-        raise ToolFailure("INVALID_ARGUMENT", f"{path} must be {schema_type_name(expected_type)}.", category="validation")
+        raise ToolFailure(
+            "INVALID_ARGUMENT",
+            f"{path} must be {schema_type_name(expected_type)}.",
+            category="validation",
+        )
 
     if isinstance(value, str):
         min_length = schema.get("minLength")
         if isinstance(min_length, int) and len(value) < min_length:
-            raise ToolFailure("INVALID_ARGUMENT", f"{path} is shorter than {min_length}.", category="validation")
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                f"{path} is shorter than {min_length}.",
+                category="validation",
+            )
         if "enum" in schema and value not in schema["enum"]:
-            raise ToolFailure("INVALID_ARGUMENT", f"{path} must be one of {schema['enum']!r}.", category="validation")
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                f"{path} must be one of {schema['enum']!r}.",
+                category="validation",
+            )
 
     if isinstance(value, int) and not isinstance(value, bool):
         minimum = schema.get("minimum")
         maximum = schema.get("maximum")
         if isinstance(minimum, (int, float)) and value < minimum:
-            raise ToolFailure("INVALID_ARGUMENT", f"{path} must be >= {minimum}.", category="validation")
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                f"{path} must be >= {minimum}.",
+                category="validation",
+            )
         if isinstance(maximum, (int, float)) and value > maximum:
-            raise ToolFailure("INVALID_ARGUMENT", f"{path} must be <= {maximum}.", category="validation")
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                f"{path} must be <= {maximum}.",
+                category="validation",
+            )
 
     if isinstance(value, list) and isinstance(schema.get("items"), dict):
         item_schema = schema["items"]
@@ -5233,14 +6344,22 @@ def validate_schema_value(value: Any, schema: dict[str, Any], *, path: str) -> N
         required = schema.get("required", [])
         for key in required:
             if key not in value:
-                raise ToolFailure("INVALID_ARGUMENT", f"{path}.{key} is required.", category="validation")
+                raise ToolFailure(
+                    "INVALID_ARGUMENT",
+                    f"{path}.{key} is required.",
+                    category="validation",
+                )
         additional = schema.get("additionalProperties", True)
         for key, item in value.items():
             child_path = f"{path}.{key}"
             if key in properties:
                 validate_schema_value(item, properties[key], path=child_path)
             elif additional is False:
-                raise ToolFailure("INVALID_ARGUMENT", f"{child_path} is not a recognized argument.", category="validation")
+                raise ToolFailure(
+                    "INVALID_ARGUMENT",
+                    f"{child_path} is not a recognized argument.",
+                    category="validation",
+                )
             elif isinstance(additional, dict):
                 validate_schema_value(item, additional, path=child_path)
 
@@ -5330,7 +6449,12 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                 "start_line": {**integer, "minimum": 1, "default": 1},
                 "end_line": {**integer, "minimum": 1},
                 "max_lines": {**integer, "minimum": 1},
-                "max_bytes": {**integer, "minimum": 1, "maximum": 1048576, "default": 131072},
+                "max_bytes": {
+                    **integer,
+                    "minimum": 1,
+                    "maximum": 1048576,
+                    "default": 131072,
+                },
                 "encoding": {**string, "enum": ["utf-8"], "default": "utf-8"},
             },
             ["path"],
@@ -5346,10 +6470,19 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                 "path": {**string, "default": "."},
                 "recursive": {**boolean, "default": False},
                 "max_depth": {**integer, "minimum": 1, "maximum": 20, "default": 1},
-                "max_entries": {**integer, "minimum": 1, "maximum": 10000, "default": 1000},
+                "max_entries": {
+                    **integer,
+                    "minimum": 1,
+                    "maximum": 10000,
+                    "default": 1000,
+                },
                 "include_hidden": {**boolean, "default": False},
                 "include_ignored": {**boolean, "default": False},
-                "sort": {**string, "enum": ["name", "type", "modified"], "default": "name"},
+                "sort": {
+                    **string,
+                    "enum": ["name", "type", "modified"],
+                    "default": "name",
+                },
             }
         ),
         "list_files": object_schema(
@@ -5360,7 +6493,12 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                 "exclude_patterns": string_array,
                 "include_hidden": {**boolean, "default": False},
                 "include_ignored": {**boolean, "default": False},
-                "max_results": {**integer, "minimum": 1, "maximum": 50000, "default": 5000},
+                "max_results": {
+                    **integer,
+                    "minimum": 1,
+                    "maximum": 50000,
+                    "default": 5000,
+                },
                 "sort": {**string, "enum": ["path", "modified"], "default": "path"},
             }
         ),
@@ -5372,16 +6510,36 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                 "case_sensitive": {**boolean, "default": False},
                 "glob": string,
                 "context_lines": {**integer, "minimum": 0, "maximum": 10, "default": 1},
-                "max_results": {**integer, "minimum": 1, "maximum": 1000, "default": 100},
+                "max_results": {
+                    **integer,
+                    "minimum": 1,
+                    "maximum": 1000,
+                    "default": 100,
+                },
             },
             ["query"],
         ),
         "view_image": object_schema(
             {
                 "path": {**string, "minLength": 1},
-                "max_bytes": {**integer, "minimum": 1, "maximum": 10485760, "default": 5242880},
-                "max_width": {**integer, "minimum": 1, "maximum": 4096, "default": 1024},
-                "max_height": {**integer, "minimum": 1, "maximum": 4096, "default": 1024},
+                "max_bytes": {
+                    **integer,
+                    "minimum": 1,
+                    "maximum": 10485760,
+                    "default": 5242880,
+                },
+                "max_width": {
+                    **integer,
+                    "minimum": 1,
+                    "maximum": 4096,
+                    "default": 1024,
+                },
+                "max_height": {
+                    **integer,
+                    "minimum": 1,
+                    "maximum": 4096,
+                    "default": 1024,
+                },
                 "auto_resize": {**boolean, "default": True},
             },
             ["path"],
@@ -5406,7 +6564,12 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                 "path": {**string, "default": "."},
                 "staged": {**boolean, "default": False},
                 "context_lines": {**integer, "minimum": 0, "maximum": 10, "default": 3},
-                "max_bytes": {**integer, "minimum": 1, "maximum": 1048576, "default": 262144},
+                "max_bytes": {
+                    **integer,
+                    "minimum": 1,
+                    "maximum": 1048576,
+                    "default": 262144,
+                },
             }
         ),
         "git_log": object_schema(
@@ -5422,7 +6585,12 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                 "rev": {**string, "minLength": 1},
                 "path": {**string, "default": "."},
                 "context": {**integer, "minimum": 0, "maximum": 10, "default": 3},
-                "max_bytes": {**integer, "minimum": 1, "maximum": 1048576, "default": 262144},
+                "max_bytes": {
+                    **integer,
+                    "minimum": 1,
+                    "maximum": 1048576,
+                    "default": 262144,
+                },
                 "include_diff": {**boolean, "default": True},
             },
             ["rev"],
@@ -5457,8 +6625,18 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                 "cwd": string,
                 "env": {"type": "object", "additionalProperties": {"type": "string"}},
                 "timeout_ms": {**integer, "minimum": 1, "default": 30000},
-                "yield_time_ms": {**integer, "minimum": 0, "maximum": 300000, "default": 10000},
-                "max_output_bytes": {**integer, "minimum": 1, "maximum": 1048576, "default": 262144},
+                "yield_time_ms": {
+                    **integer,
+                    "minimum": 0,
+                    "maximum": 300000,
+                    "default": 10000,
+                },
+                "max_output_bytes": {
+                    **integer,
+                    "minimum": 1,
+                    "maximum": 1048576,
+                    "default": 262144,
+                },
                 "approval_id": string,
             },
             ["task_id"],
@@ -5468,22 +6646,47 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                 "cmd": {**string, "minLength": 1},
                 "cwd": string,
                 "workdir": string,
-                "timeout_ms": {**integer, "minimum": 1, "maximum": 300000, "default": 30000},
-                "yield_time_ms": {**integer, "minimum": 0, "maximum": 300000, "default": 10000},
+                "timeout_ms": {
+                    **integer,
+                    "minimum": 1,
+                    "maximum": 300000,
+                    "default": 30000,
+                },
+                "yield_time_ms": {
+                    **integer,
+                    "minimum": 0,
+                    "maximum": 300000,
+                    "default": 10000,
+                },
                 "env": {"type": "object", "additionalProperties": {"type": "string"}},
-                "max_bytes": {**integer, "minimum": 1, "maximum": 1048576, "default": 262144},
-                "max_output_bytes": {**integer, "minimum": 1, "maximum": 1048576, "default": 262144},
+                "max_bytes": {
+                    **integer,
+                    "minimum": 1,
+                    "maximum": 1048576,
+                    "default": 262144,
+                },
+                "max_output_bytes": {
+                    **integer,
+                    "minimum": 1,
+                    "maximum": 1048576,
+                    "default": 262144,
+                },
                 "tty": {**boolean, "default": False},
                 "stdin": string,
                 "verbosity": {**integer, "minimum": 0, "maximum": 2, "default": 0},
-                "preview_bytes": {**integer, "minimum": 1, "maximum": 1048576, "default": 2048},
+                "preview_bytes": {
+                    **integer,
+                    "minimum": 1,
+                    "maximum": 1048576,
+                    "default": 2048,
+                },
                 "network_required": boolean,
                 "task_id": string,
                 "approval_id": string,
             },
             ["cmd"],
         ),
-                "job_status": object_schema(
+        "job_status": object_schema(
             {
                 "session_id": {**string, "minLength": 1},
             },
@@ -5493,7 +6696,12 @@ def input_schemas() -> dict[str, dict[str, Any]]:
             {
                 "output_ref": {**string, "minLength": 1},
                 "offset": {**integer, "minimum": 0},
-                "limit": {**integer, "minimum": 1, "maximum": 1048576, "default": 262144},
+                "limit": {
+                    **integer,
+                    "minimum": 1,
+                    "maximum": 1048576,
+                    "default": 262144,
+                },
             },
             ["output_ref"],
         ),
@@ -5501,8 +6709,18 @@ def input_schemas() -> dict[str, dict[str, Any]]:
             {
                 "session_id": {**string, "minLength": 1},
                 "chars": string,
-                "yield_time_ms": {**integer, "minimum": 0, "maximum": 300000, "default": 10000},
-                "max_output_bytes": {**integer, "minimum": 1, "maximum": 1048576, "default": 262144},
+                "yield_time_ms": {
+                    **integer,
+                    "minimum": 0,
+                    "maximum": 300000,
+                    "default": 10000,
+                },
+                "max_output_bytes": {
+                    **integer,
+                    "minimum": 1,
+                    "maximum": 1048576,
+                    "default": 262144,
+                },
             },
             ["session_id"],
         ),
@@ -5510,8 +6728,18 @@ def input_schemas() -> dict[str, dict[str, Any]]:
             {
                 "session_id": {**string, "minLength": 1},
                 "signal": {**string, "default": "SIGTERM"},
-                "wait_ms": {**integer, "minimum": 0, "maximum": 300000, "default": 5000},
-                "kill_wait_ms": {**integer, "minimum": 0, "maximum": 300000, "default": 2000},
+                "wait_ms": {
+                    **integer,
+                    "minimum": 0,
+                    "maximum": 300000,
+                    "default": 5000,
+                },
+                "kill_wait_ms": {
+                    **integer,
+                    "minimum": 0,
+                    "maximum": 300000,
+                    "default": 2000,
+                },
             },
             ["session_id"],
         ),
@@ -5550,7 +6778,11 @@ def input_schemas() -> dict[str, dict[str, Any]]:
             ["path"],
         ),
     }
-def _server_card_auth(runtime: Runtime, *, oauth_base_url: str | None = None) -> dict[str, Any]:
+
+
+def _server_card_auth(
+    runtime: Runtime, *, oauth_base_url: str | None = None
+) -> dict[str, Any]:
     if runtime.oauth_enabled():
         cfg = runtime.oauth_config
         assert cfg is not None
@@ -5567,13 +6799,19 @@ def _server_card_auth(runtime: Runtime, *, oauth_base_url: str | None = None) ->
     return {"type": "none", "scheme": None, "header": None}
 
 
-def server_card_payload(runtime: Runtime, *, oauth_base_url: str | None = None) -> dict[str, Any]:
+def server_card_payload(
+    runtime: Runtime, *, oauth_base_url: str | None = None
+) -> dict[str, Any]:
     names = runtime.exposed_tool_names()
     # Always the real annotations, never the tools/list override: this card is
     # what an operator fetches to find out what the endpoint actually does.
     annotations = {name: tool_annotations(name, fake_readonly=False) for name in names}
-    read_only = [name for name in names if annotations[name].get("readOnlyHint") is True]
-    mutating = [name for name in names if annotations[name].get("readOnlyHint") is not True]
+    read_only = [
+        name for name in names if annotations[name].get("readOnlyHint") is True
+    ]
+    mutating = [
+        name for name in names if annotations[name].get("readOnlyHint") is not True
+    ]
     payload = {
         "protocolVersion": PROTOCOL_VERSION,
         "schemaVersion": TOOL_SCHEMA_VERSION,
@@ -5593,7 +6831,9 @@ def server_card_payload(runtime: Runtime, *, oauth_base_url: str | None = None) 
             "names": names,
             "readOnlyHintTrue": read_only,
             "readOnlyHintFalse": mutating,
-            "annotationOverride": ("fake_readonly" if runtime.fake_readonly_annotations else None),
+            "annotationOverride": (
+                "fake_readonly" if runtime.fake_readonly_annotations else None
+            ),
         },
         "capabilities": {
             "tools": {"listChanged": False},
@@ -5683,7 +6923,10 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             self.handle_oauth_as_metadata(head_only=head_only)
             return
         if normalized in {"/healthz", "/readyz"}:
-            self.send_json({"status": "ok", "ready": True, "version": __version__}, head_only=head_only)
+            self.send_json(
+                {"status": "ok", "ready": True, "version": __version__},
+                head_only=head_only,
+            )
             return
         if normalized == "/.well-known/oauth-protected-resource":
             self.handle_oauth_resource_metadata(head_only=head_only)
@@ -5694,7 +6937,9 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         if normalized == MCP_ENDPOINT_PATH:
             origin = self.headers.get("Origin")
             if origin and not is_allowed_origin(origin):
-                self.send_json({"error": "Origin denied"}, status=403, head_only=head_only)
+                self.send_json(
+                    {"error": "Origin denied"}, status=403, head_only=head_only
+                )
                 return
             if not self.is_authorized():
                 self.send_unauthorized(head_only=head_only)
@@ -5708,7 +6953,10 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             )
             return
         if normalized in {"/.well-known/mcp.json", "/.well-known/mcp/server-card.json"}:
-            self.send_json(server_card_payload(self.runtime, oauth_base_url=self.oauth_base_url()), head_only=head_only)
+            self.send_json(
+                server_card_payload(self.runtime, oauth_base_url=self.oauth_base_url()),
+                head_only=head_only,
+            )
             return
         self.send_json({"error": "Unknown endpoint"}, status=404, head_only=head_only)
 
@@ -5735,14 +6983,19 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             self.send_unauthorized()
             return
         if self.headers.get_content_type().lower() != "application/json":
-            self.send_rpc_error(-32600, "Content-Type must be application/json", status=415)
+            self.send_rpc_error(
+                -32600, "Content-Type must be application/json", status=415
+            )
             return
         protocol_version = self.headers.get("MCP-Protocol-Version")
         if protocol_version and not protocol_version_is_supported(protocol_version):
             self.send_rpc_error(
                 -32600,
                 "Unsupported MCP protocol version",
-                data={"supported": list(SUPPORTED_PROTOCOL_VERSIONS), "received": protocol_version},
+                data={
+                    "supported": list(SUPPORTED_PROTOCOL_VERSIONS),
+                    "received": protocol_version,
+                },
             )
             return
         raw_length = self.headers.get("Content-Length")
@@ -5773,7 +7026,9 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             self.send_rpc_error(-32700, "Parse error")
             return
         if isinstance(request, list):
-            self.send_rpc_error(-32600, "JSON-RPC batch requests are not supported by Streamable HTTP")
+            self.send_rpc_error(
+                -32600, "JSON-RPC batch requests are not supported by Streamable HTTP"
+            )
             return
         if not isinstance(request, dict):
             self.send_rpc_error(-32600, "Invalid Request")
@@ -5782,7 +7037,11 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             validate_rpc_envelope(request)
         except JsonRpcError as exc:
             self.send_rpc_error(
-                exc.code, exc.message, status=200, request_id=response_id(request), data=exc.data
+                exc.code,
+                exc.message,
+                status=200,
+                request_id=response_id(request),
+                data=exc.data,
             )
             return
         method = request.get("method")
@@ -5791,13 +7050,17 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         if method == "initialize":
             if session_id:
                 self.send_rpc_error(
-                    -32600, "initialize must not include Mcp-Session-Id", request_id=request.get("id")
+                    -32600,
+                    "initialize must not include Mcp-Session-Id",
+                    request_id=request.get("id"),
                 )
                 return
             try:
                 self._runtime = self.server.sessions.create()  # type: ignore[attr-defined]
             except RuntimeError as exc:
-                self.send_rpc_error(-32000, str(exc), status=503, request_id=request.get("id"))
+                self.send_rpc_error(
+                    -32000, str(exc), status=503, request_id=request.get("id")
+                )
                 return
             self._send_session_header = True
             created_session = True
@@ -5805,7 +7068,10 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             runtime = self.server.sessions.get(session_id)  # type: ignore[attr-defined]
             if runtime is None:
                 self.send_rpc_error(
-                    -32001, "Unknown MCP session", status=404, request_id=response_id(request)
+                    -32001,
+                    "Unknown MCP session",
+                    status=404,
+                    request_id=response_id(request),
                 )
                 return
             self._runtime = runtime
@@ -5815,13 +7081,18 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
                     -32600,
                     "MCP-Protocol-Version does not match the initialized session",
                     request_id=request.get("id"),
-                    data={"expected": runtime.protocol_version, "received": protocol_version},
+                    data={
+                        "expected": runtime.protocol_version,
+                        "received": protocol_version,
+                    },
                 )
                 return
         elif method == "ping":
             self._runtime = self.server.control_runtime  # type: ignore[attr-defined]
         else:
-            self.send_rpc_error(-32002, "Server not initialized", request_id=request.get("id"))
+            self.send_rpc_error(
+                -32002, "Server not initialized", request_id=request.get("id")
+            )
             return
         response = self.handle_rpc(request)
         if created_session and response is not None and "error" in response:
@@ -5850,8 +7121,10 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             if secrets.compare_digest(header, f"Bearer {self.runtime.auth_token}"):
                 return True
         if self.runtime.oauth_config is not None and header.startswith("Bearer "):
-            token = header[len("Bearer "):]
-            if validate_access_token(token, self.runtime.oauth_config, self.oauth_base_url()):
+            token = header[len("Bearer ") :]
+            if validate_access_token(
+                token, self.runtime.oauth_config, self.oauth_base_url()
+            ):
                 return True
         return False
 
@@ -5860,19 +7133,33 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         if cfg is not None and cfg.server_url:
             return cfg.server_url.rstrip("/")
         trust_proxy = truthy_env(os.environ.get(f"{ENV_PREFIX}_TRUST_PROXY_HEADERS"))
-        proto = _first_header_value(self.headers.get("X-Forwarded-Proto")) if trust_proxy else ""
+        proto = (
+            _first_header_value(self.headers.get("X-Forwarded-Proto"))
+            if trust_proxy
+            else ""
+        )
         if trust_proxy and not proto:
             proto = _forwarded_header_param(self.headers.get("Forwarded"), "proto")
-        host = _safe_external_host(_first_header_value(self.headers.get("X-Forwarded-Host"))) if trust_proxy else ""
+        host = (
+            _safe_external_host(
+                _first_header_value(self.headers.get("X-Forwarded-Host"))
+            )
+            if trust_proxy
+            else ""
+        )
         if trust_proxy and not host:
-            host = _safe_external_host(_forwarded_header_param(self.headers.get("Forwarded"), "host"))
+            host = _safe_external_host(
+                _forwarded_header_param(self.headers.get("Forwarded"), "host")
+            )
         if not host:
             host = _safe_external_host(self.headers.get("Host", ""))
         if not host:
             server_address = cast(tuple[Any, ...], self.server.server_address)  # type: ignore[attr-defined]
             bind_host = server_address[0]
             bind_port = server_address[1]
-            host = _http_base_for_bind_host(str(bind_host), int(bind_port)).removeprefix("http://")
+            host = _http_base_for_bind_host(
+                str(bind_host), int(bind_port)
+            ).removeprefix("http://")
         if proto not in {"http", "https"}:
             host_without_port = host.rsplit(":", 1)[0].strip("[]")
             proto = "http" if is_loopback_bind_host(host_without_port) else "https"
@@ -5895,7 +7182,9 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
     def handle_oauth_as_metadata(self, *, head_only: bool = False) -> None:
         cfg = self.runtime.oauth_config
         if cfg is None:
-            self.send_json({"error": "OAuth not configured"}, status=404, head_only=head_only)
+            self.send_json(
+                {"error": "OAuth not configured"}, status=404, head_only=head_only
+            )
             return
         base = self.oauth_base_url()
         self.send_json(
@@ -5915,11 +7204,17 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
     def handle_oauth_resource_metadata(self, *, head_only: bool = False) -> None:
         cfg = self.runtime.oauth_config
         if cfg is None:
-            self.send_json({"error": "OAuth not configured"}, status=404, head_only=head_only)
+            self.send_json(
+                {"error": "OAuth not configured"}, status=404, head_only=head_only
+            )
             return
         base = self.oauth_base_url()
         self.send_json(
-            {"resource": base, "authorization_servers": [base], "bearer_methods_supported": ["header"]},
+            {
+                "resource": base,
+                "authorization_servers": [base],
+                "bearer_methods_supported": ["header"],
+            },
             head_only=head_only,
         )
 
@@ -5945,6 +7240,7 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
     ) -> str:
         def esc(v: str) -> str:
             return html.escape(v, quote=True)
+
         error_block = f'<p style="color:red">{html.escape(error)}</p>' if error else ""
         return (
             "<!DOCTYPE html><html lang='en'><head><meta charset='utf-8'>"
@@ -5989,7 +7285,9 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         if cfg is None:
             self.send_json({"error": "OAuth not configured"}, status=404)
             return
-        params = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query, keep_blank_values=True)
+        params = urllib.parse.parse_qs(
+            urllib.parse.urlparse(self.path).query, keep_blank_values=True
+        )
         _p = functools.partial(_first_form_value, params)
         client_id = _p("client_id")
         redirect_uri = _p("redirect_uri")
@@ -5999,25 +7297,42 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         resource = _p("resource")
 
         if _p("response_type") != "code":
-            self._send_html("<h2>Error</h2><p>response_type must be 'code'</p>", status=400)
+            self._send_html(
+                "<h2>Error</h2><p>response_type must be 'code'</p>", status=400
+            )
             return
         if cfg.registry.get(client_id) is None:
             self._send_html("<h2>Error</h2><p>Unknown client_id</p>", status=400)
             return
         if not cfg.registry.accepts_redirect(client_id, redirect_uri):
-            self._send_html("<h2>Error</h2><p>redirect_uri is not registered for this client</p>", status=400)
+            self._send_html(
+                "<h2>Error</h2><p>redirect_uri is not registered for this client</p>",
+                status=400,
+            )
             return
         if code_challenge_method != "S256" or not valid_pkce_challenge(code_challenge):
-            self._send_html("<h2>Error</h2><p>code_challenge_method must be S256 and code_challenge is required</p>", status=400)
+            self._send_html(
+                "<h2>Error</h2><p>code_challenge_method must be S256 and code_challenge is required</p>",
+                status=400,
+            )
             return
         if resource.rstrip("/") != self.oauth_base_url():
-            self._send_html("<h2>Error</h2><p>resource must identify this MCP server</p>", status=400)
+            self._send_html(
+                "<h2>Error</h2><p>resource must identify this MCP server</p>",
+                status=400,
+            )
             return
 
-        self._send_html(self._oauth_login_page(
-            client_id=client_id, redirect_uri=redirect_uri, code_challenge=code_challenge,
-            code_challenge_method=code_challenge_method, state=state, resource=resource,
-        ))
+        self._send_html(
+            self._oauth_login_page(
+                client_id=client_id,
+                redirect_uri=redirect_uri,
+                code_challenge=code_challenge,
+                code_challenge_method=code_challenge_method,
+                state=state,
+                resource=resource,
+            )
+        )
 
     def handle_oauth_authorize_post(self) -> None:
         cfg = self.runtime.oauth_config
@@ -6027,10 +7342,21 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         body = self._read_oauth_body()
         if body is None:
             return
-        if self.headers.get_content_type().lower() != "application/x-www-form-urlencoded":
-            self.send_json({"error": "invalid_request", "error_description": "Content-Type must be application/x-www-form-urlencoded"}, status=400)
+        if (
+            self.headers.get_content_type().lower()
+            != "application/x-www-form-urlencoded"
+        ):
+            self.send_json(
+                {
+                    "error": "invalid_request",
+                    "error_description": "Content-Type must be application/x-www-form-urlencoded",
+                },
+                status=400,
+            )
             return
-        params = urllib.parse.parse_qs(body.decode("utf-8", errors="replace"), keep_blank_values=True)
+        params = urllib.parse.parse_qs(
+            body.decode("utf-8", errors="replace"), keep_blank_values=True
+        )
         _p = functools.partial(_first_form_value, params)
         client_id = _p("client_id")
         redirect_uri = _p("redirect_uri")
@@ -6041,13 +7367,22 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         password = _p("password")
 
         def fail(error: str, status: int = 400) -> None:
-            self._send_html(self._oauth_login_page(
-                client_id=client_id, redirect_uri=redirect_uri, code_challenge=code_challenge,
-                code_challenge_method=code_challenge_method, state=state, resource=resource,
-                error=error,
-            ), status=status)
+            self._send_html(
+                self._oauth_login_page(
+                    client_id=client_id,
+                    redirect_uri=redirect_uri,
+                    code_challenge=code_challenge,
+                    code_challenge_method=code_challenge_method,
+                    state=state,
+                    resource=resource,
+                    error=error,
+                ),
+                status=status,
+            )
 
-        if cfg.registry.get(client_id) is None or not cfg.registry.accepts_redirect(client_id, redirect_uri):
+        if cfg.registry.get(client_id) is None or not cfg.registry.accepts_redirect(
+            client_id, redirect_uri
+        ):
             fail("Invalid client or redirect URI")
             return
         if code_challenge_method != "S256" or not valid_pkce_challenge(code_challenge):
@@ -6078,7 +7413,9 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
                 "resource": resource.rstrip("/"),
             }
 
-        qs = urllib.parse.urlencode({"code": code, **({"state": state} if state else {})})
+        qs = urllib.parse.urlencode(
+            {"code": code, **({"state": state} if state else {})}
+        )
         sep = "&" if "?" in redirect_uri else "?"
         location = redirect_uri + sep + qs
         self.send_response(302)
@@ -6095,16 +7432,25 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
 
         def _err(error: str, description: str) -> None:
             self.log_message("OAuth token error: %s - %s", error, description)
-            self.send_json({"error": error, "error_description": description}, status=400)
+            self.send_json(
+                {"error": error, "error_description": description}, status=400
+            )
 
         body = self._read_oauth_body()
         if body is None:
             return
-        content_type = self.headers.get("Content-Type", "").split(";")[0].strip().lower()
+        content_type = (
+            self.headers.get("Content-Type", "").split(";")[0].strip().lower()
+        )
         if content_type != "application/x-www-form-urlencoded":
-            _err("invalid_request", "Content-Type must be application/x-www-form-urlencoded")
+            _err(
+                "invalid_request",
+                "Content-Type must be application/x-www-form-urlencoded",
+            )
             return
-        params = urllib.parse.parse_qs(body.decode("utf-8", errors="replace"), keep_blank_values=True)
+        params = urllib.parse.parse_qs(
+            body.decode("utf-8", errors="replace"), keep_blank_values=True
+        )
         _p = functools.partial(_first_form_value, params)
         grant_type = _p("grant_type")
         code = _p("code")
@@ -6135,13 +7481,19 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         if cfg.registry.get(client_id) is None:
             _err("invalid_client", "Unknown client_id")
             return
-        if not cfg.registry.authenticates(client_id, client_secret, presented_auth_method):
+        if not cfg.registry.authenticates(
+            client_id, client_secret, presented_auth_method
+        ):
             _err("invalid_client", "Invalid client_secret")
             return
         if not code:
             _err("invalid_grant", "code is required")
             return
-        if not code_verifier or not (43 <= len(code_verifier) <= 128) or not re.fullmatch(r"[A-Za-z0-9\-._~]+", code_verifier):
+        if (
+            not code_verifier
+            or not (43 <= len(code_verifier) <= 128)
+            or not re.fullmatch(r"[A-Za-z0-9\-._~]+", code_verifier)
+        ):
             _err("invalid_grant", "Invalid code_verifier")
             return
 
@@ -6160,7 +7512,9 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         if not secrets.compare_digest(code_data["redirect_uri"], redirect_uri):
             _err("invalid_grant", "redirect_uri mismatch")
             return
-        if not resource or not secrets.compare_digest(str(code_data.get("resource") or ""), resource):
+        if not resource or not secrets.compare_digest(
+            str(code_data.get("resource") or ""), resource
+        ):
             _err("invalid_target", "resource mismatch")
             return
         if not verify_pkce(code_verifier, code_data["code_challenge"]):
@@ -6169,7 +7523,13 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
 
         server_url = resource
         access_token = create_access_token(cfg, server_url, client_id=client_id)
-        self.send_json({"access_token": access_token, "token_type": "Bearer", "expires_in": cfg.token_ttl})
+        self.send_json(
+            {
+                "access_token": access_token,
+                "token_type": "Bearer",
+                "expires_in": cfg.token_ttl,
+            }
+        )
 
     def handle_oauth_register(self) -> None:
         cfg = self.runtime.oauth_config
@@ -6180,20 +7540,41 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         if body is None:
             return
         if self.headers.get_content_type().lower() != "application/json":
-            self.send_json({"error": "invalid_client_metadata", "error_description": "Content-Type must be application/json"}, status=400)
+            self.send_json(
+                {
+                    "error": "invalid_client_metadata",
+                    "error_description": "Content-Type must be application/json",
+                },
+                status=400,
+            )
             return
         try:
             metadata = json.loads(body.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError):
-            self.send_json({"error": "invalid_client_metadata", "error_description": "Body must be valid JSON"}, status=400)
+            self.send_json(
+                {
+                    "error": "invalid_client_metadata",
+                    "error_description": "Body must be valid JSON",
+                },
+                status=400,
+            )
             return
         if not isinstance(metadata, dict):
-            self.send_json({"error": "invalid_client_metadata", "error_description": "Metadata must be an object"}, status=400)
+            self.send_json(
+                {
+                    "error": "invalid_client_metadata",
+                    "error_description": "Metadata must be an object",
+                },
+                status=400,
+            )
             return
         try:
             registered = cfg.registry.register(metadata)
         except ValueError as exc:
-            self.send_json({"error": "invalid_client_metadata", "error_description": str(exc)}, status=400)
+            self.send_json(
+                {"error": "invalid_client_metadata", "error_description": str(exc)},
+                status=400,
+            )
             return
         self.send_json(registered, status=201)
 
@@ -6202,7 +7583,9 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         if origin and is_allowed_origin(origin):
             self.send_header("Access-Control-Allow-Origin", origin)
             self.send_header("Vary", "Origin")
-            self.send_header("Access-Control-Allow-Methods", "GET, HEAD, POST, DELETE, OPTIONS")
+            self.send_header(
+                "Access-Control-Allow-Methods", "GET, HEAD, POST, DELETE, OPTIONS"
+            )
             self.send_header(
                 "Access-Control-Allow-Headers",
                 "Accept, Authorization, Content-Type, MCP-Protocol-Version, Mcp-Session-Id",
@@ -6261,9 +7644,15 @@ def build_runtime(
     project_context: ProjectContext | None = None,
     transport: str = "stdio",
 ) -> Runtime:
-    workspace = Path(args.workspace or os.environ.get(f"{ENV_PREFIX}_WORKSPACE") or os.getcwd())
-    active_profile = runtime_policy.policy_profile or legacy_profile(runtime_policy.permission_mode)
-    policy_rules = policy_rules_from_config_file(os.environ.get("DEVMCP_POLICY_CONFIG_FILE"), active_profile)
+    workspace = Path(
+        args.workspace or os.environ.get(f"{ENV_PREFIX}_WORKSPACE") or os.getcwd()
+    )
+    active_profile = runtime_policy.policy_profile or legacy_profile(
+        runtime_policy.permission_mode
+    )
+    policy_rules = policy_rules_from_config_file(
+        os.environ.get("DEVMCP_POLICY_CONFIG_FILE"), active_profile
+    )
     runtime = Runtime(
         workspace,
         enable_view_image=args.enable_view_image,
@@ -6303,13 +7692,21 @@ def run_http(args: argparse.Namespace) -> int:
     auth_mode = (os.environ.get(f"{ENV_PREFIX}_AUTH_MODE") or "").strip().lower()
     if auth_mode and auth_mode not in AUTH_MODE_CHOICES:
         supported = ", ".join(AUTH_MODE_CHOICES)
-        print(f"ERROR: {ENV_PREFIX}_AUTH_MODE must be one of: {supported}.", file=sys.stderr)
+        print(
+            f"ERROR: {ENV_PREFIX}_AUTH_MODE must be one of: {supported}.",
+            file=sys.stderr,
+        )
         return 2
     auth_token = args.auth_token or os.environ.get(f"{ENV_PREFIX}_AUTH_TOKEN") or None
-    token_file = getattr(args, "auth_token_file", None) or os.environ.get("DEVMCP_AUTH_TOKEN_FILE")
+    token_file = getattr(args, "auth_token_file", None) or os.environ.get(
+        "DEVMCP_AUTH_TOKEN_FILE"
+    )
     if not auth_token and token_file:
         try:
-            auth_token = Path(token_file).expanduser().read_text(encoding="utf-8").strip() or None
+            auth_token = (
+                Path(token_file).expanduser().read_text(encoding="utf-8").strip()
+                or None
+            )
         except OSError as exc:
             print(f"ERROR: unable to read MCP auth token file: {exc}", file=sys.stderr)
             return 2
@@ -6321,12 +7718,18 @@ def run_http(args: argparse.Namespace) -> int:
     except ValueError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
-    active_profile = runtime_policy.policy_profile or legacy_profile(runtime_policy.permission_mode)
-    server_capability = "server.loopback" if is_loopback_bind_host(str(args.host)) else "server.public"
+    active_profile = runtime_policy.policy_profile or legacy_profile(
+        runtime_policy.permission_mode
+    )
+    server_capability = (
+        "server.loopback" if is_loopback_bind_host(str(args.host)) else "server.public"
+    )
     server_decision = policy_decision(
         active_profile,
         server_capability,
-        policy_rules_from_config_file(os.environ.get("DEVMCP_POLICY_CONFIG_FILE"), active_profile),
+        policy_rules_from_config_file(
+            os.environ.get("DEVMCP_POLICY_CONFIG_FILE"), active_profile
+        ),
     )
     if server_decision != "auto":
         print(
@@ -6347,7 +7750,9 @@ def run_http(args: argparse.Namespace) -> int:
         client_secret = os.environ.get(f"{ENV_PREFIX}_OAUTH_CLIENT_SECRET") or None
         env_password = os.environ.get(f"{ENV_PREFIX}_OAUTH_PASSWORD")
         password = env_password or secrets.token_urlsafe(32)
-        server_url = (os.environ.get(f"{ENV_PREFIX}_SERVER_URL") or "").rstrip("/") or None
+        server_url = (os.environ.get(f"{ENV_PREFIX}_SERVER_URL") or "").rstrip(
+            "/"
+        ) or None
         if not env_password:
             print(f"OAuth authorize password: {password}", file=sys.stderr)
         raw_secret = os.environ.get(f"{ENV_PREFIX}_OAUTH_TOKEN_SECRET") or ""
@@ -6369,12 +7774,21 @@ def run_http(args: argparse.Namespace) -> int:
         else:
             token_secret = secrets.token_bytes(32)
         try:
-            token_ttl = int(os.environ.get(f"{ENV_PREFIX}_OAUTH_TOKEN_TTL") or OAUTH_TOKEN_TTL_SECONDS)
+            token_ttl = int(
+                os.environ.get(f"{ENV_PREFIX}_OAUTH_TOKEN_TTL")
+                or OAUTH_TOKEN_TTL_SECONDS
+            )
         except ValueError:
-            print(f"ERROR: {ENV_PREFIX}_OAUTH_TOKEN_TTL must be an integer.", file=sys.stderr)
+            print(
+                f"ERROR: {ENV_PREFIX}_OAUTH_TOKEN_TTL must be an integer.",
+                file=sys.stderr,
+            )
             return 2
         if not 60 <= token_ttl <= 604_800:
-            print(f"ERROR: {ENV_PREFIX}_OAUTH_TOKEN_TTL must be between 60 and 604800 seconds.", file=sys.stderr)
+            print(
+                f"ERROR: {ENV_PREFIX}_OAUTH_TOKEN_TTL must be between 60 and 604800 seconds.",
+                file=sys.stderr,
+            )
             return 2
         oauth_config = OAuthConfig(
             password=password,
@@ -6383,8 +7797,13 @@ def run_http(args: argparse.Namespace) -> int:
             token_ttl=token_ttl,
         )
         if client_id:
-            raw_redirects = os.environ.get(f"{ENV_PREFIX}_OAUTH_REDIRECT_URIS") or "http://127.0.0.1/callback"
-            redirect_uris = tuple(item.strip() for item in raw_redirects.split(",") if item.strip())
+            raw_redirects = (
+                os.environ.get(f"{ENV_PREFIX}_OAUTH_REDIRECT_URIS")
+                or "http://127.0.0.1/callback"
+            )
+            redirect_uris = tuple(
+                item.strip() for item in raw_redirects.split(",") if item.strip()
+            )
             try:
                 oauth_config.registry.add_preregistered(
                     client_id,
@@ -6392,7 +7811,10 @@ def run_http(args: argparse.Namespace) -> int:
                     client_secret=client_secret,
                 )
             except ValueError as exc:
-                print(f"ERROR: invalid OAuth redirect URI configuration: {exc}", file=sys.stderr)
+                print(
+                    f"ERROR: invalid OAuth redirect URI configuration: {exc}",
+                    file=sys.stderr,
+                )
                 return 2
         if auth_token:
             print(
@@ -6408,10 +7830,17 @@ def run_http(args: argparse.Namespace) -> int:
         and truthy_env(os.environ.get(f"{ENV_PREFIX}_GENERATE_AUTH_TOKEN"))
     ):
         auth_token = secrets.token_urlsafe(32)
-        print(f"Generated {ENV_PREFIX}_AUTH_TOKEN for non-loopback binding.", file=sys.stderr)
+        print(
+            f"Generated {ENV_PREFIX}_AUTH_TOKEN for non-loopback binding.",
+            file=sys.stderr,
+        )
         print(f"Bearer token: {auth_token}", file=sys.stderr)
 
-    if not auth_token and not oauth_config and not is_loopback_bind_host(str(args.host)):
+    if (
+        not auth_token
+        and not oauth_config
+        and not is_loopback_bind_host(str(args.host))
+    ):
         print(
             "ERROR: non-loopback HTTP binding requires --auth-token, CODING_TOOLS_MCP_AUTH_TOKEN, or --oauth-mode.",
             file=sys.stderr,
@@ -6431,7 +7860,13 @@ def run_http(args: argparse.Namespace) -> int:
         return 2
 
     try:
-        runtime = build_runtime(args, runtime_policy, auth_token=auth_token, oauth_config=oauth_config, transport="http")
+        runtime = build_runtime(
+            args,
+            runtime_policy,
+            auth_token=auth_token,
+            oauth_config=oauth_config,
+            transport="http",
+        )
     except (ToolFailure, ValueError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
@@ -6447,7 +7882,9 @@ def run_http(args: argparse.Namespace) -> int:
             transport="http",
         )
 
-    server = RuntimeHTTPServer((args.host, args.port), MCPHandler, runtime, runtime_factory)
+    server = RuntimeHTTPServer(
+        (args.host, args.port), MCPHandler, runtime, runtime_factory
+    )
     if oauth_config:
         url_label = oauth_config.server_url or "dynamic request URL"
         suffix = " + bearer" if runtime.auth_token else ""
@@ -6482,9 +7919,16 @@ def run_stdio(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Serve workspace-confined coding tools over MCP.")
-    parser.add_argument("--version", action="version", version=f"DevMCP Runtime {__version__}")
-    parser.add_argument("--workspace", help="workspace root; defaults to CODING_TOOLS_MCP_WORKSPACE or cwd")
+    parser = argparse.ArgumentParser(
+        description="Serve workspace-confined coding tools over MCP."
+    )
+    parser.add_argument(
+        "--version", action="version", version=f"DevMCP Runtime {__version__}"
+    )
+    parser.add_argument(
+        "--workspace",
+        help="workspace root; defaults to CODING_TOOLS_MCP_WORKSPACE or cwd",
+    )
     parser.add_argument(
         "--host",
         default=os.environ.get(f"{ENV_PREFIX}_HOST") or "127.0.0.1",
@@ -6496,7 +7940,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=env_int(f"{ENV_PREFIX}_PORT", 8000),
         help=f"bind port; defaults to {ENV_PREFIX}_PORT or 8000",
     )
-    parser.add_argument("--stdio", action="store_true", help="serve newline-delimited JSON-RPC over stdio")
+    parser.add_argument(
+        "--stdio",
+        action="store_true",
+        help="serve newline-delimited JSON-RPC over stdio",
+    )
     parser.add_argument(
         "--auth-token",
         default=None,

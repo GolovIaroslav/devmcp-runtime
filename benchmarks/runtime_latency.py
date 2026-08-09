@@ -67,7 +67,9 @@ def prepare_workspace(root: Path) -> Path:
         if index == 17:
             text += "TARGET_NEEDLE appears here\n"
         (workspace / "src" / f"file_{index:02d}.txt").write_text(text, encoding="utf-8")
-    (workspace / "src" / "target.txt").write_text("TARGET_NEEDLE\n" + common, encoding="utf-8")
+    (workspace / "src" / "target.txt").write_text(
+        "TARGET_NEEDLE\n" + common, encoding="utf-8"
+    )
     return workspace
 
 
@@ -171,19 +173,29 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             raise RuntimeError(f"missing benchmark tools: {missing}")
 
         metrics = [
-            measure("mcp.tools_list", args.iterations, args.warmup, lambda: client.list_tools()),
+            measure(
+                "mcp.tools_list",
+                args.iterations,
+                args.warmup,
+                lambda: client.list_tools(),
+            ),
             measure(
                 "mcp.read_file",
                 args.iterations,
                 args.warmup,
-                lambda: assert_tool_contains(client.call_tool("read_file", {"path": "src/target.txt"}), "TARGET_NEEDLE"),
+                lambda: assert_tool_contains(
+                    client.call_tool("read_file", {"path": "src/target.txt"}),
+                    "TARGET_NEEDLE",
+                ),
             ),
             measure(
                 "mcp.search_text",
                 args.iterations,
                 args.warmup,
                 lambda: assert_tool_contains(
-                    client.call_tool("search_text", {"query": "TARGET_NEEDLE", "path": "src"}),
+                    client.call_tool(
+                        "search_text", {"query": "TARGET_NEEDLE", "path": "src"}
+                    ),
                     "TARGET_NEEDLE",
                 ),
             ),
@@ -209,7 +221,12 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
                 args.warmup,
                 lambda: (workspace / "src" / "target.txt").read_text(encoding="utf-8"),
             ),
-            measure("native.search", args.iterations, args.warmup, lambda: native_search(workspace)),
+            measure(
+                "native.search",
+                args.iterations,
+                args.warmup,
+                lambda: native_search(workspace),
+            ),
             measure(
                 "native.exec_command",
                 args.exec_iterations,
@@ -282,7 +299,9 @@ def comparison_rows(summaries: dict[str, dict[str, Any]]) -> list[dict[str, Any]
 def write_reports(report: dict[str, Any], report_json: Path, report_md: Path) -> None:
     report_json.parent.mkdir(parents=True, exist_ok=True)
     report_md.parent.mkdir(parents=True, exist_ok=True)
-    report_json.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    report_json.write_text(
+        json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
     report_md.write_text(render_markdown(report), encoding="utf-8")
 
 
@@ -306,9 +325,19 @@ def render_markdown(report: dict[str, Any]) -> str:
         lines.append(
             f"| `{name}` | {summary['samples']} | {summary['min_ms']} | {summary['p50_ms']} | {summary['p95_ms']} | {summary['max_ms']} |"
         )
-    lines.extend(["", "## Native Baseline Comparison", "", "| operation | MCP p95 ms | native p95 ms | ratio |", "| --- | ---: | ---: | ---: |"])
+    lines.extend(
+        [
+            "",
+            "## Native Baseline Comparison",
+            "",
+            "| operation | MCP p95 ms | native p95 ms | ratio |",
+            "| --- | ---: | ---: | ---: |",
+        ]
+    )
     for row in report["comparisons"]:
-        lines.append(f"| `{row['operation']}` | {row['mcp_p95_ms']} | {row['native_p95_ms']} | {row['p95_ratio']} |")
+        lines.append(
+            f"| `{row['operation']}` | {row['mcp_p95_ms']} | {row['native_p95_ms']} | {row['p95_ratio']} |"
+        )
     lines.extend(["", "## Failures", ""])
     if report["failures"]:
         lines.extend(f"- {failure}" for failure in report["failures"])
@@ -331,8 +360,12 @@ def main(argv: list[str] | None = None) -> int:
         "--server-command",
         default="{python} -m coding_tools_mcp --workspace {workspace} --host 127.0.0.1 --port {port}",
     )
-    parser.add_argument("--report-json", type=Path, default=ROOT / "reports/benchmark/mcp-latency.json")
-    parser.add_argument("--report-md", type=Path, default=ROOT / "reports/benchmark/mcp-latency.md")
+    parser.add_argument(
+        "--report-json", type=Path, default=ROOT / "reports/benchmark/mcp-latency.json"
+    )
+    parser.add_argument(
+        "--report-md", type=Path, default=ROOT / "reports/benchmark/mcp-latency.md"
+    )
     args = parser.parse_args(argv)
 
     report = run_benchmark(args)

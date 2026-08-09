@@ -27,7 +27,11 @@ def make_tool_result(
         result_content.append(
             {"type": "text", "text": _bounded_model_text(text, tool_name)}
         )
-    return {"content": result_content, "structuredContent": payload, "isError": is_error}
+    return {
+        "content": result_content,
+        "structuredContent": payload,
+        "isError": is_error,
+    }
 
 
 def render_tool_text(tool_name: str, payload: dict[str, Any], *, is_error: bool) -> str:
@@ -76,7 +80,9 @@ def _render_exec_environment(payload: dict[str, Any]) -> str:
     raw_landlock = payload.get("landlock")
     landlock: dict[str, Any] = raw_landlock if isinstance(raw_landlock, dict) else {}
     state = "available" if landlock.get("available") else "unavailable"
-    warnings = payload.get("warnings") if isinstance(payload.get("warnings"), list) else []
+    warnings = (
+        payload.get("warnings") if isinstance(payload.get("warnings"), list) else []
+    )
     suffix = "\n" + "\n".join(str(item) for item in warnings) if warnings else ""
     return f"Execution environment checked. Landlock: {state}.{suffix}"
 
@@ -110,7 +116,11 @@ def _render_read_file(payload: dict[str, Any]) -> str:
 
 
 def _render_list(payload: dict[str, Any]) -> str:
-    entries = payload.get("entries") if isinstance(payload.get("entries"), list) else payload.get("files")
+    entries = (
+        payload.get("entries")
+        if isinstance(payload.get("entries"), list)
+        else payload.get("files")
+    )
     if not isinstance(entries, list) or not entries:
         return "No entries found."
     lines: list[str] = []
@@ -121,7 +131,9 @@ def _render_list(payload: dict[str, Any]) -> str:
         kind = item.get("type")
         lines.append(f"{path}{' [' + str(kind) + ']' if kind else ''}")
     if payload.get("truncated"):
-        lines.append("… results truncated; narrow the path/patterns or raise the entry limit.")
+        lines.append(
+            "… results truncated; narrow the path/patterns or raise the entry limit."
+        )
     return "\n".join(lines)
 
 
@@ -155,7 +167,9 @@ def _render_search(payload: dict[str, Any]) -> str:
                 " narrow the query/path or raise max_results."
             )
         else:
-            lines.append("… results truncated; narrow the query/path or raise max_results.")
+            lines.append(
+                "… results truncated; narrow the query/path or raise max_results."
+            )
     return "\n".join(lines)
 
 
@@ -207,7 +221,9 @@ def _render_exec(payload: dict[str, Any]) -> str:
         if continuations:
             sections.extend(continuations)
         else:
-            sections.append("Output truncated; use read_output with the returned output_ref to read more.")
+            sections.append(
+                "Output truncated; use read_output with the returned output_ref to read more."
+            )
     return "\n".join(sections)
 
 
@@ -221,13 +237,19 @@ def _render_read_output(payload: dict[str, Any]) -> str:
     next_call = _render_next_action(payload)
     if not next_call:
         ref = payload.get("stream_output_ref") or payload.get("output_ref") or ""
-        next_call = _render_tool_call("read_output", {"output_ref": ref, "offset": next_offset})
+        next_call = _render_tool_call(
+            "read_output", {"output_ref": ref, "offset": next_offset}
+        )
     return f"{content}\n[more: {next_call}]"
 
 
 def _render_kill(payload: dict[str, Any]) -> str:
     signal_sent = payload.get("signal_sent")
-    suffix = f" (signal {signal_sent})" if isinstance(signal_sent, str) and signal_sent else ""
+    suffix = (
+        f" (signal {signal_sent})"
+        if isinstance(signal_sent, str) and signal_sent
+        else ""
+    )
     return f"Session {payload.get('session_id', '')}: {payload.get('status', 'completed')}{suffix}."
 
 
@@ -283,7 +305,11 @@ def _render_git_log(payload: dict[str, Any]) -> str:
     if payload.get("truncated"):
         next_call = _render_next_action(payload)
         text += "\n… more commits available"
-        text += f"; continue with {next_call}." if next_call else "; raise max_count or use skip."
+        text += (
+            f"; continue with {next_call}."
+            if next_call
+            else "; raise max_count or use skip."
+        )
     return text
 
 
@@ -302,7 +328,11 @@ def _render_git_blame(payload: dict[str, Any]) -> str:
     if payload.get("truncated"):
         next_call = _render_next_action(payload)
         text += "\n… blame lines truncated"
-        text += f"; continue with {next_call}." if next_call else "; raise max_lines or advance start_line."
+        text += (
+            f"; continue with {next_call}."
+            if next_call
+            else "; raise max_lines or advance start_line."
+        )
     return text
 
 

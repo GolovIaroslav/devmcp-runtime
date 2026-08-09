@@ -21,7 +21,9 @@ def test_sandbox_cannot_reach_network_or_authoritative_workspace():
     if authoritative:
         target = Path(authoritative) / "calc.py"
         try:
-            target.write_text("sandbox must not write authoritative files\n", encoding="utf-8")
+            target.write_text(
+                "sandbox must not write authoritative files\n", encoding="utf-8"
+            )
         except OSError:
             pass
         else:

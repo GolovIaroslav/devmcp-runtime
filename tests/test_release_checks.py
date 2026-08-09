@@ -22,7 +22,9 @@ class ReleaseMetadataTests(unittest.TestCase):
         )
         (root / "CHANGELOG.md").write_text(changelog, encoding="utf-8")
 
-    def test_release_metadata_accepts_matching_python_version_without_npm_launcher(self) -> None:
+    def test_release_metadata_accepts_matching_python_version_without_npm_launcher(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             self._write_release_tree(root)
@@ -38,7 +40,9 @@ class ReleaseMetadataTests(unittest.TestCase):
             with self.assertRaisesRegex(SystemExit, "Unreleased"):
                 validate_release(root, "v0.2.0")
 
-    def test_release_metadata_does_not_require_or_inspect_an_old_npm_launcher(self) -> None:
+    def test_release_metadata_does_not_require_or_inspect_an_old_npm_launcher(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             self._write_release_tree(root)
@@ -52,7 +56,10 @@ class ReleaseMetadataTests(unittest.TestCase):
 class FinalAuditTests(unittest.TestCase):
     def test_workflow_runs_url_filters_by_release_sha(self) -> None:
         url = workflow_runs_url(
-            "https://api.github.com", "xyTom/coding-tools-mcp", "final-audit.yml", "abc123"
+            "https://api.github.com",
+            "xyTom/coding-tools-mcp",
+            "final-audit.yml",
+            "abc123",
         )
         parsed = urlparse(url)
         self.assertEqual(
@@ -66,9 +73,24 @@ class FinalAuditTests(unittest.TestCase):
 
     def test_selects_latest_successful_run_for_release_sha(self) -> None:
         runs = [
-            {"id": 1, "head_sha": "abc", "status": "completed", "conclusion": "success"},
-            {"id": 3, "head_sha": "abc", "status": "completed", "conclusion": "success"},
-            {"id": 4, "head_sha": "def", "status": "completed", "conclusion": "success"},
+            {
+                "id": 1,
+                "head_sha": "abc",
+                "status": "completed",
+                "conclusion": "success",
+            },
+            {
+                "id": 3,
+                "head_sha": "abc",
+                "status": "completed",
+                "conclusion": "success",
+            },
+            {
+                "id": 4,
+                "head_sha": "def",
+                "status": "completed",
+                "conclusion": "success",
+            },
         ]
         selected = select_successful_run(runs, "abc")
         self.assertIsNotNone(selected)
@@ -77,7 +99,12 @@ class FinalAuditTests(unittest.TestCase):
 
     def test_rejects_failed_or_incomplete_runs(self) -> None:
         runs = [
-            {"id": 1, "head_sha": "abc", "status": "completed", "conclusion": "failure"},
+            {
+                "id": 1,
+                "head_sha": "abc",
+                "status": "completed",
+                "conclusion": "failure",
+            },
             {"id": 2, "head_sha": "abc", "status": "in_progress", "conclusion": None},
         ]
         self.assertIsNone(select_successful_run(runs, "abc"))

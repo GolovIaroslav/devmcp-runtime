@@ -64,7 +64,10 @@ class TelemetryModeTests(unittest.TestCase):
 
     def test_env_switch_disables(self) -> None:
         for value in ("off", "0", "false", "no", "disabled"):
-            with self.subTest(value=value), scrubbed_env(CODING_TOOLS_MCP_TELEMETRY=value):
+            with (
+                self.subTest(value=value),
+                scrubbed_env(CODING_TOOLS_MCP_TELEMETRY=value),
+            ):
                 self.assertEqual(telemetry.telemetry_mode(), "off")
 
     def test_do_not_track_disables(self) -> None:
@@ -86,7 +89,11 @@ class TelemetryModeTests(unittest.TestCase):
 
 class OffMeansOffTests(unittest.TestCase):
     def test_disabled_session_never_reaches_the_sender(self) -> None:
-        for overrides in ({"CODING_TOOLS_MCP_TELEMETRY": "off"}, {"DO_NOT_TRACK": "1"}, {"CI": "1"}):
+        for overrides in (
+            {"CODING_TOOLS_MCP_TELEMETRY": "off"},
+            {"DO_NOT_TRACK": "1"},
+            {"CI": "1"},
+        ):
             with self.subTest(overrides=overrides), scrubbed_env(**overrides):
                 get_sender = Mock()
                 with patch.object(telemetry, "_get_sender", get_sender):
@@ -122,12 +129,17 @@ class OffMeansOffTests(unittest.TestCase):
 
 def _run_probe_session() -> _CapturingSender:
     sender = _CapturingSender()
-    with scrubbed_env(CODING_TOOLS_MCP_TELEMETRY="on"), patch.object(telemetry, "_get_sender", lambda: sender):
+    with (
+        scrubbed_env(CODING_TOOLS_MCP_TELEMETRY="on"),
+        patch.object(telemetry, "_get_sender", lambda: sender),
+    ):
         with tempfile.TemporaryDirectory() as tmp:
             marker = "leakprobe-a8f3"
             workspace = Path(tmp) / marker
             workspace.mkdir()
-            (workspace / f"{marker}.txt").write_text("leakprobe-content\n", encoding="utf-8")
+            (workspace / f"{marker}.txt").write_text(
+                "leakprobe-content\n", encoding="utf-8"
+            )
             runtime = Runtime(workspace)
             _initialize(runtime, client_name="clientinfo-probe")
             runtime.call_tool("get_default_cwd", {})
@@ -188,7 +200,10 @@ class SessionEventTests(unittest.TestCase):
 
     def test_sessions_without_initialize_emit_nothing(self) -> None:
         sender = _CapturingSender()
-        with scrubbed_env(CODING_TOOLS_MCP_TELEMETRY="on"), patch.object(telemetry, "_get_sender", lambda: sender):
+        with (
+            scrubbed_env(CODING_TOOLS_MCP_TELEMETRY="on"),
+            patch.object(telemetry, "_get_sender", lambda: sender),
+        ):
             with tempfile.TemporaryDirectory() as tmp:
                 runtime = Runtime(Path(tmp))
                 runtime.call_tool("get_default_cwd", {})
@@ -198,12 +213,19 @@ class SessionEventTests(unittest.TestCase):
 
     def test_error_events_are_capped_and_drops_are_counted(self) -> None:
         sender = _CapturingSender()
-        with scrubbed_env(CODING_TOOLS_MCP_TELEMETRY="on"), patch.object(telemetry, "_get_sender", lambda: sender):
+        with (
+            scrubbed_env(CODING_TOOLS_MCP_TELEMETRY="on"),
+            patch.object(telemetry, "_get_sender", lambda: sender),
+        ):
             session = SessionTelemetry(permission_mode="safe")
             session.record_session_start({"name": "cap"}, "2025-11-25")
             for _ in range(ERROR_EVENTS_PER_SESSION + 5):
                 session.record_tool_call(
-                    "apply_patch", ok=False, error_code="PATCH_CONTEXT_MISMATCH", duration_ms=5, truncated=False
+                    "apply_patch",
+                    ok=False,
+                    error_code="PATCH_CONTEXT_MISMATCH",
+                    duration_ms=5,
+                    truncated=False,
                 )
             session.finish()
         errors = [event for event in sender.events if event["event"] == "tool_error"]
@@ -215,28 +237,46 @@ class SessionEventTests(unittest.TestCase):
 
     def test_duration_buckets_and_finish_is_idempotent(self) -> None:
         sender = _CapturingSender()
-        with scrubbed_env(CODING_TOOLS_MCP_TELEMETRY="on"), patch.object(telemetry, "_get_sender", lambda: sender):
+        with (
+            scrubbed_env(CODING_TOOLS_MCP_TELEMETRY="on"),
+            patch.object(telemetry, "_get_sender", lambda: sender),
+        ):
             session = SessionTelemetry(permission_mode="safe")
             session.record_session_start(None, "2025-11-25")
             for duration in (50, 500, 5_000, 50_000):
-                session.record_tool_call("exec_command", ok=True, error_code=None, duration_ms=duration, truncated=True)
+                session.record_tool_call(
+                    "exec_command",
+                    ok=True,
+                    error_code=None,
+                    duration_ms=duration,
+                    truncated=True,
+                )
             session.finish()
             session.finish()
-        summaries = [event for event in sender.events if event["event"] == "tool_summary"]
+        summaries = [
+            event for event in sender.events if event["event"] == "tool_summary"
+        ]
         self.assertEqual(len(summaries), 1)
         properties = summaries[0]["properties"]
         assert isinstance(properties, dict)
         for bucket in ("dur_lt_100ms", "dur_lt_1s", "dur_lt_10s", "dur_gte_10s"):
             self.assertEqual(properties[bucket], 1)
         self.assertEqual(properties["truncated"], 4)
-        self.assertEqual(len([event for event in sender.events if event["event"] == "session_end"]), 1)
+        self.assertEqual(
+            len([event for event in sender.events if event["event"] == "session_end"]),
+            1,
+        )
 
 
 class DocumentationDriftTests(unittest.TestCase):
     def test_documented_schema_matches_emitted_events(self) -> None:
-        doc = (Path(__file__).resolve().parents[1] / "docs" / "telemetry.md").read_text(encoding="utf-8")
+        doc = (Path(__file__).resolve().parents[1] / "docs" / "telemetry.md").read_text(
+            encoding="utf-8"
+        )
         emitted = {str(event["event"]) for event in _run_probe_session().events}
-        self.assertEqual(emitted, {"session_start", "tool_error", "tool_summary", "session_end"})
+        self.assertEqual(
+            emitted, {"session_start", "tool_error", "tool_summary", "session_end"}
+        )
         for name in emitted:
             self.assertIn(f"`{name}`", doc)
         self.assertIn(f"max {ERROR_EVENTS_PER_SESSION} per session", doc)

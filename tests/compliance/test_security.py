@@ -10,17 +10,27 @@ from tests.compliance.test_support import ComplianceTestCase
 class SecurityComplianceTests(ComplianceTestCase):
     fixture_name = "malicious-project"
 
-    def test_path_traversal_absolute_paths_and_symlink_escape_are_rejected(self) -> None:
-        self.assert_denied_or_permission_required("read_file", {"path": "../outside-secret.txt"})
-        self.assert_denied_or_permission_required("read_file", {"path": str(self.workspace.outside_secret)})
-        self.assert_denied_or_permission_required("read_file", {"path": "outside-link.txt"})
+    def test_path_traversal_absolute_paths_and_symlink_escape_are_rejected(
+        self,
+    ) -> None:
+        self.assert_denied_or_permission_required(
+            "read_file", {"path": "../outside-secret.txt"}
+        )
+        self.assert_denied_or_permission_required(
+            "read_file", {"path": str(self.workspace.outside_secret)}
+        )
+        self.assert_denied_or_permission_required(
+            "read_file", {"path": "outside-link.txt"}
+        )
 
         absolute_patch = f"""*** Begin Patch
 *** Add File: {self.workspace.outside_secret}
 +unsafe
 *** End Patch
 """
-        self.assert_denied_or_permission_required("apply_patch", {"patch": absolute_patch})
+        self.assert_denied_or_permission_required(
+            "apply_patch", {"patch": absolute_patch}
+        )
 
         traversal_patch = """*** Begin Patch
 *** Update File: ../outside-secret.txt
@@ -29,7 +39,9 @@ class SecurityComplianceTests(ComplianceTestCase):
 +unsafe
 *** End Patch
 """
-        self.assert_denied_or_permission_required("apply_patch", {"patch": traversal_patch})
+        self.assert_denied_or_permission_required(
+            "apply_patch", {"patch": traversal_patch}
+        )
 
         symlink_patch = """*** Begin Patch
 *** Update File: outside-link.txt
@@ -38,15 +50,29 @@ class SecurityComplianceTests(ComplianceTestCase):
 +unsafe
 *** End Patch
 """
-        self.assert_denied_or_permission_required("apply_patch", {"patch": symlink_patch})
+        self.assert_denied_or_permission_required(
+            "apply_patch", {"patch": symlink_patch}
+        )
 
-    def test_exec_workdir_shell_escape_destructive_and_network_are_rejected(self) -> None:
-        self.assert_denied_or_permission_required("exec_command", {"cmd": "pwd", "workdir": ".."})
-        self.assert_denied_or_permission_required("exec_command", {"cmd": "cat ../outside-secret.txt"})
-        self.assert_denied_or_permission_required("exec_command", {"cmd": "cat outside-link.txt"})
+    def test_exec_workdir_shell_escape_destructive_and_network_are_rejected(
+        self,
+    ) -> None:
+        self.assert_denied_or_permission_required(
+            "exec_command", {"cmd": "pwd", "workdir": ".."}
+        )
+        self.assert_denied_or_permission_required(
+            "exec_command", {"cmd": "cat ../outside-secret.txt"}
+        )
+        self.assert_denied_or_permission_required(
+            "exec_command", {"cmd": "cat outside-link.txt"}
+        )
         self.assert_denied_or_permission_required("exec_command", {"cmd": "rm -rf /"})
-        self.assert_denied_or_permission_required("exec_command", {"cmd": "git reset --hard"})
-        self.assert_denied_or_permission_required("exec_command", {"cmd": "chmod -R 777 /"})
+        self.assert_denied_or_permission_required(
+            "exec_command", {"cmd": "git reset --hard"}
+        )
+        self.assert_denied_or_permission_required(
+            "exec_command", {"cmd": "chmod -R 777 /"}
+        )
         self.assert_denied_or_permission_required(
             "exec_command",
             {
@@ -62,7 +88,7 @@ class SecurityComplianceTests(ComplianceTestCase):
             {
                 "cmd": (
                     "python -c "
-                    f"\"from pathlib import Path; print(Path({outside_secret}).read_text())\""
+                    f'"from pathlib import Path; print(Path({outside_secret}).read_text())"'
                 ),
                 "timeout_ms": 5000,
                 "max_output_bytes": 4096,
@@ -70,7 +96,7 @@ class SecurityComplianceTests(ComplianceTestCase):
         )
         computed_cmd = (
             "python -c "
-            "\"import os; "
+            '"import os; '
             "print(open(os.path.dirname(os.getcwd()) + chr(47) + 'outside-secret.txt').read())\""
         )
         self.assert_denied_or_permission_required(
@@ -83,7 +109,7 @@ class SecurityComplianceTests(ComplianceTestCase):
         )
         direct_syscall_cmd = (
             "python -c "
-            "\"import os, ctypes as c; "
+            '"import os, ctypes as c; '
             "lib=c.CDLL(None, use_errno=True); "
             "p=(os.path.dirname(os.getcwd()) + chr(47) + 'outside-secret.txt').encode(); "
             "fd=lib.syscall(257, -100, c.c_char_p(p), 0); "
@@ -99,7 +125,7 @@ class SecurityComplianceTests(ComplianceTestCase):
         )
         direct_syscall_write_cmd = (
             "python -c "
-            "\"import os, ctypes as c; "
+            '"import os, ctypes as c; '
             "lib=c.CDLL(None, use_errno=True); "
             "p=(os.path.dirname(os.getcwd()) + chr(47) + 'outside-secret.txt').encode(); "
             "fd=lib.syscall(257, -100, c.c_char_p(p), os.O_WRONLY | os.O_TRUNC); "
@@ -113,16 +139,19 @@ class SecurityComplianceTests(ComplianceTestCase):
                 "max_output_bytes": 4096,
             },
         )
-        self.assertEqual(self.workspace.outside_secret.read_text(encoding="utf-8"), "TOP_SECRET_DO_NOT_READ\n")
-        
+        self.assertEqual(
+            self.workspace.outside_secret.read_text(encoding="utf-8"),
+            "TOP_SECRET_DO_NOT_READ\n",
+        )
+
     def test_exec_command_landlock_absolute_path_bypass_is_rejected(self) -> None:
         authoritative_file = self.workspace.root / "inside.txt"
         authoritative_path = repr(str(authoritative_file))
-        
+
         # This tests that the authoritative workspace cannot be written to
         # via an absolute path, even if it is known to the attacker.
         write_cmd = f"python -c \"open({authoritative_path}, 'w').write('HACKED')\""
-        
+
         self.assert_denied_or_permission_required(
             "exec_command",
             {
@@ -135,16 +164,22 @@ class SecurityComplianceTests(ComplianceTestCase):
         self.assert_denied_or_permission_required(
             "exec_command",
             {
-                "cmd": "cat $(dirname \"$PWD\")/outside-secret.txt",
+                "cmd": 'cat $(dirname "$PWD")/outside-secret.txt',
                 "timeout_ms": 5000,
                 "max_output_bytes": 4096,
             },
         )
 
-    def test_exec_command_long_non_path_tokens_do_not_become_internal_errors(self) -> None:
+    def test_exec_command_long_non_path_tokens_do_not_become_internal_errors(
+        self,
+    ) -> None:
         result = self.client.call_tool(
             "exec_command",
-            {"cmd": "printf " + ("a" * 300), "timeout_ms": 5000, "max_output_bytes": 4096},
+            {
+                "cmd": "printf " + ("a" * 300),
+                "timeout_ms": 5000,
+                "max_output_bytes": 4096,
+            },
         )
         payload = self.assert_tool_success(result)
         self.assertEqual(payload.get("status"), "exited", payload)
@@ -158,12 +193,18 @@ class SecurityComplianceTests(ComplianceTestCase):
         ]
         for cmd in dangerous_commands:
             with self.subTest(cmd=cmd):
-                with self.session_for_fixture("tiny-js-project") as (_workspace, client):
+                with self.session_for_fixture("tiny-js-project") as (
+                    _workspace,
+                    client,
+                ):
                     result = client.call_tool(
                         "exec_command",
                         {"cmd": cmd, "timeout_ms": 5000, "max_output_bytes": 4096},
                     )
-                    self.assertTrue(result.get("isError", False), f"destructive command must be denied: {result!r}")
+                    self.assertTrue(
+                        result.get("isError", False),
+                        f"destructive command must be denied: {result!r}",
+                    )
 
     def test_exec_command_rejects_obfuscated_network_access(self) -> None:
         result = self.client.call_tool(
@@ -171,7 +212,7 @@ class SecurityComplianceTests(ComplianceTestCase):
             {
                 "cmd": (
                     "python -c "
-                    "\"import http.client; "
+                    '"import http.client; '
                     "c=http.client.HTTPConnection('127.0.0.1', 9, timeout=0.2); "
                     "c.request('GET', '/')\""
                 ),
@@ -179,7 +220,10 @@ class SecurityComplianceTests(ComplianceTestCase):
                 "max_output_bytes": 4096,
             },
         )
-        self.assertTrue(result.get("isError", False), f"network command must be denied before execution: {result!r}")
+        self.assertTrue(
+            result.get("isError", False),
+            f"network command must be denied before execution: {result!r}",
+        )
 
     def test_exec_command_rejects_shell_startup_and_loader_environment(self) -> None:
         risky_env = {
@@ -190,10 +234,17 @@ class SecurityComplianceTests(ComplianceTestCase):
         }
         for key, value in risky_env.items():
             with self.subTest(env=key):
-                result = self.client.call_tool("exec_command", {"cmd": "true", "env": {key: value}})
-                self.assertTrue(result.get("isError", False), f"{key} must require permission or be denied: {result!r}")
+                result = self.client.call_tool(
+                    "exec_command", {"cmd": "true", "env": {key: value}}
+                )
+                self.assertTrue(
+                    result.get("isError", False),
+                    f"{key} must require permission or be denied: {result!r}",
+                )
 
-    def test_exec_command_timeout_is_enforced_after_running_session_is_returned(self) -> None:
+    def test_exec_command_timeout_is_enforced_after_running_session_is_returned(
+        self,
+    ) -> None:
         started = self.client.call_tool(
             "exec_command",
             {
@@ -205,13 +256,20 @@ class SecurityComplianceTests(ComplianceTestCase):
         )
         payload = self.assert_tool_success(started)
         session_id = payload.get("session_id")
-        self.assertIsInstance(session_id, str, f"running command should expose a session id: {payload!r}")
+        self.assertIsInstance(
+            session_id, str, f"running command should expose a session id: {payload!r}"
+        )
 
         try:
             time.sleep(0.35)
             polled = self.client.call_tool(
                 "write_stdin",
-                {"session_id": session_id, "chars": "", "yield_time_ms": 0, "max_output_bytes": 4096},
+                {
+                    "session_id": session_id,
+                    "chars": "",
+                    "yield_time_ms": 0,
+                    "max_output_bytes": 4096,
+                },
             )
             poll_payload = self.assert_tool_success(polled)
             self.assertNotEqual(
@@ -220,12 +278,15 @@ class SecurityComplianceTests(ComplianceTestCase):
                 f"command should have timed out after the configured deadline: {poll_payload!r}",
             )
             self.assertTrue(
-                poll_payload.get("timed_out") or poll_payload.get("status") in {"timeout", "exited"},
+                poll_payload.get("timed_out")
+                or poll_payload.get("status") in {"timeout", "exited"},
                 f"timeout should be explicit after deadline: {poll_payload!r}",
             )
         finally:
             if isinstance(session_id, str):
-                self.client.call_tool("kill_session", {"session_id": session_id, "signal": "KILL"})
+                self.client.call_tool(
+                    "kill_session", {"session_id": session_id, "signal": "KILL"}
+                )
 
     def test_exec_command_timeout_is_enforced_without_client_polling(self) -> None:
         started = self.client.call_tool(
@@ -245,7 +306,12 @@ class SecurityComplianceTests(ComplianceTestCase):
         time.sleep(0.35)
         polled = self.client.call_tool(
             "write_stdin",
-            {"session_id": session_id, "chars": "", "yield_time_ms": 0, "max_output_bytes": 4096},
+            {
+                "session_id": session_id,
+                "chars": "",
+                "yield_time_ms": 0,
+                "max_output_bytes": 4096,
+            },
         )
         poll_payload = self.assert_tool_success(polled)
         self.assertEqual(poll_payload.get("status"), "timeout", poll_payload)
@@ -268,12 +334,19 @@ class SecurityComplianceTests(ComplianceTestCase):
         time.sleep(0.5)
         polled = self.client.call_tool(
             "write_stdin",
-            {"session_id": session_id, "chars": "", "yield_time_ms": 0, "max_output_bytes": 1024},
+            {
+                "session_id": session_id,
+                "chars": "",
+                "yield_time_ms": 0,
+                "max_output_bytes": 1024,
+            },
         )
         poll_payload = self.assert_tool_success(polled)
         self.assertGreater(poll_payload.get("stdout_dropped_bytes", 0), 0, poll_payload)
         self.assertTrue(poll_payload.get("truncated"), poll_payload)
-        self.client.call_tool("kill_session", {"session_id": session_id, "signal": "KILL"})
+        self.client.call_tool(
+            "kill_session", {"session_id": session_id, "signal": "KILL"}
+        )
 
     def test_sensitive_environment_is_not_leaked_to_child_processes(self) -> None:
         result = self.client.call_tool(
@@ -289,17 +362,27 @@ class SecurityComplianceTests(ComplianceTestCase):
         self.assertNotIn("COMPLIANCE_SHOULD_NOT_LEAK", self.tool_text(result))
 
     def test_read_only_tools_do_not_follow_symlink_escape_fixture(self) -> None:
-        listed = self.client.call_tool("list_dir", {"path": ".", "include_hidden": True})
+        listed = self.client.call_tool(
+            "list_dir", {"path": ".", "include_hidden": True}
+        )
         self.assert_tool_success(listed)
         self.assertNotIn("TOP_SECRET_DO_NOT_READ", self.tool_text(listed))
 
-        files = self.client.call_tool("list_files", {"glob": "**/*", "include_hidden": True})
+        files = self.client.call_tool(
+            "list_files", {"glob": "**/*", "include_hidden": True}
+        )
         payload = self.assert_tool_success(files)
-        paths = {entry.get("path") for entry in payload.get("files", []) if isinstance(entry, dict)}
+        paths = {
+            entry.get("path")
+            for entry in payload.get("files", [])
+            if isinstance(entry, dict)
+        }
         self.assertNotIn("outside-link.txt", paths)
         self.assertNotIn("TOP_SECRET_DO_NOT_READ", self.tool_text(files))
 
-        search = self.client.call_tool("search_text", {"query": "TOP_SECRET_DO_NOT_READ", "path": "."})
+        search = self.client.call_tool(
+            "search_text", {"query": "TOP_SECRET_DO_NOT_READ", "path": "."}
+        )
         payload = self.assert_tool_success(search)
         self.assertEqual(payload.get("matches"), [])
         self.assertEqual(payload.get("total_matches"), 0)
@@ -318,7 +401,9 @@ class SecurityComplianceTests(ComplianceTestCase):
 
     def test_stdout_json_rpc_pollution_is_absent(self) -> None:
         stdout = self.client.stdout_snapshot()
-        self.assertEqual(stdout, "", f"stdout must stay clean for JSON-RPC compatibility: {stdout!r}")
+        self.assertEqual(
+            stdout, "", f"stdout must stay clean for JSON-RPC compatibility: {stdout!r}"
+        )
 
     def test_concurrent_read_only_tool_calls_are_stable(self) -> None:
         def call(index: int) -> str:
@@ -326,7 +411,9 @@ class SecurityComplianceTests(ComplianceTestCase):
                 if index % 2 == 0:
                     result = client.call_tool("read_file", {"path": "inside.txt"})
                 else:
-                    result = client.call_tool("search_text", {"query": "safe workspace", "path": "."})
+                    result = client.call_tool(
+                        "search_text", {"query": "safe workspace", "path": "."}
+                    )
                 return self.tool_text(result)
 
         with ThreadPoolExecutor(max_workers=6) as executor:

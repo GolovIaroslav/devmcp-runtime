@@ -54,7 +54,11 @@ def connect_with_retry(
         except catch as exc:
             last_error = exc
             time.sleep(poll_interval)
-    return None, None, str(last_error) if last_error is not None else "startup timeout elapsed"
+    return (
+        None,
+        None,
+        str(last_error) if last_error is not None else "startup timeout elapsed",
+    )
 
 
 class McpHttpClient:
@@ -100,25 +104,38 @@ class McpHttpClient:
         result = self.request("tools/list", {})
         tools = result.get("tools")
         if not isinstance(tools, list):
-            raise McpHttpError("tools/list result did not contain a tools array", payload=result)
+            raise McpHttpError(
+                "tools/list result did not contain a tools array", payload=result
+            )
         return tools
 
     def call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         return self.request("tools/call", {"name": name, "arguments": arguments})
 
     def notify(self, method: str, params: dict[str, Any]) -> None:
-        self._post({"jsonrpc": "2.0", "method": method, "params": params}, expect_reply=False)
+        self._post(
+            {"jsonrpc": "2.0", "method": method, "params": params}, expect_reply=False
+        )
 
-    def request(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+    def request(
+        self, method: str, params: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
         request_id = self._next_id
         self._next_id += 1
         reply = self._post(
-            {"jsonrpc": "2.0", "id": request_id, "method": method, "params": params or {}},
+            {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "method": method,
+                "params": params or {},
+            },
             expect_reply=True,
         )
         payload = reply.payload
         if payload is None:
-            raise McpHttpError(f"{method} returned an empty response", status=reply.status)
+            raise McpHttpError(
+                f"{method} returned an empty response", status=reply.status
+            )
         if payload.get("id") not in (request_id, None):
             raise McpHttpError(
                 f"{method} returned mismatched JSON-RPC id {payload.get('id')!r}",
@@ -133,7 +150,11 @@ class McpHttpClient:
             )
         result = payload.get("result")
         if not isinstance(result, dict):
-            raise McpHttpError(f"{method} result was not an object", status=reply.status, payload=payload)
+            raise McpHttpError(
+                f"{method} result was not an object",
+                status=reply.status,
+                payload=payload,
+            )
         return result
 
     def _post(self, payload: dict[str, Any], *, expect_reply: bool) -> JsonRpcReply:
@@ -146,7 +167,9 @@ class McpHttpClient:
         if self.session_id:
             headers["Mcp-Session-Id"] = self.session_id
 
-        request = urllib.request.Request(self.endpoint, data=body, headers=headers, method="POST")
+        request = urllib.request.Request(
+            self.endpoint, data=body, headers=headers, method="POST"
+        )
         try:
             with urllib.request.urlopen(request, timeout=self.timeout) as response:
                 status = response.getcode()
@@ -164,7 +187,9 @@ class McpHttpClient:
                 payload=parsed or raw.decode("utf-8", errors="replace"),
             ) from exc
         except urllib.error.URLError as exc:
-            raise McpHttpError(f"Could not connect to MCP endpoint: {exc.reason}") from exc
+            raise McpHttpError(
+                f"Could not connect to MCP endpoint: {exc.reason}"
+            ) from exc
 
         if not expect_reply and status in (200, 202, 204):
             return JsonRpcReply(status=status, payload=None, headers=response_headers)
@@ -186,7 +211,11 @@ class McpHttpClient:
         text = raw.decode("utf-8", errors="replace").strip()
         if not text:
             return None
-        if "text/event-stream" in content_type or text.startswith("event:") or text.startswith("data:"):
+        if (
+            "text/event-stream" in content_type
+            or text.startswith("event:")
+            or text.startswith("data:")
+        ):
             for line in text.splitlines():
                 if not line.startswith("data:"):
                     continue

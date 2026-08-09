@@ -26,7 +26,9 @@ class ToolFailure(Exception):
 class JsonRpcError(Exception):
     """A JSON-RPC protocol failure with an optional structured data payload."""
 
-    def __init__(self, code: int, message: str, data: dict[str, Any] | None = None) -> None:
+    def __init__(
+        self, code: int, message: str, data: dict[str, Any] | None = None
+    ) -> None:
         super().__init__(message)
         self.code = code
         self.message = message

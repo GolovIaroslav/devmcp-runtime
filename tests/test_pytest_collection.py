@@ -19,7 +19,10 @@ class PytestCollectionTests(unittest.TestCase):
             timeout=30,
         )
         self.assertEqual(completed.returncode, 0, completed.stdout)
-        self.assertNotIn("tests/compliance/fixtures/tiny-python-project/tests/test_math_utils.py", completed.stdout)
+        self.assertNotIn(
+            "tests/compliance/fixtures/tiny-python-project/tests/test_math_utils.py",
+            completed.stdout,
+        )
 
 
 if __name__ == "__main__":

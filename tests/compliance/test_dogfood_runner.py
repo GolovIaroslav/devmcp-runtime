@@ -7,7 +7,10 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from benchmarks.dogfood.mcp_deterministic_runner import dogfood_fixture_parent, prepare_workspace
+from benchmarks.dogfood.mcp_deterministic_runner import (
+    dogfood_fixture_parent,
+    prepare_workspace,
+)
 
 
 class DogfoodRunnerHelperTests(unittest.TestCase):

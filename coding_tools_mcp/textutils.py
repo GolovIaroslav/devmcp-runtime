@@ -34,7 +34,9 @@ class TextTruncation:
         }
 
 
-def truncate_text_head(text: str, *, max_lines: int = DEFAULT_MAX_LINES, max_bytes: int = 50 * 1024) -> TextTruncation:
+def truncate_text_head(
+    text: str, *, max_lines: int = DEFAULT_MAX_LINES, max_bytes: int = 50 * 1024
+) -> TextTruncation:
     if max_lines <= 0:
         max_lines = 1
     if max_bytes <= 0:
@@ -43,7 +45,19 @@ def truncate_text_head(text: str, *, max_lines: int = DEFAULT_MAX_LINES, max_byt
     lines = text.split("\n")
     total_lines = len(lines)
     if total_lines <= max_lines and total_bytes <= max_bytes:
-        return TextTruncation(text, False, None, total_lines, total_bytes, total_lines, total_bytes, False, False, max_lines, max_bytes)
+        return TextTruncation(
+            text,
+            False,
+            None,
+            total_lines,
+            total_bytes,
+            total_lines,
+            total_bytes,
+            False,
+            False,
+            max_lines,
+            max_bytes,
+        )
 
     first_line_bytes = len(lines[0].encode("utf-8")) if lines else 0
     if first_line_bytes > max_bytes:
@@ -91,7 +105,9 @@ def truncate_text_head(text: str, *, max_lines: int = DEFAULT_MAX_LINES, max_byt
     )
 
 
-def truncate_text_tail(text: str, *, max_lines: int = DEFAULT_MAX_LINES, max_bytes: int = 50 * 1024) -> TextTruncation:
+def truncate_text_tail(
+    text: str, *, max_lines: int = DEFAULT_MAX_LINES, max_bytes: int = 50 * 1024
+) -> TextTruncation:
     if max_lines <= 0:
         max_lines = 1
     if max_bytes <= 0:
@@ -100,7 +116,19 @@ def truncate_text_tail(text: str, *, max_lines: int = DEFAULT_MAX_LINES, max_byt
     lines = text.split("\n")
     total_lines = len(lines)
     if total_lines <= max_lines and total_bytes <= max_bytes:
-        return TextTruncation(text, False, None, total_lines, total_bytes, total_lines, total_bytes, False, False, max_lines, max_bytes)
+        return TextTruncation(
+            text,
+            False,
+            None,
+            total_lines,
+            total_bytes,
+            total_lines,
+            total_bytes,
+            False,
+            False,
+            max_lines,
+            max_bytes,
+        )
 
     candidate_lines = lines[:-1] if lines and lines[-1] == "" else lines
     output: list[str] = []

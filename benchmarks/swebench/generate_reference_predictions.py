@@ -20,7 +20,11 @@ def load_subset(path: Path) -> dict[str, Any]:
 
 def selected_instance_ids(subset: dict[str, Any], requested: list[str]) -> list[str]:
     instances = [item for item in subset.get("instances", []) if isinstance(item, dict)]
-    available = [str(item["instance_id"]) for item in instances if isinstance(item.get("instance_id"), str)]
+    available = [
+        str(item["instance_id"])
+        for item in instances
+        if isinstance(item.get("instance_id"), str)
+    ]
     if not requested:
         return available
     missing = sorted(set(requested) - set(available))
@@ -33,7 +37,9 @@ def path_display(values: list[str]) -> str:
     return ", ".join(values)
 
 
-def fetch_rows(dataset_name: str, split: str, offset: int, length: int) -> dict[str, Any]:
+def fetch_rows(
+    dataset_name: str, split: str, offset: int, length: int
+) -> dict[str, Any]:
     query = urllib.parse.urlencode(
         {
             "dataset": dataset_name,
@@ -43,13 +49,17 @@ def fetch_rows(dataset_name: str, split: str, offset: int, length: int) -> dict[
             "length": length,
         }
     )
-    request = urllib.request.Request(f"{DATASETS_SERVER_ROWS}?{query}", headers={"Accept": "application/json"})
+    request = urllib.request.Request(
+        f"{DATASETS_SERVER_ROWS}?{query}", headers={"Accept": "application/json"}
+    )
     with urllib.request.urlopen(request, timeout=120) as response:
         payload = response.read()
     return json.loads(payload)
 
 
-def fetch_reference_patches(dataset_name: str, split: str, instance_ids: list[str], page_size: int = 100) -> dict[str, str]:
+def fetch_reference_patches(
+    dataset_name: str, split: str, instance_ids: list[str], page_size: int = 100
+) -> dict[str, str]:
     wanted = set(instance_ids)
     patches: dict[str, str] = {}
     offset = 0
@@ -66,7 +76,12 @@ def fetch_reference_patches(dataset_name: str, split: str, instance_ids: list[st
                 continue
             instance_id = row.get("instance_id")
             patch = row.get("patch")
-            if isinstance(instance_id, str) and instance_id in wanted and isinstance(patch, str) and patch.strip():
+            if (
+                isinstance(instance_id, str)
+                and instance_id in wanted
+                and isinstance(patch, str)
+                and patch.strip()
+            ):
                 patches[instance_id] = patch
         offset += len(rows)
     missing = sorted(wanted - set(patches))
@@ -85,23 +100,36 @@ def write_predictions(path: Path, model_name: str, patches: dict[str, str]) -> N
         }
         for instance_id, patch in patches.items()
     ]
-    path.write_text("\n".join(json.dumps(row, sort_keys=True) for row in rows) + "\n", encoding="utf-8")
+    path.write_text(
+        "\n".join(json.dumps(row, sort_keys=True) for row in rows) + "\n",
+        encoding="utf-8",
+    )
 
 
 def write_metadata(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--subset", type=Path, default=Path("benchmarks/swebench/subsets/smoke-lite-10.json"))
+    parser.add_argument(
+        "--subset",
+        type=Path,
+        default=Path("benchmarks/swebench/subsets/smoke-lite-10.json"),
+    )
     parser.add_argument("--instance-id", action="append", default=[])
     parser.add_argument("--baseline-output", type=Path, required=True)
     parser.add_argument("--candidate-output", type=Path, required=True)
     parser.add_argument("--metadata-output", type=Path)
-    parser.add_argument("--baseline-model-name", default="baseline_native_reference_patch")
-    parser.add_argument("--candidate-model-name", default="candidate_mcp_reference_patch")
+    parser.add_argument(
+        "--baseline-model-name", default="baseline_native_reference_patch"
+    )
+    parser.add_argument(
+        "--candidate-model-name", default="candidate_mcp_reference_patch"
+    )
     args = parser.parse_args(argv)
 
     subset = load_subset(args.subset)

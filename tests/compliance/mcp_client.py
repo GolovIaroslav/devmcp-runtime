@@ -116,7 +116,9 @@ class MCPClient:
             return self
 
         port = free_port()
-        self.url = os.environ.get("CODING_TOOLS_MCP_URL", f"http://127.0.0.1:{port}/mcp")
+        self.url = os.environ.get(
+            "CODING_TOOLS_MCP_URL", f"http://127.0.0.1:{port}/mcp"
+        )
         cmd = default_server_command(self.workspace, port)
         if not cmd or shutil.which(cmd[0]) is None:
             raise MCPTransportError(
@@ -139,7 +141,9 @@ class MCPClient:
             text=True,
             **subprocess_group_kwargs(),
         )
-        deadline = time.time() + float(os.environ.get("CODING_TOOLS_MCP_STARTUP_TIMEOUT", "10"))
+        deadline = time.time() + float(
+            os.environ.get("CODING_TOOLS_MCP_STARTUP_TIMEOUT", "10")
+        )
         last_error: Exception | None = None
         while time.time() < deadline:
             if self.process.poll() is not None:
@@ -192,7 +196,11 @@ class MCPClient:
                         os.killpg(self.process.pid, signal.SIGKILL)
                     self.process.wait(timeout=2)
         finally:
-            for stream in (self.process.stdin, self.process.stdout, self.process.stderr):
+            for stream in (
+                self.process.stdin,
+                self.process.stdout,
+                self.process.stderr,
+            ):
                 if stream is not None:
                     stream.close()
 
@@ -218,10 +226,14 @@ class MCPClient:
         result = self.rpc("tools/list", {})
         tools = result.get("tools")
         if not isinstance(tools, list):
-            raise AssertionError(f"tools/list result must contain tools array, got {result!r}")
+            raise AssertionError(
+                f"tools/list result must contain tools array, got {result!r}"
+            )
         return tools
 
-    def call_tool(self, name: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
+    def call_tool(
+        self, name: str, arguments: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
         return self.rpc("tools/call", {"name": name, "arguments": arguments or {}})
 
     def notify(self, method: str, params: dict[str, Any] | None = None) -> None:
@@ -260,9 +272,13 @@ class MCPClient:
             headers["Authorization"] = f"Bearer {auth_token}"
         if self.session_id:
             headers["Mcp-Session-Id"] = self.session_id
-        request = urllib.request.Request(self.url, data=data, headers=headers, method="POST")
+        request = urllib.request.Request(
+            self.url, data=data, headers=headers, method="POST"
+        )
         try:
-            request_timeout = float(os.environ.get("CODING_TOOLS_MCP_CLIENT_TIMEOUT", "30"))
+            request_timeout = float(
+                os.environ.get("CODING_TOOLS_MCP_CLIENT_TIMEOUT", "30")
+            )
             with urllib.request.urlopen(request, timeout=request_timeout) as response:
                 session_id = response.headers.get("Mcp-Session-Id")
                 if session_id:
@@ -277,17 +293,23 @@ class MCPClient:
             try:
                 parsed = json.loads(body)
             except json.JSONDecodeError as parse_exc:
-                raise MCPTransportError(f"HTTP {exc.code} from MCP server: {body[:1000]!r}") from parse_exc
+                raise MCPTransportError(
+                    f"HTTP {exc.code} from MCP server: {body[:1000]!r}"
+                ) from parse_exc
             return parsed
         except OSError as exc:
-            raise MCPTransportError(f"Could not POST to MCP server at {self.url}: {exc}") from exc
+            raise MCPTransportError(
+                f"Could not POST to MCP server at {self.url}: {exc}"
+            ) from exc
 
         if "text/event-stream" in content_type:
             return parse_sse_json(text)
         try:
             return json.loads(text)
         except json.JSONDecodeError as exc:
-            raise MCPTransportError(f"MCP server returned non-JSON response: {text[:1000]!r}") from exc
+            raise MCPTransportError(
+                f"MCP server returned non-JSON response: {text[:1000]!r}"
+            ) from exc
 
     def stdout_snapshot(self) -> str:
         if self.process is None or self.process.stdout is None:
@@ -380,7 +402,10 @@ class StdioMCPClient:
             {
                 "protocolVersion": PROTOCOL_VERSION,
                 "capabilities": {},
-                "clientInfo": {"name": "coding-tools-mcp-stdio-client", "version": "0.1"},
+                "clientInfo": {
+                    "name": "coding-tools-mcp-stdio-client",
+                    "version": "0.1",
+                },
             },
         )
         self.notify("notifications/initialized", {})
@@ -431,7 +456,9 @@ class StdioMCPClient:
         if process is None or process.stdin is None:
             raise AssertionError("stdio server was not started")
         if process.poll() is not None:
-            raise AssertionError(f"stdio server exited with {process.returncode}; stderr={self.stderr_tail()!r}")
+            raise AssertionError(
+                f"stdio server exited with {process.returncode}; stderr={self.stderr_tail()!r}"
+            )
         process.stdin.write(json.dumps(payload, separators=(",", ":")) + "\n")
         process.stdin.flush()
 
@@ -439,8 +466,14 @@ class StdioMCPClient:
         deadline = time.time() + 30
         while time.time() < deadline:
             process = self.process
-            if process is not None and process.poll() is not None and self.stdout_lines.empty():
-                raise AssertionError(f"stdio server exited with {process.returncode}; stderr={self.stderr_tail()!r}")
+            if (
+                process is not None
+                and process.poll() is not None
+                and self.stdout_lines.empty()
+            ):
+                raise AssertionError(
+                    f"stdio server exited with {process.returncode}; stderr={self.stderr_tail()!r}"
+                )
             try:
                 line = self.stdout_lines.get(timeout=0.2)
             except queue.Empty:
@@ -448,7 +481,9 @@ class StdioMCPClient:
             response = json.loads(line)
             if response.get("id") == request_id:
                 return response
-        raise AssertionError(f"timed out waiting for JSON-RPC response {request_id}; stderr={self.stderr_tail()!r}")
+        raise AssertionError(
+            f"timed out waiting for JSON-RPC response {request_id}; stderr={self.stderr_tail()!r}"
+        )
 
     def close(self) -> None:
         process = self.process

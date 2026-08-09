@@ -21,7 +21,11 @@ def validate_release(root: Path, tag: str) -> str:
         raise SystemExit(f"release tag {tag!r} does not match {expected_tag!r}")
 
     changelog = (root / "CHANGELOG.md").read_text(encoding="utf-8")
-    if not re.search(rf"^## {re.escape(project_version)} - \d{{4}}-\d{{2}}-\d{{2}}$", changelog, re.MULTILINE):
+    if not re.search(
+        rf"^## {re.escape(project_version)} - \d{{4}}-\d{{2}}-\d{{2}}$",
+        changelog,
+        re.MULTILINE,
+    ):
         raise SystemExit(f"CHANGELOG.md has no dated {project_version} release heading")
     if re.search(r"^## Unreleased\s*$", changelog, re.MULTILINE):
         raise SystemExit("CHANGELOG.md still contains an Unreleased section")
@@ -35,7 +39,9 @@ def main() -> int:
     args = parser.parse_args()
 
     project_version = validate_release(ROOT, args.tag)
-    print(f"Release metadata OK: DevMCP Runtime {project_version} ({args.tag}); no registry publishing is configured.")
+    print(
+        f"Release metadata OK: DevMCP Runtime {project_version} ({args.tag}); no registry publishing is configured."
+    )
     return 0
 
 

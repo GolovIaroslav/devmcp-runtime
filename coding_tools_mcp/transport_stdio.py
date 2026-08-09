@@ -11,7 +11,9 @@ class StdioRuntime(Protocol):
     protocol_version: str
     initialized: bool
 
-    def initialize(self, client_info: dict[str, Any] | None = None) -> dict[str, Any]: ...
+    def initialize(
+        self, client_info: dict[str, Any] | None = None
+    ) -> dict[str, Any]: ...
 
     def list_tools(self) -> dict[str, Any]: ...
 
@@ -55,9 +57,7 @@ def serve_stdio(
                 except Exception as exc:  # noqa: BLE001 - keep the stdio server alive
                     response = jsonrpc_error(None, -32603, str(exc))
             if response is not None:
-                sink.write(
-                    json.dumps(response, separators=(",", ":")) + "\n"
-                )
+                sink.write(json.dumps(response, separators=(",", ":")) + "\n")
                 sink.flush()
     finally:
         runtime.close()

@@ -38,7 +38,9 @@ from .theme import STYLESHEET
 class RuntimeJob(QObject):
     finished = Signal(str, str, object, str)
 
-    def __init__(self, runtime: RuntimeManager, profile: WorkspaceProfile, action: str) -> None:
+    def __init__(
+        self, runtime: RuntimeManager, profile: WorkspaceProfile, action: str
+    ) -> None:
         super().__init__()
         self.runtime = runtime
         self.profile = profile
@@ -116,7 +118,10 @@ class MainWindow(QMainWindow):
         self.sidebar_title = QLabel(tr("MainWindow", "MCP Desktop Client"))
         self.sidebar_title.setObjectName("Title")
         self.sidebar_subtitle = QLabel(
-            tr("MainWindow", "Manage public access, authentication, and local runtime state by workspace.")
+            tr(
+                "MainWindow",
+                "Manage public access, authentication, and local runtime state by workspace.",
+            )
         )
         self.sidebar_subtitle.setWordWrap(True)
         self.sidebar_subtitle.setStyleSheet("color:#667085; font-size:14px;")
@@ -162,7 +167,10 @@ class MainWindow(QMainWindow):
         self.header_title.setObjectName("Title")
         self.header_title.setStyleSheet("font-size:24px;")
         self.header_meta = QLabel(
-            tr("MainWindow", "Add a workspace on the left, then configure public access and authentication.")
+            tr(
+                "MainWindow",
+                "Add a workspace on the left, then configure public access and authentication.",
+            )
         )
         self.header_meta.setStyleSheet("color:#667085; font-size:13px;")
 
@@ -215,7 +223,10 @@ class MainWindow(QMainWindow):
             QMessageBox.information(
                 self,
                 tr("MainWindow", "Operation in progress"),
-                tr("MainWindow", "Wait for the current start or stop operation to finish before closing."),
+                tr(
+                    "MainWindow",
+                    "Wait for the current start or stop operation to finish before closing.",
+                ),
             )
             event.ignore()
             return
@@ -250,7 +261,9 @@ class MainWindow(QMainWindow):
 
         self.frp_server_label = QLabel(tr("MainWindow", "FRP server domain"))
         self.frp_server_edit = QLineEdit()
-        self.frp_server_edit.setPlaceholderText(tr("MainWindow", "Example: frp.example.com"))
+        self.frp_server_edit.setPlaceholderText(
+            tr("MainWindow", "Example: frp.example.com")
+        )
 
         self.subdomain_label = QLabel(tr("MainWindow", "FRP subdomain"))
         self.subdomain_edit = QLineEdit()
@@ -261,14 +274,18 @@ class MainWindow(QMainWindow):
         self.workspace_form.addRow(tr("MainWindow", "Tunnel type"), self.tunnel_type)
         self.workspace_form.addRow(self.cloudflare_mode_label, self.cloudflare_mode)
         self.workspace_form.addRow(self.public_url_label, self.public_url_edit)
-        self.workspace_form.addRow(self.cloudflare_token_label, self.cloudflare_token_edit)
+        self.workspace_form.addRow(
+            self.cloudflare_token_label, self.cloudflare_token_edit
+        )
         self.workspace_form.addRow(self.frp_server_label, self.frp_server_edit)
         self.workspace_form.addRow(self.subdomain_label, self.subdomain_edit)
 
         self.endpoint_hint = QLabel(tr("MainWindow", "Current endpoint: -"))
         self.endpoint_hint.setWordWrap(True)
         self.endpoint_hint.setStyleSheet("color:#667085;")
-        self.workspace_form.addRow(tr("MainWindow", "Current endpoint"), self.endpoint_hint)
+        self.workspace_form.addRow(
+            tr("MainWindow", "Current endpoint"), self.endpoint_hint
+        )
 
         self.save_button = QPushButton(tr("MainWindow", "Save configuration"))
         self.save_button.clicked.connect(self._save_current)
@@ -296,8 +313,12 @@ class MainWindow(QMainWindow):
         self.status_label.setStyleSheet("font-weight:700; color:#b42318;")
 
         self.runtime_form.addRow(tr("MainWindow", "Local port"), self.local_port)
-        self.runtime_form.addRow(tr("MainWindow", "Permission mode"), self.permission_mode)
-        self.runtime_form.addRow(tr("MainWindow", "Custom command"), self.runtime_command)
+        self.runtime_form.addRow(
+            tr("MainWindow", "Permission mode"), self.permission_mode
+        )
+        self.runtime_form.addRow(
+            tr("MainWindow", "Custom command"), self.runtime_command
+        )
         self.runtime_form.addRow(tr("MainWindow", "Status"), self.status_label)
         return box
 
@@ -314,7 +335,10 @@ class MainWindow(QMainWindow):
         self.oauth_password = QLineEdit()
         self.oauth_password.setEchoMode(QLineEdit.EchoMode.Password)
         self.oauth_password.setPlaceholderText(
-            tr("MainWindow", "Enter this password during the first ChatGPT authorization")
+            tr(
+                "MainWindow",
+                "Enter this password during the first ChatGPT authorization",
+            )
         )
 
         self.bearer_token_label = QLabel(tr("MainWindow", "Bearer Token"))
@@ -330,7 +354,9 @@ class MainWindow(QMainWindow):
         oauth_actions_layout = QHBoxLayout(self.oauth_actions)
         oauth_actions_layout.setContentsMargins(0, 0, 0, 0)
         oauth_actions_layout.setSpacing(10)
-        self.copy_oauth_password_button = QPushButton(tr("MainWindow", "Copy authorization password"))
+        self.copy_oauth_password_button = QPushButton(
+            tr("MainWindow", "Copy authorization password")
+        )
         self.copy_oauth_password_button.setProperty("secondary", True)
         self.copy_oauth_password_button.clicked.connect(self._copy_oauth_password)
         oauth_actions_layout.addWidget(self.copy_oauth_password_button)
@@ -394,7 +420,9 @@ class MainWindow(QMainWindow):
         self.language_combo.clear()
         for code, label in self.language_manager.language_options():
             self.language_combo.addItem(label, code)
-        self._set_combo_value(self.language_combo, self.language_manager.configured_language)
+        self._set_combo_value(
+            self.language_combo, self.language_manager.configured_language
+        )
         self.language_combo.blockSignals(False)
 
     def _on_language_selected(self, _index: int) -> None:
@@ -409,7 +437,10 @@ class MainWindow(QMainWindow):
         self.sidebar_eyebrow.setText(tr("MainWindow", "Workspace console"))
         self.sidebar_title.setText(tr("MainWindow", "MCP Desktop Client"))
         self.sidebar_subtitle.setText(
-            tr("MainWindow", "Manage public access, authentication, and local runtime state by workspace.")
+            tr(
+                "MainWindow",
+                "Manage public access, authentication, and local runtime state by workspace.",
+            )
         )
         self.language_label.setText(tr("MainWindow", "Language"))
         self._populate_language_combo()
@@ -427,9 +458,15 @@ class MainWindow(QMainWindow):
         self.auth_group.setTitle(tr("MainWindow", "Authentication and ChatGPT setup"))
         self.log_group.setTitle(tr("MainWindow", "Logs and URLs"))
 
-        self._set_form_label(self.workspace_form, self.name_edit, tr("MainWindow", "Name"))
-        self._set_form_label(self.workspace_form, self.path_edit, tr("MainWindow", "Workspace path"))
-        self._set_form_label(self.workspace_form, self.tunnel_type, tr("MainWindow", "Tunnel type"))
+        self._set_form_label(
+            self.workspace_form, self.name_edit, tr("MainWindow", "Name")
+        )
+        self._set_form_label(
+            self.workspace_form, self.path_edit, tr("MainWindow", "Workspace path")
+        )
+        self._set_form_label(
+            self.workspace_form, self.tunnel_type, tr("MainWindow", "Tunnel type")
+        )
         self.cloudflare_mode_label.setText(tr("MainWindow", "Cloudflare mode"))
         self.public_url_label.setText(tr("MainWindow", "Public URL"))
         self.cloudflare_token_label.setText(tr("MainWindow", "Tunnel Token"))
@@ -442,7 +479,9 @@ class MainWindow(QMainWindow):
         )
         self.save_button.setText(tr("MainWindow", "Save configuration"))
 
-        self._set_form_label(self.runtime_form, self.local_port, tr("MainWindow", "Local port"))
+        self._set_form_label(
+            self.runtime_form, self.local_port, tr("MainWindow", "Local port")
+        )
         self._set_form_label(
             self.runtime_form,
             self.permission_mode,
@@ -453,12 +492,18 @@ class MainWindow(QMainWindow):
             self.runtime_command,
             tr("MainWindow", "Custom command"),
         )
-        self._set_form_label(self.runtime_form, self.status_label, tr("MainWindow", "Status"))
+        self._set_form_label(
+            self.runtime_form, self.status_label, tr("MainWindow", "Status")
+        )
 
-        self._set_form_label(self.auth_form, self.auth_type, tr("MainWindow", "Authentication type"))
+        self._set_form_label(
+            self.auth_form, self.auth_type, tr("MainWindow", "Authentication type")
+        )
         self.oauth_password_label.setText(tr("MainWindow", "Authorization password"))
         self.bearer_token_label.setText(tr("MainWindow", "Bearer Token"))
-        self.copy_oauth_password_button.setText(tr("MainWindow", "Copy authorization password"))
+        self.copy_oauth_password_button.setText(
+            tr("MainWindow", "Copy authorization password")
+        )
         self.copy_bearer_button.setText(tr("MainWindow", "Copy Bearer Token"))
 
         self.runtime_command.setPlaceholderText(
@@ -467,10 +512,15 @@ class MainWindow(QMainWindow):
         self.cloudflare_token_edit.setPlaceholderText(
             tr("MainWindow", "Enter the Cloudflare Tunnel Token for fixed-domain mode")
         )
-        self.frp_server_edit.setPlaceholderText(tr("MainWindow", "Example: frp.example.com"))
+        self.frp_server_edit.setPlaceholderText(
+            tr("MainWindow", "Example: frp.example.com")
+        )
         self.subdomain_edit.setPlaceholderText(tr("MainWindow", "Example: mcp"))
         self.oauth_password.setPlaceholderText(
-            tr("MainWindow", "Enter this password during the first ChatGPT authorization")
+            tr(
+                "MainWindow",
+                "Enter this password during the first ChatGPT authorization",
+            )
         )
 
         self._retranslate_combo(self.tunnel_type, self.TUNNEL_OPTIONS)
@@ -479,7 +529,9 @@ class MainWindow(QMainWindow):
         self._retranslate_combo(self.permission_mode, self.PERMISSION_MODE_OPTIONS)
 
         if self.current_profile is None:
-            self.header_title.setText(tr("MainWindow", "Add a workspace to get started"))
+            self.header_title.setText(
+                tr("MainWindow", "Add a workspace to get started")
+            )
             self.header_meta.setText(
                 tr(
                     "MainWindow",
@@ -540,7 +592,10 @@ class MainWindow(QMainWindow):
     def _clear_panel(self) -> None:
         self.header_title.setText(tr("MainWindow", "Add a workspace to get started"))
         self.header_meta.setText(
-            tr("MainWindow", "Add a workspace on the left, then configure public access and authentication.")
+            tr(
+                "MainWindow",
+                "Add a workspace on the left, then configure public access and authentication.",
+            )
         )
         self.name_edit.clear()
         self.path_edit.clear()
@@ -619,7 +674,10 @@ class MainWindow(QMainWindow):
         profile.tunnel.type = self._combo_value(self.tunnel_type)
         profile.tunnel.cloudflare_mode = self._combo_value(self.cloudflare_mode)
         profile.tunnel.cloudflare_token = self.cloudflare_token_edit.text().strip()
-        if profile.tunnel.type == "cloudflare" and profile.tunnel.cloudflare_mode == "named":
+        if (
+            profile.tunnel.type == "cloudflare"
+            and profile.tunnel.cloudflare_mode == "named"
+        ):
             profile.tunnel.public_url = self.public_url_edit.text().strip()
         else:
             profile.tunnel.public_url = ""
@@ -633,7 +691,9 @@ class MainWindow(QMainWindow):
         profile.auth.bearer_token = self.bearer_token.text().strip()
 
     def _add_workspace(self) -> None:
-        directory = QFileDialog.getExistingDirectory(self, tr("MainWindow", "Select workspace directory"))
+        directory = QFileDialog.getExistingDirectory(
+            self, tr("MainWindow", "Select workspace directory")
+        )
         if not directory:
             return
         profile = build_profile(directory)
@@ -661,7 +721,9 @@ class MainWindow(QMainWindow):
         self.current_profile = None
         self._populate_workspace_list()
         if self.profiles:
-            self.workspace_list.setCurrentRow(min(current_index, len(self.profiles) - 1))
+            self.workspace_list.setCurrentRow(
+                min(current_index, len(self.profiles) - 1)
+            )
         else:
             self._clear_panel()
 
@@ -685,26 +747,34 @@ class MainWindow(QMainWindow):
         profile = self._require_profile()
         endpoint = self.runtime.resolved_endpoint(profile) or self._draft_endpoint()
         QApplication.clipboard().setText(endpoint)
-        self.statusBar().showMessage(tr("MainWindow", "MCP URL copied to the clipboard"), 3000)
+        self.statusBar().showMessage(
+            tr("MainWindow", "MCP URL copied to the clipboard"), 3000
+        )
 
     def _copy_frp_snippet(self) -> None:
         if not self._save_current():
             return
         profile = self._require_profile()
         QApplication.clipboard().setText(profile.frp_proxy_snippet())
-        self.statusBar().showMessage(tr("MainWindow", "FRP proxy snippet copied to the clipboard"), 3000)
+        self.statusBar().showMessage(
+            tr("MainWindow", "FRP proxy snippet copied to the clipboard"), 3000
+        )
 
     def _copy_oauth_password(self) -> None:
         if not self._save_current():
             return
         QApplication.clipboard().setText(self.oauth_password.text().strip())
-        self.statusBar().showMessage(tr("MainWindow", "Authorization password copied to the clipboard"), 3000)
+        self.statusBar().showMessage(
+            tr("MainWindow", "Authorization password copied to the clipboard"), 3000
+        )
 
     def _copy_bearer_token(self) -> None:
         if not self._save_current():
             return
         QApplication.clipboard().setText(self.bearer_token.text().strip())
-        self.statusBar().showMessage(tr("MainWindow", "Bearer Token copied to the clipboard"), 3000)
+        self.statusBar().showMessage(
+            tr("MainWindow", "Bearer Token copied to the clipboard"), 3000
+        )
 
     def _refresh_current(self) -> None:
         if self.current_profile is None:
@@ -715,21 +785,34 @@ class MainWindow(QMainWindow):
         tunnel_type = self._combo_value(self.tunnel_type)
         is_frp = tunnel_type == "frp"
         is_cloudflare = tunnel_type == "cloudflare"
-        is_cloudflare_named = is_cloudflare and self._combo_value(self.cloudflare_mode) == "named"
-        self._set_row_visible(self.cloudflare_mode_label, self.cloudflare_mode, is_cloudflare)
-        self._set_row_visible(self.public_url_label, self.public_url_edit, is_cloudflare)
-        self._set_row_visible(self.cloudflare_token_label, self.cloudflare_token_edit, is_cloudflare_named)
+        is_cloudflare_named = (
+            is_cloudflare and self._combo_value(self.cloudflare_mode) == "named"
+        )
+        self._set_row_visible(
+            self.cloudflare_mode_label, self.cloudflare_mode, is_cloudflare
+        )
+        self._set_row_visible(
+            self.public_url_label, self.public_url_edit, is_cloudflare
+        )
+        self._set_row_visible(
+            self.cloudflare_token_label, self.cloudflare_token_edit, is_cloudflare_named
+        )
         self._set_row_visible(self.frp_server_label, self.frp_server_edit, is_frp)
         self._set_row_visible(self.subdomain_label, self.subdomain_edit, is_frp)
         self.public_url_edit.setReadOnly(is_cloudflare and not is_cloudflare_named)
         self.copy_frp_button.setEnabled(is_frp and self.current_profile is not None)
         if is_cloudflare_named:
-            self.public_url_edit.setPlaceholderText(tr("MainWindow", "Example: https://mcp.example.com"))
+            self.public_url_edit.setPlaceholderText(
+                tr("MainWindow", "Example: https://mcp.example.com")
+            )
         elif is_cloudflare:
             self.public_url_edit.setPlaceholderText(
                 tr("MainWindow", "Cloudflare assigns a public URL after startup")
             )
-            if self.current_profile is not None and not self.runtime.resolved_public_url(self.current_profile):
+            if (
+                self.current_profile is not None
+                and not self.runtime.resolved_public_url(self.current_profile)
+            ):
                 self.public_url_edit.setText("")
         self._refresh_connection_view()
 
@@ -751,7 +834,10 @@ class MainWindow(QMainWindow):
             )
         elif is_bearer:
             self.auth_hint.setText(
-                tr("MainWindow", "In Bearer mode, configure this token in the calling client.")
+                tr(
+                    "MainWindow",
+                    "In Bearer mode, configure this token in the calling client.",
+                )
             )
         else:
             self.auth_hint.setText(
@@ -787,7 +873,9 @@ class MainWindow(QMainWindow):
                 text = path.read_text(encoding="utf-8", errors="replace")
                 output.append(f"[{name}]\n{text[-4000:]}")
         self.log_output.setPlainText(
-            "\n\n".join(output) if output else tr("MainWindow", "No logs are available yet.")
+            "\n\n".join(output)
+            if output
+            else tr("MainWindow", "No logs are available yet.")
         )
 
     def _state_text(self, state: str) -> str:
@@ -804,7 +892,11 @@ class MainWindow(QMainWindow):
         state_text = self._state_text(status.state)
         details = [f"{state_text}  PID={status.pid or '-'}", status.local_message]
         if status.public_message:
-            details.append(tr("MainWindow", "Public: {message}").format(message=status.public_message))
+            details.append(
+                tr("MainWindow", "Public: {message}").format(
+                    message=status.public_message
+                )
+            )
         self.status_label.setText("\n".join(details))
         color = "#067647" if status.state == "running" else "#b42318"
         self.status_label.setStyleSheet(f"font-weight:700; color:{color};")
@@ -838,13 +930,18 @@ class MainWindow(QMainWindow):
             return
         if error_message:
             current_status = self.runtime.status(profile)
-            if self.current_profile is not None and self.current_profile.id == profile_id:
+            if (
+                self.current_profile is not None
+                and self.current_profile.id == profile_id
+            ):
                 self._render_status(current_status)
                 self._load_logs(profile)
             self._refresh_workspace_item(profile.id)
             QMessageBox.critical(
                 self,
-                tr("MainWindow", "Start failed") if action == "start" else tr("MainWindow", "Stop failed"),
+                tr("MainWindow", "Start failed")
+                if action == "start"
+                else tr("MainWindow", "Stop failed"),
                 error_message,
             )
             return
@@ -886,10 +983,14 @@ class MainWindow(QMainWindow):
             self._busy_dots = 0
             action_text = self._busy_action_text(action)
             self.start_button.setText(
-                tr("MainWindow", "Starting...") if action == "starting" else tr("MainWindow", "Start")
+                tr("MainWindow", "Starting...")
+                if action == "starting"
+                else tr("MainWindow", "Start")
             )
             self.stop_button.setText(
-                tr("MainWindow", "Stopping...") if action == "stopping" else tr("MainWindow", "Stop")
+                tr("MainWindow", "Stopping...")
+                if action == "stopping"
+                else tr("MainWindow", "Stop")
             )
             if action_text:
                 self.status_label.setText(f"{action_text}  PID=-")
@@ -974,7 +1075,9 @@ class MainWindow(QMainWindow):
                     "MainWindow",
                     "Tunnel: {tunnel}  Authentication: {auth}",
                 ).format(
-                    tunnel=self._label_for_value(self.TUNNEL_OPTIONS, profile.tunnel.type),
+                    tunnel=self._label_for_value(
+                        self.TUNNEL_OPTIONS, profile.tunnel.type
+                    ),
                     auth=self._label_for_value(self.AUTH_OPTIONS, profile.auth.type),
                 ),
                 tr(
@@ -999,7 +1102,9 @@ class MainWindow(QMainWindow):
         for value, label in options:
             combo.addItem(self._translate_option_label(label), value)
 
-    def _retranslate_combo(self, combo: QComboBox, options: list[tuple[str, str]]) -> None:
+    def _retranslate_combo(
+        self, combo: QComboBox, options: list[tuple[str, str]]
+    ) -> None:
         for index, (_value, label) in enumerate(options):
             combo.setItemText(index, self._translate_option_label(label))
 
@@ -1064,7 +1169,11 @@ class MainWindow(QMainWindow):
             return endpoint
         if profile.tunnel.type == "frp":
             return profile.endpoint
-        if profile.tunnel.type == "cloudflare" and profile.tunnel.cloudflare_mode == "named" and profile.tunnel.public_url.strip():
+        if (
+            profile.tunnel.type == "cloudflare"
+            and profile.tunnel.cloudflare_mode == "named"
+            and profile.tunnel.public_url.strip()
+        ):
             return f"{profile.tunnel.public_url.rstrip('/')}{MCP_ENDPOINT_PATH}"
         return "-"
 
@@ -1090,7 +1199,10 @@ def main() -> int:
             frame = window.frameGeometry()
             frame.moveCenter(available.center())
             window.move(frame.topLeft())
-        window.setWindowState((window.windowState() & ~Qt.WindowState.WindowMinimized) | Qt.WindowState.WindowActive)
+        window.setWindowState(
+            (window.windowState() & ~Qt.WindowState.WindowMinimized)
+            | Qt.WindowState.WindowActive
+        )
         window.raise_()
         window.activateWindow()
 

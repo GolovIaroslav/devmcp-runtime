@@ -41,7 +41,9 @@ from coding_tools_mcp.protocol import PROTOCOL_VERSION
 
 MCP_SERVICE = "devmcp-runtime.service"
 TUNNEL_SERVICE = "devmcp-tunnel.service"
-TUNNEL_BIN = Path(os.environ.get("TUNNEL_CLIENT_BIN", "~/.local/bin/tunnel-client")).expanduser()
+TUNNEL_BIN = Path(
+    os.environ.get("TUNNEL_CLIENT_BIN", "~/.local/bin/tunnel-client")
+).expanduser()
 
 
 def _config() -> tuple[ConfigPaths, dict[str, Any]]:
@@ -84,13 +86,18 @@ def _mcp_call(
         headers["Mcp-Session-Id"] = session_id
     request = urllib.request.Request(
         url,
-        data=json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}).encode("utf-8"),
+        data=json.dumps(
+            {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
+        ).encode("utf-8"),
         headers=headers,
         method="POST",
     )
     with urllib.request.urlopen(request, timeout=3) as response:
         body = response.read()
-        return (json.loads(body.decode("utf-8")) if body else {}, response.headers.get("Mcp-Session-Id"))
+        return (
+            json.loads(body.decode("utf-8")) if body else {},
+            response.headers.get("Mcp-Session-Id"),
+        )
 
 
 def _mcp_health(config: dict[str, Any], selected: ConfigPaths) -> bool:
@@ -100,7 +107,11 @@ def _mcp_health(config: dict[str, Any], selected: ConfigPaths) -> bool:
             url,
             selected.mcp_token,
             "initialize",
-            {"protocolVersion": PROTOCOL_VERSION, "capabilities": {}, "clientInfo": {"name": "devmcp", "version": __version__}},
+            {
+                "protocolVersion": PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": {"name": "devmcp", "version": __version__},
+            },
         )
         if "error" in initialize or not session_id:
             return False
@@ -126,8 +137,18 @@ def _mcp_health(config: dict[str, Any], selected: ConfigPaths) -> bool:
             {"name": "health", "arguments": {}},
             session_id=session_id,
         )
-        return result.get("result", {}).get("structuredContent", {}).get("status") == "ok"
-    except (OSError, RuntimeError, ValueError, KeyError, TypeError, json.JSONDecodeError, urllib.error.URLError):
+        return (
+            result.get("result", {}).get("structuredContent", {}).get("status") == "ok"
+        )
+    except (
+        OSError,
+        RuntimeError,
+        ValueError,
+        KeyError,
+        TypeError,
+        json.JSONDecodeError,
+        urllib.error.URLError,
+    ):
         return False
 
 
@@ -158,7 +179,10 @@ def _tunnel_status(selected: ConfigPaths) -> dict[str, Any]:
 
 def _find_bool(value: Any, keys: set[str]) -> bool:
     if isinstance(value, dict):
-        return any((key in keys and item is True) or _find_bool(item, keys) for key, item in value.items())
+        return any(
+            (key in keys and item is True) or _find_bool(item, keys)
+            for key, item in value.items()
+        )
     if isinstance(value, list):
         return any(_find_bool(item, keys) for item in value)
     return False
@@ -192,7 +216,9 @@ def _status(_: argparse.Namespace) -> int:
     print(f"tunnel ready: {'yes' if ready and healthy else 'no'}")
     print(f"tunnel id: {config.get('tunnel_id') or 'not configured'}")
     print(f"pending approvals: {pending}")
-    print(f"auth: mcp={'configured' if secret_status(selected)['mcp_token_configured'] else 'not configured'}, tunnel={'configured' if secret_status(selected)['control_plane_key_configured'] else 'not configured'}")
+    print(
+        f"auth: mcp={'configured' if secret_status(selected)['mcp_token_configured'] else 'not configured'}, tunnel={'configured' if secret_status(selected)['control_plane_key_configured'] else 'not configured'}"
+    )
     return 0
 
 
@@ -212,13 +238,29 @@ def _read_service_logs(selected: ConfigPaths) -> tuple[str, str, int]:
     """Read a bounded, redacted service log view for the CLI and local UI."""
 
     result = subprocess.run(
-        ["journalctl", "--user", "-u", MCP_SERVICE, "-u", TUNNEL_SERVICE, "-n", "200", "--no-pager", "--output", "cat"],
+        [
+            "journalctl",
+            "--user",
+            "-u",
+            MCP_SERVICE,
+            "-u",
+            TUNNEL_SERVICE,
+            "-n",
+            "200",
+            "--no-pager",
+            "--output",
+            "cat",
+        ],
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
     output = result.stdout
-    for secret_path in (selected.mcp_token, selected.control_plane_key, Path.home() / ".config/tunnel-client/control-plane-api-key"):
+    for secret_path in (
+        selected.mcp_token,
+        selected.control_plane_key,
+        Path.home() / ".config/tunnel-client/control-plane-api-key",
+    ):
         try:
             secret = secret_path.read_text(encoding="utf-8").strip()
         except OSError:
@@ -250,13 +292,22 @@ def _approvals(args: argparse.Namespace) -> int:
         print("No pending approvals.")
         return 0
     for request in pending:
-        print(f"[{request['id']}] {request['command_or_action']} in {request['working_directory']}")
+        print(
+            f"[{request['id']}] {request['command_or_action']} in {request['working_directory']}"
+        )
     return 0
 
 
 def _show(args: argparse.Namespace) -> int:
     selected, _ = _config()
-    request = next((item for item in ApprovalEngine(selected.approvals_db).list_pending() if item["id"] == args.id), None)
+    request = next(
+        (
+            item
+            for item in ApprovalEngine(selected.approvals_db).list_pending()
+            if item["id"] == args.id
+        ),
+        None,
+    )
     if request is None:
         print(f"Request {args.id} not found or not pending.")
         return 1
@@ -268,7 +319,9 @@ def _show(args: argparse.Namespace) -> int:
 def _approve(args: argparse.Namespace) -> int:
     selected, _ = _config()
     ApprovalEngine(selected.approvals_db).approve(args.id, pattern=args.pattern)
-    print(f"Approved {args.id} ({'always allow matching rule' if args.pattern else 'once'})")
+    print(
+        f"Approved {args.id} ({'always allow matching rule' if args.pattern else 'once'})"
+    )
     return 0
 
 
@@ -321,10 +374,19 @@ def _policy_command(args: argparse.Namespace) -> int:
         print(f"Policy profile: {profile}")
         return 0
     if args.policy_action == "export":
-        rules = effective_rules(str(config.get("profile", "balanced")), config.get("policy", {}).get("custom", {}))
-        payload = {"profile": config.get("profile", "balanced"), "rules": rules, "patch": config.get("patch", {})}
+        rules = effective_rules(
+            str(config.get("profile", "balanced")),
+            config.get("policy", {}).get("custom", {}),
+        )
+        payload = {
+            "profile": config.get("profile", "balanced"),
+            "rules": rules,
+            "patch": config.get("patch", {}),
+        }
         if args.file:
-            Path(args.file).write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            Path(args.file).write_text(
+                json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+            )
         else:
             print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
@@ -347,7 +409,11 @@ def _setup(args: argparse.Namespace) -> int:
             print(f"workspace does not exist: {workspace}", file=sys.stderr)
             return 2
         config["workspace"] = str(workspace)
-        workspaces = [str(item) for item in config.get("workspaces", []) if str(item) != str(workspace)]
+        workspaces = [
+            str(item)
+            for item in config.get("workspaces", [])
+            if str(item) != str(workspace)
+        ]
         config["workspaces"] = [str(workspace), *workspaces]
     profile = args.profile or str(config.get("profile", "balanced"))
     if profile not in PROFILE_NAMES:
@@ -358,7 +424,12 @@ def _setup(args: argparse.Namespace) -> int:
     save_config(config, selected)
     if not secret_status(selected)["mcp_token_configured"]:
         generate_mcp_token(selected)
-    if not args.no_tunnel and not args.yes and not secret_status(selected)["control_plane_key_configured"] and sys.stdin.isatty():
+    if (
+        not args.no_tunnel
+        and not args.yes
+        and not secret_status(selected)["control_plane_key_configured"]
+        and sys.stdin.isatty()
+    ):
         print("OpenAI Secure MCP Tunnel key is not configured")
         key = getpass.getpass("Control-plane key (hidden, optional): ")
         if key.strip():
@@ -386,12 +457,32 @@ def _doctor(_: argparse.Namespace) -> int:
     selected, config = _config()
     backend = str(config.get("sandbox_backend", "bwrap"))
     checks: list[tuple[str, bool, str]] = [
-        ("workspace", Path(str(config["workspace"])).is_dir(), str(config["workspace"])),
-        ("python", bool(shutil.which("python3") or shutil.which("python")), "python executable"),
+        (
+            "workspace",
+            Path(str(config["workspace"])).is_dir(),
+            str(config["workspace"]),
+        ),
+        (
+            "python",
+            bool(shutil.which("python3") or shutil.which("python")),
+            "python executable",
+        ),
         ("git", bool(shutil.which("git")), "git executable"),
-        ("bwrap", backend != "bwrap" or bool(shutil.which("bwrap")), f"bubblewrap executable ({backend} backend)"),
-        ("mcp token", secret_status(selected)["mcp_token_configured"], "0600 secret file"),
-        ("tunnel key", secret_status(selected)["control_plane_key_configured"], "optional Secure MCP Tunnel key"),
+        (
+            "bwrap",
+            backend != "bwrap" or bool(shutil.which("bwrap")),
+            f"bubblewrap executable ({backend} backend)",
+        ),
+        (
+            "mcp token",
+            secret_status(selected)["mcp_token_configured"],
+            "0600 secret file",
+        ),
+        (
+            "tunnel key",
+            secret_status(selected)["control_plane_key_configured"],
+            "optional Secure MCP Tunnel key",
+        ),
     ]
     good = True
     for name, ok, detail in checks:
@@ -419,7 +510,17 @@ def _tunnel_command(args: argparse.Namespace) -> int:
     selected, config = _config()
     if args.tunnel_action == "status":
         status = _tunnel_status(selected)
-        print(json.dumps({"alias": config.get("tunnel_alias"), "tunnel_id": config.get("tunnel_id"), "status": status}, indent=2, sort_keys=True))
+        print(
+            json.dumps(
+                {
+                    "alias": config.get("tunnel_alias"),
+                    "tunnel_id": config.get("tunnel_id"),
+                    "status": status,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
         return 0 if status else 1
     if not TUNNEL_BIN.exists():
         print("tunnel-client is not installed", file=sys.stderr)
@@ -427,8 +528,15 @@ def _tunnel_command(args: argparse.Namespace) -> int:
     if args.tunnel_action == "run":
         tunnel_id = str(config.get("tunnel_id", "")).strip()
         auth = secret_status(selected)
-        if not tunnel_id or not auth["control_plane_key_configured"] or not auth["mcp_token_configured"]:
-            print("tunnel id, control-plane key, and MCP token must be configured before starting the tunnel", file=sys.stderr)
+        if (
+            not tunnel_id
+            or not auth["control_plane_key_configured"]
+            or not auth["mcp_token_configured"]
+        ):
+            print(
+                "tunnel id, control-plane key, and MCP token must be configured before starting the tunnel",
+                file=sys.stderr,
+            )
             return 2
         try:
             mcp_authorization_header = ensure_mcp_authorization_header(selected)
@@ -454,8 +562,16 @@ def _tunnel_command(args: argparse.Namespace) -> int:
             str(selected.tunnel_health_url),
         ]
         return subprocess.run(command).returncode
-    command = [str(TUNNEL_BIN), "doctor", "--profile", str(config.get("tunnel_profile", "sample_mcp_with_dcr")), "--explain"]
-    result = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    command = [
+        str(TUNNEL_BIN),
+        "doctor",
+        "--profile",
+        str(config.get("tunnel_profile", "sample_mcp_with_dcr")),
+        "--explain",
+    ]
+    result = subprocess.run(
+        command, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT
+    )
     print(result.stdout, end="")
     return result.returncode
 
@@ -557,7 +673,9 @@ def _service_uninstall(_: argparse.Namespace) -> int:
         _systemctl("disable", "--now", unit)
         (systemd_dir / unit).unlink(missing_ok=True)
     _systemctl("daemon-reload")
-    print("Removed DevMCP user service units; configuration, secrets, audit log, and workspaces were preserved.")
+    print(
+        "Removed DevMCP user service units; configuration, secrets, audit log, and workspaces were preserved."
+    )
     return 0
 
 
@@ -565,7 +683,9 @@ def _ui(_: argparse.Namespace) -> int:
     from .ui import serve_ui
 
     _selected, config = _config()
-    return serve_ui(str(config.get("ui_host", "127.0.0.1")), int(config.get("ui_port", 47158)))
+    return serve_ui(
+        str(config.get("ui_host", "127.0.0.1")), int(config.get("ui_port", 47158))
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -573,18 +693,36 @@ def build_parser() -> argparse.ArgumentParser:
         prog="devmcp",
         description="DevMCP Runtime: local sandboxed coding runtime for MCP clients.",
     )
-    parser.add_argument("--version", action="version", version=f"DevMCP Runtime {__version__}")
+    parser.add_argument(
+        "--version", action="version", version=f"DevMCP Runtime {__version__}"
+    )
     sub = parser.add_subparsers(dest="command", required=True)
-    sub.add_parser("setup", help="run the first-run configuration wizard").add_argument("--workspace")
+    sub.add_parser("setup", help="run the first-run configuration wizard").add_argument(
+        "--workspace"
+    )
     setup = sub.choices["setup"]
     setup.add_argument("--profile", choices=PROFILE_NAMES)
     setup.add_argument("--tunnel-id")
     setup.add_argument("--no-tunnel", action="store_true")
-    setup.add_argument("--yes", action="store_true", help="do not prompt for the optional tunnel key")
-    setup.add_argument("--install-services", action="store_true", help="install user services after setup")
-    setup.add_argument("--start-services", action="store_true", help="install and start user services after setup")
-    sub.add_parser("doctor", help="diagnose local runtime and optional tunnel prerequisites")
-    sub.add_parser("status", help="show runtime, sandbox, policy, auth, and tunnel status")
+    setup.add_argument(
+        "--yes", action="store_true", help="do not prompt for the optional tunnel key"
+    )
+    setup.add_argument(
+        "--install-services",
+        action="store_true",
+        help="install user services after setup",
+    )
+    setup.add_argument(
+        "--start-services",
+        action="store_true",
+        help="install and start user services after setup",
+    )
+    sub.add_parser(
+        "doctor", help="diagnose local runtime and optional tunnel prerequisites"
+    )
+    sub.add_parser(
+        "status", help="show runtime, sandbox, policy, auth, and tunnel status"
+    )
     for name in ("start", "stop", "restart", "logs"):
         sub.add_parser(name)
     sub.add_parser("ui", help="start the loopback-only local admin UI")
@@ -600,7 +738,9 @@ def build_parser() -> argparse.ArgumentParser:
     set_parser.add_argument("key")
     set_parser.add_argument("value")
 
-    policy = sub.add_parser("policy", help="select or exchange data-driven policy profiles")
+    policy = sub.add_parser(
+        "policy", help="select or exchange data-driven policy profiles"
+    )
     policy_sub = policy.add_subparsers(dest="policy_action", required=True)
     profile = policy_sub.add_parser("profile")
     profile.add_argument("profile", choices=PROFILE_NAMES)
@@ -609,8 +749,12 @@ def build_parser() -> argparse.ArgumentParser:
     imp = policy_sub.add_parser("import")
     imp.add_argument("file")
 
-    approvals = sub.add_parser("approvals", help="inspect and clean local approval requests")
-    approvals.add_argument("approval_action", nargs="?", choices=("prune", "clear-expired"), default="list")
+    approvals = sub.add_parser(
+        "approvals", help="inspect and clean local approval requests"
+    )
+    approvals.add_argument(
+        "approval_action", nargs="?", choices=("prune", "clear-expired"), default="list"
+    )
     show = sub.add_parser("show")
     show.add_argument("id")
     approve = sub.add_parser("approve")
@@ -628,9 +772,13 @@ def build_parser() -> argparse.ArgumentParser:
     tunnel_sub = tunnel.add_subparsers(dest="tunnel_action", required=True)
     tunnel_sub.add_parser("status")
     tunnel_sub.add_parser("doctor")
-    tunnel_sub.add_parser("run", help="run tunnel-client in the foreground using the configured profile")
+    tunnel_sub.add_parser(
+        "run", help="run tunnel-client in the foreground using the configured profile"
+    )
 
-    service = sub.add_parser("service", help="install or remove Linux systemd user services")
+    service = sub.add_parser(
+        "service", help="install or remove Linux systemd user services"
+    )
     service_sub = service.add_subparsers(dest="service_action", required=True)
     service_sub.add_parser("install")
     service_sub.add_parser("uninstall")
@@ -670,7 +818,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "tunnel":
         return _tunnel_command(args)
     if args.command == "service":
-        return _service_install(args) if args.service_action == "install" else _service_uninstall(args)
+        return (
+            _service_install(args)
+            if args.service_action == "install"
+            else _service_uninstall(args)
+        )
     return 2
 
 

@@ -114,7 +114,14 @@ def write_json(path: Path, data: Any) -> None:
 
 def command_stdout(command: list[str]) -> str | None:
     try:
-        result = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=10, check=False)
+        result = subprocess.run(
+            command,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+            check=False,
+        )
     except (OSError, subprocess.TimeoutExpired):
         return None
     if result.returncode != 0:
@@ -153,14 +160,20 @@ def toolchain_allow_roots() -> list[str]:
 
 def tool_payload(result: dict[str, Any]) -> dict[str, Any]:
     if result.get("isError"):
-        raise RuntimeError(json.dumps(result.get("structuredContent", result), indent=2, sort_keys=True))
+        raise RuntimeError(
+            json.dumps(
+                result.get("structuredContent", result), indent=2, sort_keys=True
+            )
+        )
     payload = result.get("structuredContent")
     if not isinstance(payload, dict):
         raise RuntimeError(f"tool result missing structuredContent: {result!r}")
     return payload
 
 
-def start_server(workspace: Path, port: int, raw_dir: Path, name: str) -> subprocess.Popen[bytes]:
+def start_server(
+    workspace: Path, port: int, raw_dir: Path, name: str
+) -> subprocess.Popen[bytes]:
     command = [
         sys.executable,
         "-c",
@@ -181,7 +194,9 @@ def start_server(workspace: Path, port: int, raw_dir: Path, name: str) -> subpro
     stderr = (raw_dir / f"{name}-server.stderr.txt").open("wb")
     env = os.environ.copy()
     env["CODING_TOOLS_MCP_EXEC_ALLOW_ROOTS"] = os.pathsep.join(toolchain_allow_roots())
-    (raw_dir / f"{name}-exec-allow-roots.txt").write_text(env["CODING_TOOLS_MCP_EXEC_ALLOW_ROOTS"] + "\n", encoding="utf-8")
+    (raw_dir / f"{name}-exec-allow-roots.txt").write_text(
+        env["CODING_TOOLS_MCP_EXEC_ALLOW_ROOTS"] + "\n", encoding="utf-8"
+    )
     return subprocess.Popen(command, stdout=stdout, stderr=stderr, env=env)
 
 
@@ -192,9 +207,15 @@ def initialize_client(endpoint: str) -> McpHttpClient:
     return client
 
 
-def clone_repo(workload: Workload, checkout_root: Path, raw_dir: Path) -> tuple[Path, dict[str, Any], str | None]:
+def clone_repo(
+    workload: Workload, checkout_root: Path, raw_dir: Path
+) -> tuple[Path, dict[str, Any], str | None]:
     destination = checkout_root / workload.name
-    clone_log = run(["git", "clone", "--depth", "1", workload.repo, str(destination)], checkout_root, timeout=300)
+    clone_log = run(
+        ["git", "clone", "--depth", "1", workload.repo, str(destination)],
+        checkout_root,
+        timeout=300,
+    )
     write_json(raw_dir / f"{workload.name}-git-clone.json", clone_log)
     if clone_log["returncode"] != 0:
         return destination, clone_log, None
@@ -223,7 +244,13 @@ def workspace_env(workspace: Path, env: dict[str, str]) -> dict[str, str]:
     return resolved
 
 
-def run_workload(workload: Workload, checkout_root: Path, raw_dir: Path, port: int, allow_missing_tools: bool) -> dict[str, Any]:
+def run_workload(
+    workload: Workload,
+    checkout_root: Path,
+    raw_dir: Path,
+    port: int,
+    allow_missing_tools: bool,
+) -> dict[str, Any]:
     if shutil.which(workload.required_executable) is None:
         status = "SKIP" if allow_missing_tools else "FAIL"
         return {
@@ -248,36 +275,68 @@ def run_workload(workload: Workload, checkout_root: Path, raw_dir: Path, port: i
         result["reason"] = "git clone failed"
         return result
 
-    large_file = write_large_fixture(workspace) if workload.category == "monorepo" else None
+    large_file = (
+        write_large_fixture(workspace) if workload.category == "monorepo" else None
+    )
     server = start_server(workspace, port, raw_dir, workload.name)
     try:
         client = initialize_client(f"http://127.0.0.1:{port}/mcp")
         tools = client.list_tools()
         tool_names = {tool.get("name") for tool in tools}
-        missing_tools = sorted({"read_file", "list_files", "search_text", "exec_command"} - tool_names)
+        missing_tools = sorted(
+            {"read_file", "list_files", "search_text", "exec_command"} - tool_names
+        )
         if missing_tools:
             raise RuntimeError(f"missing MCP tools: {missing_tools}")
 
         listed = tool_payload(
             client.call_tool(
                 "list_files",
-                {"path": ".", "patterns": ["*", "**/*"], "max_results": 2000, "include_ignored": True},
+                {
+                    "path": ".",
+                    "patterns": ["*", "**/*"],
+                    "max_results": 2000,
+                    "include_ignored": True,
+                },
             )
         )
         raw_listed_files = listed.get("files")
         listed_files = raw_listed_files if isinstance(raw_listed_files, list) else []
-        result["checks"].append({"name": "list_files", "count": len(listed_files), "ok": bool(listed_files)})
+        result["checks"].append(
+            {"name": "list_files", "count": len(listed_files), "ok": bool(listed_files)}
+        )
 
-        read = tool_payload(client.call_tool("read_file", {"path": workload.read_path, "max_bytes": 65536}))
-        result["checks"].append({"name": "read_file", "path": workload.read_path, "ok": bool(read.get("content"))})
+        read = tool_payload(
+            client.call_tool(
+                "read_file", {"path": workload.read_path, "max_bytes": 65536}
+            )
+        )
+        result["checks"].append(
+            {
+                "name": "read_file",
+                "path": workload.read_path,
+                "ok": bool(read.get("content")),
+            }
+        )
 
         search = tool_payload(
             client.call_tool(
                 "search_text",
-                {"query": workload.search_query, "path": ".", "max_results": 20, "max_preview_bytes": 512},
+                {
+                    "query": workload.search_query,
+                    "path": ".",
+                    "max_results": 20,
+                    "max_preview_bytes": 512,
+                },
             )
         )
-        result["checks"].append({"name": "search_text", "query": workload.search_query, "ok": bool(search.get("matches"))})
+        result["checks"].append(
+            {
+                "name": "search_text",
+                "query": workload.search_query,
+                "ok": bool(search.get("matches")),
+            }
+        )
 
         exec_payload = tool_payload(
             client.call_tool(
@@ -303,7 +362,11 @@ def run_workload(workload: Workload, checkout_root: Path, raw_dir: Path, port: i
         )
 
         if large_file:
-            large_read = tool_payload(client.call_tool("read_file", {"path": large_file, "max_bytes": 1048576}))
+            large_read = tool_payload(
+                client.call_tool(
+                    "read_file", {"path": large_file, "max_bytes": 1048576}
+                )
+            )
             result["checks"].append(
                 {
                     "name": "large_file",
@@ -327,7 +390,10 @@ def run_workload(workload: Workload, checkout_root: Path, raw_dir: Path, port: i
                 {
                     "name": "large_output",
                     "exit_code": big_output.get("exit_code"),
-                    "stdout_truncated": bool(big_output.get("stdout_truncated") or big_output.get("stdout_dropped_bytes")),
+                    "stdout_truncated": bool(
+                        big_output.get("stdout_truncated")
+                        or big_output.get("stdout_dropped_bytes")
+                    ),
                     "ok": big_output.get("exit_code") == 0,
                 }
             )
@@ -347,11 +413,14 @@ def run_workload(workload: Workload, checkout_root: Path, raw_dir: Path, port: i
                     "name": "long_test",
                     "exit_code": long_test.get("exit_code"),
                     "stdout": long_test.get("stdout", "")[-200:],
-                    "ok": long_test.get("exit_code") == 0 and "long-test-ok" in str(long_test.get("stdout", "")),
+                    "ok": long_test.get("exit_code") == 0
+                    and "long-test-ok" in str(long_test.get("stdout", "")),
                 }
             )
 
-        result["status"] = "PASS" if all(check.get("ok") for check in result["checks"]) else "FAIL"
+        result["status"] = (
+            "PASS" if all(check.get("ok") for check in result["checks"]) else "FAIL"
+        )
     except (McpHttpError, RuntimeError) as exc:
         result["reason"] = str(exc)
     finally:
@@ -383,7 +452,9 @@ def render_markdown(report: dict[str, Any]) -> str:
         if item.get("reason"):
             lines.append(f"  - reason: `{item['reason']}`")
         for check in item.get("checks", []):
-            lines.append(f"  - {check['name']}: `{'PASS' if check.get('ok') else 'FAIL'}`")
+            lines.append(
+                f"  - {check['name']}: `{'PASS' if check.get('ok') else 'FAIL'}`"
+            )
     lines.extend(
         [
             "",
@@ -404,9 +475,17 @@ def render_markdown(report: dict[str, Any]) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--report-json", type=Path, default=Path("reports/benchmark/real-workloads.json"))
-    parser.add_argument("--report-md", type=Path, default=Path("reports/benchmark/real-workloads.md"))
-    parser.add_argument("--raw-dir", type=Path, default=Path("reports/benchmark/real-workloads/raw"))
+    parser.add_argument(
+        "--report-json",
+        type=Path,
+        default=Path("reports/benchmark/real-workloads.json"),
+    )
+    parser.add_argument(
+        "--report-md", type=Path, default=Path("reports/benchmark/real-workloads.md")
+    )
+    parser.add_argument(
+        "--raw-dir", type=Path, default=Path("reports/benchmark/real-workloads/raw")
+    )
     parser.add_argument("--allow-missing-tools", action="store_true")
     parser.add_argument("--start-port", type=int, default=8870)
     args = parser.parse_args(argv)
@@ -415,7 +494,13 @@ def main(argv: list[str] | None = None) -> int:
     with tempfile.TemporaryDirectory(prefix="codex-real-workloads-") as tmp:
         checkout_root = Path(tmp)
         workloads = [
-            run_workload(workload, checkout_root, args.raw_dir, args.start_port + index, args.allow_missing_tools)
+            run_workload(
+                workload,
+                checkout_root,
+                args.raw_dir,
+                args.start_port + index,
+                args.allow_missing_tools,
+            )
             for index, workload in enumerate(WORKLOADS)
         ]
 
@@ -437,7 +522,12 @@ def main(argv: list[str] | None = None) -> int:
     write_json(args.report_json, report)
     args.report_md.parent.mkdir(parents=True, exist_ok=True)
     args.report_md.write_text(render_markdown(report), encoding="utf-8")
-    return 0 if conclusion == "PASS" or (conclusion == "PARTIAL" and args.allow_missing_tools) else 1
+    return (
+        0
+        if conclusion == "PASS"
+        or (conclusion == "PARTIAL" and args.allow_missing_tools)
+        else 1
+    )
 
 
 if __name__ == "__main__":

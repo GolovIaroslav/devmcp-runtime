@@ -25,8 +25,13 @@ def _normalise_env(env: dict[str, Any] | None) -> dict[str, str]:
     if env is None:
         return {}
     if not isinstance(env, dict):
-        raise ToolFailure("INVALID_ARGUMENT", "env must be an object.", category="validation")
-    return {str(key): str(value) for key, value in sorted(env.items(), key=lambda item: str(item[0]))}
+        raise ToolFailure(
+            "INVALID_ARGUMENT", "env must be an object.", category="validation"
+        )
+    return {
+        str(key): str(value)
+        for key, value in sorted(env.items(), key=lambda item: str(item[0]))
+    }
 
 
 @dataclass(frozen=True)
@@ -56,13 +61,21 @@ class Operation:
         policy_version: str = POLICY_VERSION,
     ) -> "Operation":
         if isinstance(action, (list, tuple)):
-            canonical_action: str | tuple[str, ...] = tuple(str(item) for item in action)
+            canonical_action: str | tuple[str, ...] = tuple(
+                str(item) for item in action
+            )
         elif isinstance(action, str):
             canonical_action = action
         else:
-            raise ToolFailure("INVALID_ARGUMENT", "Operation command must be a string or argv array.", category="validation")
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                "Operation command must be a string or argv array.",
+                category="validation",
+            )
         env_delta = tuple(_normalise_env(env).items())
-        canonical_caps = tuple(sorted({str(capability) for capability in (capabilities or ())}))
+        canonical_caps = tuple(
+            sorted({str(capability) for capability in (capabilities or ())})
+        )
         return cls(
             action=canonical_action,
             cwd=_normalise_cwd(cwd),
@@ -80,7 +93,9 @@ class Operation:
 
     def canonical_json(self) -> str:
         payload = {
-            "action": list(self.action) if isinstance(self.action, tuple) else self.action,
+            "action": list(self.action)
+            if isinstance(self.action, tuple)
+            else self.action,
             "action_kind": self.action_kind,
             "capabilities": list(self.capabilities),
             "cwd": self.cwd,
@@ -90,7 +105,9 @@ class Operation:
             "sandbox_id": self.sandbox_id,
             "task_id": self.task_id,
         }
-        return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return json.dumps(
+            payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        )
 
     def digest(self) -> str:
         return hashlib.sha256(self.canonical_json().encode("utf-8")).hexdigest()
@@ -250,15 +267,23 @@ class ApprovalEngine:
         req_id = uuid.uuid4().hex
         timestamp = time.time()
         expires_at = timestamp + 3600
-        action_display = json.dumps(list(operation.action), ensure_ascii=False) if operation.action_kind == "argv" else str(operation.action)
-        env_safe = json.dumps({key: "***" for key, _ in operation.env_delta}, sort_keys=True)
+        action_display = (
+            json.dumps(list(operation.action), ensure_ascii=False)
+            if operation.action_kind == "argv"
+            else str(operation.action)
+        )
+        env_safe = json.dumps(
+            {key: "***" for key, _ in operation.env_delta}, sort_keys=True
+        )
         caps_list = list(operation.capabilities)
 
         with sqlite3.connect(self.db_path) as conn:
             patterns = [row[0] for row in conn.execute("SELECT pattern FROM patterns")]
             import fnmatch
 
-            auto_approved = any(fnmatch.fnmatch(action_display, pattern) for pattern in patterns)
+            auto_approved = any(
+                fnmatch.fnmatch(action_display, pattern) for pattern in patterns
+            )
             status = "approved" if auto_approved else "pending"
             conn.execute(
                 """
@@ -308,7 +333,9 @@ class ApprovalEngine:
 
     def get_status(self, req_id: str) -> str:
         with sqlite3.connect(self.db_path) as conn:
-            row = conn.execute("SELECT status, expires_at FROM requests WHERE id = ?", (req_id,)).fetchone()
+            row = conn.execute(
+                "SELECT status, expires_at FROM requests WHERE id = ?", (req_id,)
+            ).fetchone()
             if not row:
                 return "not_found"
             status, expires_at = str(row[0]), float(row[1])
@@ -349,7 +376,9 @@ class ApprovalEngine:
             )
             return int(cursor.rowcount)
 
-    def prune_expired(self, *, older_than_seconds: float = DEFAULT_EXPIRED_RETENTION_SECONDS) -> int:
+    def prune_expired(
+        self, *, older_than_seconds: float = DEFAULT_EXPIRED_RETENTION_SECONDS
+    ) -> int:
         """Delete only expired history older than the requested retention window."""
 
         cutoff = time.time() - max(0.0, float(older_than_seconds))
@@ -377,9 +406,15 @@ class ApprovalEngine:
                 (req_id, now),
             )
             if cursor.rowcount != 1:
-                row = conn.execute("SELECT status, expires_at FROM requests WHERE id = ?", (req_id,)).fetchone()
+                row = conn.execute(
+                    "SELECT status, expires_at FROM requests WHERE id = ?", (req_id,)
+                ).fetchone()
                 if row is None:
-                    raise ToolFailure("NOT_FOUND", f"Approval request {req_id} not found.", category="validation")
+                    raise ToolFailure(
+                        "NOT_FOUND",
+                        f"Approval request {req_id} not found.",
+                        category="validation",
+                    )
                 if row[0] == "pending" and float(row[1]) < now:
                     conn.execute(
                         "UPDATE requests SET status = 'expired' WHERE id = ? AND status = 'pending'",
@@ -405,9 +440,15 @@ class ApprovalEngine:
             )
             if cursor.rowcount == 1:
                 return
-            row = conn.execute("SELECT status FROM requests WHERE id = ?", (req_id,)).fetchone()
+            row = conn.execute(
+                "SELECT status FROM requests WHERE id = ?", (req_id,)
+            ).fetchone()
             if row is None:
-                raise ToolFailure("NOT_FOUND", f"Approval request {req_id} not found.", category="validation")
+                raise ToolFailure(
+                    "NOT_FOUND",
+                    f"Approval request {req_id} not found.",
+                    category="validation",
+                )
             raise ToolFailure(
                 "INVALID_STATE",
                 f"Approval {req_id} cannot be denied from state '{row[0]}'.",
@@ -437,11 +478,22 @@ class ApprovalEngine:
                 (req_id,),
             ).fetchone()
             if row is None:
-                raise ToolFailure("ACCESS_DENIED", f"Approval request {req_id} not found.", category="security")
+                raise ToolFailure(
+                    "ACCESS_DENIED",
+                    f"Approval request {req_id} not found.",
+                    category="security",
+                )
             try:
-                stored_caps = [str(capability) for capability in json.loads(row["capabilities"] or "[]")]
+                stored_caps = [
+                    str(capability)
+                    for capability in json.loads(row["capabilities"] or "[]")
+                ]
             except (TypeError, json.JSONDecodeError) as exc:
-                raise ToolFailure("ACCESS_DENIED", "Approval has invalid capability data.", category="security") from exc
+                raise ToolFailure(
+                    "ACCESS_DENIED",
+                    "Approval has invalid capability data.",
+                    category="security",
+                ) from exc
             operation = self._operation(
                 action,
                 cwd,
@@ -453,7 +505,11 @@ class ApprovalEngine:
                 policy_version=str(row["policy_version"] or POLICY_VERSION),
             )
             if operation.action_kind != str(row["action_kind"]):
-                raise ToolFailure("ACCESS_DENIED", "Execution operation kind does not match approval.", category="security")
+                raise ToolFailure(
+                    "ACCESS_DENIED",
+                    "Execution operation kind does not match approval.",
+                    category="security",
+                )
             now = time.time()
             cursor = conn.execute(
                 """
@@ -469,31 +525,68 @@ class ApprovalEngine:
                         "UPDATE requests SET status = 'expired' WHERE id = ? AND status = 'approved' AND expires_at < ?",
                         (req_id, now),
                     )
-                    raise ToolFailure("ACCESS_DENIED", f"Approval {req_id} has expired.", category="security")
+                    raise ToolFailure(
+                        "ACCESS_DENIED",
+                        f"Approval {req_id} has expired.",
+                        category="security",
+                    )
                 if status != "approved":
                     raise ToolFailure(
                         "ACCESS_DENIED",
                         f"Approval {req_id} is in status '{status}', expected 'approved'.",
                         category="security",
                     )
-                raise ToolFailure("ACCESS_DENIED", "Execution parameters do not match approved digest.", category="security")
+                raise ToolFailure(
+                    "ACCESS_DENIED",
+                    "Execution parameters do not match approved digest.",
+                    category="security",
+                )
             return stored_caps
 
     def evaluate_command(self, cmd: str) -> str:
         """Returns ALLOW, ASK, or DENY based on command text."""
-        denied_commands = ["sudo", "doas", "su", "mount", "umount", "docker", "rm -rf /"]
+        denied_commands = [
+            "sudo",
+            "doas",
+            "su",
+            "mount",
+            "umount",
+            "docker",
+            "rm -rf /",
+        ]
         for denied in denied_commands:
             if cmd.startswith(denied) or f" {denied} " in f" {cmd} ":
                 return "DENY"
 
         allowed_prefixes = [
-            "ls ", "cat ", "grep ", "git ", "npm test", "pytest", "ruff ", "mypy ",
-            "env", "sleep ", "python ", "python3 ", "printf ", "echo ", "yes ",
-            "false", "kill ", "pwd", "awk ",
+            "ls ",
+            "cat ",
+            "grep ",
+            "git ",
+            "npm test",
+            "pytest",
+            "ruff ",
+            "mypy ",
+            "env",
+            "sleep ",
+            "python ",
+            "python3 ",
+            "printf ",
+            "echo ",
+            "yes ",
+            "false",
+            "kill ",
+            "pwd",
+            "awk ",
         ]
         for prefix in allowed_prefixes:
-            if cmd.startswith(prefix) or cmd == prefix.strip() or (
-                "python" in cmd and (".venv/bin/python" in cmd or ".local/share/uv/python" in cmd)
+            if (
+                cmd.startswith(prefix)
+                or cmd == prefix.strip()
+                or (
+                    "python" in cmd
+                    and (".venv/bin/python" in cmd or ".local/share/uv/python" in cmd)
+                )
             ):
                 return "ALLOW"
         return "ASK"

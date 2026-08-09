@@ -1,6 +1,7 @@
 from __future__ import annotations
 from tests.compliance.test_support import ComplianceTestCase
 
+
 class PatchSafetyTests(ComplianceTestCase):
     fixture_name = "tiny-js-project"
 
@@ -16,15 +17,20 @@ class PatchSafetyTests(ComplianceTestCase):
 """
         preview_res = self.client.call_tool("preview_patch", {"patch": patch})
         payload = self.assert_tool_success(preview_res)
-        self.assertIn("package.json", [f["path"] for f in payload.get("affected_files", [])])
-        
+        self.assertIn(
+            "package.json", [f["path"] for f in payload.get("affected_files", [])]
+        )
+
         # Verify it didn't actually change the file
         content = (self.workspace.root / "package.json").read_text()
         self.assertIn('"version": "0.0.0"', content)
 
     def test_5000_line_byte_preservation(self) -> None:
         test_file = self.workspace.root / "5000_lines.txt"
-        original_lines = [f"Line {i}: Some content that must be perfectly preserved." for i in range(5000)]
+        original_lines = [
+            f"Line {i}: Some content that must be perfectly preserved."
+            for i in range(5000)
+        ]
         test_file.write_bytes(("\n".join(original_lines) + "\n").encode())
 
         patch = """*** Begin Patch
@@ -54,7 +60,9 @@ class PatchSafetyTests(ComplianceTestCase):
         self.assertEqual(modified_lines[4000], "Line 4000: MODIFIED REGION THREE.")
         for index, value in enumerate(modified_lines):
             if index not in {100, 2500, 4000}:
-                self.assertEqual(value, original_lines[index], f"unrelated line {index} changed")
+                self.assertEqual(
+                    value, original_lines[index], f"unrelated line {index} changed"
+                )
 
         destructive_patch = (
             "*** Begin Patch\n*** Update File: 5000_lines.txt\n@@\n"
@@ -68,4 +76,6 @@ class PatchSafetyTests(ComplianceTestCase):
         approval = self.client.call_tool("apply_patch", {"patch": destructive_patch})
         approval_payload = approval.get("structuredContent", {})
         self.assertEqual(approval_payload.get("status"), "approval_required", approval)
-        self.assertEqual(test_file.read_bytes(), ("\n".join(modified_lines) + "\n").encode())
+        self.assertEqual(
+            test_file.read_bytes(), ("\n".join(modified_lines) + "\n").encode()
+        )

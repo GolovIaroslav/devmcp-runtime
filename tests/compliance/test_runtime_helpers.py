@@ -86,7 +86,10 @@ def fake_landlock_exec() -> Iterator[dict[str, object]]:
 
 class RuntimeHelperTests(unittest.TestCase):
     def test_windows_tty_request_reports_explicit_unsupported_error(self) -> None:
-        with TemporaryDirectory() as tmp, patch.object(processes_module.os, "name", "nt"):
+        with (
+            TemporaryDirectory() as tmp,
+            patch.object(processes_module.os, "name", "nt"),
+        ):
             with self.assertRaises(ToolFailure) as raised:
                 processes_module.spawn_process(
                     "ignored",
@@ -126,7 +129,9 @@ class RuntimeHelperTests(unittest.TestCase):
 
         with (
             patch.object(processes_module.os, "name", "nt"),
-            patch.object(processes_module, "hasattr", side_effect=fake_hasattr, create=True),
+            patch.object(
+                processes_module, "hasattr", side_effect=fake_hasattr, create=True
+            ),
             patch.object(processes_module.signal, "CTRL_BREAK_EVENT", 999, create=True),
         ):
             graceful = FakeProcess()
@@ -144,7 +149,9 @@ class RuntimeHelperTests(unittest.TestCase):
         self.assertEqual(graceful.calls, [("send_signal", 999), ("wait", 1)])
         self.assertEqual(forced.calls, ["kill", ("wait", 1)])
 
-    def test_atomic_patch_commit_rolls_back_all_files_after_mid_commit_failure(self) -> None:
+    def test_atomic_patch_commit_rolls_back_all_files_after_mid_commit_failure(
+        self,
+    ) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             first = root / "first.txt"
@@ -152,18 +159,37 @@ class RuntimeHelperTests(unittest.TestCase):
             first.write_text("first-before\n", encoding="utf-8")
             second.write_text("second-before\n", encoding="utf-8")
             changes = [
-                StagedFile("first.txt", first, "first-after\n", FileBaseline.capture(first), 0o644),
-                StagedFile("second.txt", second, "second-after\n", FileBaseline.capture(second), 0o644),
+                StagedFile(
+                    "first.txt",
+                    first,
+                    "first-after\n",
+                    FileBaseline.capture(first),
+                    0o644,
+                ),
+                StagedFile(
+                    "second.txt",
+                    second,
+                    "second-after\n",
+                    FileBaseline.capture(second),
+                    0o644,
+                ),
             ]
             real_replace = os.replace
 
-            def fail_second_install(source: os.PathLike[str] | str, destination: os.PathLike[str] | str) -> None:
+            def fail_second_install(
+                source: os.PathLike[str] | str, destination: os.PathLike[str] | str
+            ) -> None:
                 source_path = Path(source)
-                if source_path.name.startswith(".coding-tools-patch-") and Path(destination) == second:
+                if (
+                    source_path.name.startswith(".coding-tools-patch-")
+                    and Path(destination) == second
+                ):
                     raise OSError("injected second-file install failure")
                 real_replace(source, destination)
 
-            with patch("coding_tools_mcp.patching.os.replace", side_effect=fail_second_install):
+            with patch(
+                "coding_tools_mcp.patching.os.replace", side_effect=fail_second_install
+            ):
                 with self.assertRaises(OSError):
                     AtomicPatchCommitter().commit(changes)
 
@@ -211,7 +237,10 @@ class RuntimeHelperTests(unittest.TestCase):
                     raise OSError("injected rollback failure")
                 real_replace(source, destination)
 
-            with patch("coding_tools_mcp.patching.os.replace", side_effect=fail_install_and_restore):
+            with patch(
+                "coding_tools_mcp.patching.os.replace",
+                side_effect=fail_install_and_restore,
+            ):
                 with self.assertRaises(ToolFailure) as raised:
                     AtomicPatchCommitter().commit([change])
 
@@ -222,7 +251,9 @@ class RuntimeHelperTests(unittest.TestCase):
             self.assertTrue(recovery_path.exists())
             self.assertEqual(recovery_path.read_text(encoding="utf-8"), "before\n")
 
-    def test_atomic_patch_backup_cleanup_failure_does_not_rollback_committed_file(self) -> None:
+    def test_atomic_patch_backup_cleanup_failure_does_not_rollback_committed_file(
+        self,
+    ) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             target = root / "file.txt"
@@ -237,7 +268,9 @@ class RuntimeHelperTests(unittest.TestCase):
             real_unlink = Path.unlink
             backup_unlinks = 0
 
-            def fail_backup_cleanup(path: Path, *args: object, **kwargs: object) -> None:
+            def fail_backup_cleanup(
+                path: Path, *args: object, **kwargs: object
+            ) -> None:
                 nonlocal backup_unlinks
                 if path.name.startswith(".coding-tools-backup-"):
                     backup_unlinks += 1
@@ -251,7 +284,9 @@ class RuntimeHelperTests(unittest.TestCase):
             self.assertEqual(target.read_text(encoding="utf-8"), "after\n")
             retained_backups = list(root.glob(".coding-tools-backup-*"))
             self.assertEqual(len(retained_backups), 1)
-            self.assertEqual(retained_backups[0].read_text(encoding="utf-8"), "before\n")
+            self.assertEqual(
+                retained_backups[0].read_text(encoding="utf-8"), "before\n"
+            )
 
     def test_atomic_patch_commit_does_not_overwrite_new_target_race(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -274,14 +309,29 @@ class RuntimeHelperTests(unittest.TestCase):
             b"\xff\xc0\x00\x11\x08\x00\x10\x00\x20\x03\x01\x11\x00\x02\x11\x00\x03\x11\x00"
             b"\xff\xd9"
         )
-        self.assertEqual(identify_image(jpeg, path=file_path("sample.jpg")), ("image/jpeg", 32, 16))
+        self.assertEqual(
+            identify_image(jpeg, path=file_path("sample.jpg")), ("image/jpeg", 32, 16)
+        )
 
-        webp = b"RIFF" + (22).to_bytes(4, "little") + b"WEBPVP8X" + (10).to_bytes(4, "little")
-        webp += b"\x00\x00\x00\x00" + (63).to_bytes(3, "little") + (31).to_bytes(3, "little")
-        self.assertEqual(identify_image(webp, path=file_path("sample.webp")), ("image/webp", 64, 32))
+        webp = (
+            b"RIFF"
+            + (22).to_bytes(4, "little")
+            + b"WEBPVP8X"
+            + (10).to_bytes(4, "little")
+        )
+        webp += (
+            b"\x00\x00\x00\x00"
+            + (63).to_bytes(3, "little")
+            + (31).to_bytes(3, "little")
+        )
+        self.assertEqual(
+            identify_image(webp, path=file_path("sample.webp")), ("image/webp", 64, 32)
+        )
 
     def test_tail_truncation_keeps_recent_complete_output(self) -> None:
-        result = truncate_text_tail("\n".join(f"line-{index:03d}" for index in range(80)), max_bytes=128)
+        result = truncate_text_tail(
+            "\n".join(f"line-{index:03d}" for index in range(80)), max_bytes=128
+        )
         self.assertTrue(result.truncated)
         self.assertEqual(result.truncated_by, "bytes")
         self.assertIn("line-079", result.content)
@@ -334,7 +384,9 @@ class RuntimeHelperTests(unittest.TestCase):
 
     def test_workspace_init_tolerates_missing_home_lookup(self) -> None:
         with TemporaryDirectory() as tmp:
-            with patch.object(server_module.Path, "home", side_effect=RuntimeError("home unavailable")):
+            with patch.object(
+                server_module.Path, "home", side_effect=RuntimeError("home unavailable")
+            ):
                 runtime = Runtime(Path(tmp))
 
         self.assertEqual(runtime.workspace.root, Path(tmp).resolve())
@@ -345,20 +397,31 @@ class RuntimeHelperTests(unittest.TestCase):
                 return None
 
             def wait(self, timeout: float | None = None) -> None:
-                raise subprocess.TimeoutExpired(cmd="still-running", timeout=timeout or 0)
+                raise subprocess.TimeoutExpired(
+                    cmd="still-running", timeout=timeout or 0
+                )
 
         with TemporaryDirectory() as tmp:
             runtime = Runtime(Path(tmp))
             session = runtime._make_session(StillRunningProcess())  # type: ignore[arg-type]
             runtime.sessions[session.session_id] = session
-            with patch.object(server_module, "terminate_process_group", return_value=None):
-                result = runtime.kill_session({"session_id": session.session_id, "wait_ms": 0, "kill_wait_ms": 0})
+            with patch.object(
+                server_module, "terminate_process_group", return_value=None
+            ):
+                result = runtime.kill_session(
+                    {"session_id": session.session_id, "wait_ms": 0, "kill_wait_ms": 0}
+                )
 
         self.assertFalse(result.get("killed"), result)
         self.assertEqual(result.get("status"), "terminating", result)
         self.assertFalse(result.get("evicted"), result)
         self.assertIn(session.session_id, runtime.sessions)
-        self.assertTrue(any("session retained" in warning for warning in result.get("warnings", [])), result)
+        self.assertTrue(
+            any(
+                "session retained" in warning for warning in result.get("warnings", [])
+            ),
+            result,
+        )
 
     def test_command_policy_gates_inline_interpreter_code(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -376,12 +439,20 @@ class RuntimeHelperTests(unittest.TestCase):
                     with self.assertRaises(ToolFailure) as cm:
                         runtime._check_command_policy(command, {})
                     self.assertEqual(cm.exception.code, "PERMISSION_REQUIRED")
-                    self.assertEqual(cm.exception.details.get("permission"), "inline_script")
+                    self.assertEqual(
+                        cm.exception.details.get("permission"), "inline_script"
+                    )
 
-    def test_command_policy_still_blocks_explicit_external_paths_and_network_tools(self) -> None:
+    def test_command_policy_still_blocks_explicit_external_paths_and_network_tools(
+        self,
+    ) -> None:
         with TemporaryDirectory() as tmp:
             runtime = Runtime(Path(tmp))
-            for command in ("cat /etc/passwd", "echo hi > /tmp/out", "curl https://example.com"):
+            for command in (
+                "cat /etc/passwd",
+                "echo hi > /tmp/out",
+                "curl https://example.com",
+            ):
                 with self.subTest(command=command):
                     with self.assertRaises(ToolFailure) as cm:
                         runtime._check_command_policy(command, {})
@@ -391,7 +462,9 @@ class RuntimeHelperTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             runtime = Runtime(Path(tmp))
             runtime._check_command_policy("echo hi >/dev/null", {})
-            runtime._check_command_policy("dd if=/dev/null of=/dev/null bs=1 count=0", {})
+            runtime._check_command_policy(
+                "dd if=/dev/null of=/dev/null bs=1 count=0", {}
+            )
             with self.assertRaises(ToolFailure):
                 runtime._check_command_policy("echo hi >/dev/not-a-standard-device", {})
 
@@ -399,7 +472,7 @@ class RuntimeHelperTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             runtime = Runtime(Path(tmp), allow_network=True)
             runtime._check_command_policy("curl https://example.com", {})
-            for command in ("git reset --hard", "python3 -c \"print(1)\""):
+            for command in ("git reset --hard", 'python3 -c "print(1)"'):
                 with self.subTest(command=command):
                     with self.assertRaises(ToolFailure) as cm:
                         runtime._check_command_policy(command, {})
@@ -427,7 +500,9 @@ class RuntimeHelperTests(unittest.TestCase):
                 patch.object(server_module.os, "name", "nt"),
                 patch.dict(server_module.os.environ, host_env, clear=True),
             ):
-                env = runtime._command_env({"CUSTOM": "ok", "OPENAI_API_KEY": "fixture-openai-key-value"})
+                env = runtime._command_env(
+                    {"CUSTOM": "ok", "OPENAI_API_KEY": "fixture-openai-key-value"}
+                )
 
             self.assertEqual(env.get("Path"), host_env["Path"])
             self.assertEqual(env.get("PATHEXT"), host_env["PATHEXT"])
@@ -451,7 +526,9 @@ class RuntimeHelperTests(unittest.TestCase):
             self.assertTrue(runtime.cache_dir.is_dir())
             self.assertFalse((workspace / ".coding-tools").exists())
 
-    def test_command_env_uses_external_home_tmp_and_cache_without_ecosystem_cache_vars(self) -> None:
+    def test_command_env_uses_external_home_tmp_and_cache_without_ecosystem_cache_vars(
+        self,
+    ) -> None:
         with TemporaryDirectory() as tmp:
             workspace = Path(tmp)
             runtime = Runtime(workspace, shell_env_policy=ShellEnvPolicy(inherit="all"))
@@ -486,7 +563,9 @@ class RuntimeHelperTests(unittest.TestCase):
             self.assertTrue(runtime.cache_dir.is_dir())
             self.assertFalse((workspace / ".coding-tools").exists())
 
-    @unittest.skipUnless(os.name != "nt" and shutil.which("bwrap"), "bwrap sandbox is required")
+    @unittest.skipUnless(
+        os.name != "nt" and shutil.which("bwrap"), "bwrap sandbox is required"
+    )
     def test_bwrap_has_private_writable_tmp_and_cannot_read_host_tmp(self) -> None:
         with TemporaryDirectory() as tmp, TemporaryDirectory() as host_tmp:
             workspace = Path(tmp) / "workspace"
@@ -510,7 +589,9 @@ class RuntimeHelperTests(unittest.TestCase):
                         "timeout_ms": 10000,
                     }
                 )
-                expected_tmp = runtime.sandbox.temp_dir if runtime.sandbox is not None else None
+                expected_tmp = (
+                    runtime.sandbox.temp_dir if runtime.sandbox is not None else None
+                )
             finally:
                 runtime.close()
 
@@ -518,7 +599,9 @@ class RuntimeHelperTests(unittest.TestCase):
             output = str(result.get("stdout", "")).splitlines()
             self.assertGreaterEqual(len(output), 5, result)
             self.assertIsNotNone(expected_tmp)
-            self.assertTrue(output[0].startswith(str(expected_tmp) + "/devmcp-"), output)
+            self.assertTrue(
+                output[0].startswith(str(expected_tmp) + "/devmcp-"), output
+            )
             self.assertEqual(output[1:4], [str(expected_tmp)] * 3)
             self.assertEqual(output[4], "False", output)
 
@@ -554,9 +637,15 @@ class RuntimeHelperTests(unittest.TestCase):
             self.assertEqual(info.get("cache_dir"), str(runtime.cache_dir))
             self.assertEqual(info.get("network_allowed"), False)
             self.assertIsInstance(info.get("landlock"), dict)
-            self.assertEqual(info.get("exec_policy", {}).get("shell_expansion"), "blocked")
-            self.assertEqual(info.get("exec_policy", {}).get("inline_script"), "blocked")
-            self.assertEqual(info.get("exec_policy", {}).get("global_tmp_write"), "blocked")
+            self.assertEqual(
+                info.get("exec_policy", {}).get("shell_expansion"), "blocked"
+            )
+            self.assertEqual(
+                info.get("exec_policy", {}).get("inline_script"), "blocked"
+            )
+            self.assertEqual(
+                info.get("exec_policy", {}).get("global_tmp_write"), "blocked"
+            )
             check = runtime.check_exec_environment({})
             self.assertTrue(check.get("ok"))
             self.assertEqual(check.get("permission_mode"), "safe")
@@ -568,14 +657,14 @@ class RuntimeHelperTests(unittest.TestCase):
             workspace = Path(tmp)
             safe = Runtime(workspace)
             with self.assertRaises(ToolFailure):
-                safe._check_command_policy("python3 -c \"print(1)\"", {})
+                safe._check_command_policy('python3 -c "print(1)"', {})
             with self.assertRaises(ToolFailure):
                 safe._check_command_policy("echo $(pwd)", {})
             with self.assertRaises(ToolFailure):
                 safe._check_command_policy("curl https://example.com", {})
 
             trusted = Runtime(workspace, permission_mode="trusted")
-            trusted._check_command_policy("python3 -c \"print(1)\"", {})
+            trusted._check_command_policy('python3 -c "print(1)"', {})
             trusted._check_command_policy("echo $(pwd)", {})
             trusted._check_command_policy("curl https://example.com", {})
             self.assertEqual(trusted.global_tmp_write_policy(), "tmp-prefix")
@@ -590,7 +679,9 @@ class RuntimeHelperTests(unittest.TestCase):
             self.assertFalse(dangerous.landlock_enabled())
             self.assertEqual(dangerous.global_tmp_write_policy(), "allowed")
 
-    def test_command_env_all_preserves_toolchain_environment_but_filters_sensitive_values(self) -> None:
+    def test_command_env_all_preserves_toolchain_environment_but_filters_sensitive_values(
+        self,
+    ) -> None:
         with TemporaryDirectory() as tmp:
             workspace = Path(tmp)
             runtime = Runtime(workspace, shell_env_policy=ShellEnvPolicy(inherit="all"))
@@ -617,7 +708,9 @@ class RuntimeHelperTests(unittest.TestCase):
             self.assertNotIn("PYTHONPATH", env)
             self.assertNotIn("DYLD_LIBRARY_PATH", env)
 
-    def test_command_env_dangerous_all_preserves_sensitive_inherited_environment(self) -> None:
+    def test_command_env_dangerous_all_preserves_sensitive_inherited_environment(
+        self,
+    ) -> None:
         with TemporaryDirectory() as tmp:
             runtime = Runtime(
                 Path(tmp),
@@ -634,14 +727,18 @@ class RuntimeHelperTests(unittest.TestCase):
             self.assertEqual(env.get("OPENAI_API_KEY"), "fixture-openai-key-value")
             self.assertEqual(env.get("LD_PRELOAD"), "/tmp/injected.so")
 
-    def test_runtime_root_stays_posix_tmp_when_process_tmpdir_is_workspace_local(self) -> None:
+    def test_runtime_root_stays_posix_tmp_when_process_tmpdir_is_workspace_local(
+        self,
+    ) -> None:
         if os.name == "nt":
             self.skipTest("POSIX /tmp semantics do not apply on Windows")
         with TemporaryDirectory() as tmp:
             workspace = Path(tmp)
             drifted_tmp = workspace / ".coding-tools" / "tmp"
             drifted_tmp.mkdir(parents=True)
-            with patch.dict(server_module.os.environ, {"TMPDIR": str(drifted_tmp)}, clear=True):
+            with patch.dict(
+                server_module.os.environ, {"TMPDIR": str(drifted_tmp)}, clear=True
+            ):
                 safe = Runtime(workspace)
                 trusted = Runtime(workspace, permission_mode="trusted")
             self.assertEqual(safe.runtime_dir.parent.parent, runtime_parent_root())
@@ -696,24 +793,36 @@ class RuntimeHelperTests(unittest.TestCase):
             runtime = Runtime(Path(tmp))
             original = server_module.open_landlock_ruleset
 
-            def unavailable(_workspace: Path, _read_roots: list[str], **_kwargs: object) -> int:
-                raise ToolFailure("SANDBOX_UNAVAILABLE", "test landlock unavailable", category="security")
+            def unavailable(
+                _workspace: Path, _read_roots: list[str], **_kwargs: object
+            ) -> int:
+                raise ToolFailure(
+                    "SANDBOX_UNAVAILABLE",
+                    "test landlock unavailable",
+                    category="security",
+                )
 
             server_module.open_landlock_ruleset = unavailable
             try:
-                result = runtime.exec_command({"cmd": "printf ok", "timeout_ms": 5000, "yield_time_ms": 1000})
+                result = runtime.exec_command(
+                    {"cmd": "printf ok", "timeout_ms": 5000, "yield_time_ms": 1000}
+                )
             finally:
                 server_module.open_landlock_ruleset = original
 
             self.assertTrue(result["ok"])
             self.assertEqual(result["stdout"], "ok")
-            self.assertTrue(any("Landlock" in warning for warning in result.get("warnings", [])))
+            self.assertTrue(
+                any("Landlock" in warning for warning in result.get("warnings", []))
+            )
 
     def test_exec_command_uses_landlock_wrapper_without_preexec_fn(self) -> None:
         with TemporaryDirectory() as tmp:
             runtime = Runtime(Path(tmp))
             with fake_landlock_exec() as captured:
-                runtime.exec_command({"cmd": "printf ok", "timeout_ms": 5000, "yield_time_ms": 0})
+                runtime.exec_command(
+                    {"cmd": "printf ok", "timeout_ms": 5000, "yield_time_ms": 0}
+                )
 
             kwargs = captured["kwargs"]
             self.assertIsInstance(kwargs, dict)
@@ -724,7 +833,10 @@ class RuntimeHelperTests(unittest.TestCase):
             else:
                 self.assertIn("start_new_session", kwargs)
             self.assertEqual(kwargs.get("pass_fds"), (captured["read_fd"],))
-            self.assertEqual(captured.get("write_roots"), [runtime.sandbox.sandbox_dir, runtime.runtime_dir])
+            self.assertEqual(
+                captured.get("write_roots"),
+                [runtime.sandbox.sandbox_dir, runtime.runtime_dir],
+            )
             popen_args = captured["args"]
             self.assertIsInstance(popen_args, tuple)
             argv = popen_args[0]
@@ -733,14 +845,24 @@ class RuntimeHelperTests(unittest.TestCase):
 
     def test_exec_command_passes_runtime_write_root_to_landlock(self) -> None:
         for permission_mode in ("safe", "trusted"):
-            with self.subTest(permission_mode=permission_mode), TemporaryDirectory() as tmp:
+            with (
+                self.subTest(permission_mode=permission_mode),
+                TemporaryDirectory() as tmp,
+            ):
                 runtime = Runtime(Path(tmp), permission_mode=permission_mode)
                 with fake_landlock_exec() as captured:
-                    runtime.exec_command({"cmd": "printf ok", "timeout_ms": 5000, "yield_time_ms": 0})
+                    runtime.exec_command(
+                        {"cmd": "printf ok", "timeout_ms": 5000, "yield_time_ms": 0}
+                    )
 
-                self.assertEqual(captured.get("write_roots"), [runtime.sandbox.sandbox_dir, runtime.runtime_dir])
+                self.assertEqual(
+                    captured.get("write_roots"),
+                    [runtime.sandbox.sandbox_dir, runtime.runtime_dir],
+                )
 
-    def test_dangerously_skip_all_permissions_auto_grants_permission_gates(self) -> None:
+    def test_dangerously_skip_all_permissions_auto_grants_permission_gates(
+        self,
+    ) -> None:
         with TemporaryDirectory() as tmp:
             workspace = Path(tmp)
             default_runtime = Runtime(workspace)
@@ -751,10 +873,16 @@ class RuntimeHelperTests(unittest.TestCase):
             dangerous_runtime = Runtime(workspace, permission_mode="dangerous")
             dangerous_runtime._check_command_policy("curl https://example.com", {})
 
-            filtered_env = default_runtime._command_env({"OPENAI_API_KEY": "fixture-openai-key-value"})
-            dangerous_env = dangerous_runtime._command_env({"OPENAI_API_KEY": "fixture-openai-key-value"})
+            filtered_env = default_runtime._command_env(
+                {"OPENAI_API_KEY": "fixture-openai-key-value"}
+            )
+            dangerous_env = dangerous_runtime._command_env(
+                {"OPENAI_API_KEY": "fixture-openai-key-value"}
+            )
             self.assertNotIn("OPENAI_API_KEY", filtered_env)
-            self.assertEqual(dangerous_env.get("OPENAI_API_KEY"), "fixture-openai-key-value")
+            self.assertEqual(
+                dangerous_env.get("OPENAI_API_KEY"), "fixture-openai-key-value"
+            )
 
     def test_landlock_device_access_includes_truncate_and_ioctl_bits(self) -> None:
         handled = server_module.landlock_handled_access(5)
@@ -791,13 +919,19 @@ class RuntimeHelperTests(unittest.TestCase):
         self.assertIn(str(explicit_root.resolve()), roots)
         self.assertNotIn(str(private_path_dir.resolve()), roots)
 
-    def test_safe_exec_git_init_and_local_config_reads_system_git_config_roots(self) -> None:
+    def test_safe_exec_git_init_and_local_config_reads_system_git_config_roots(
+        self,
+    ) -> None:
         if shutil.which("git") is None:
             self.skipTest("git is not available")
         with TemporaryDirectory() as tmp:
             workspace = Path(tmp)
             runtime = Runtime(workspace)
-            with patch.dict(server_module.os.environ, {"PATH": os.environ.get("PATH", "")}, clear=True):
+            with patch.dict(
+                server_module.os.environ,
+                {"PATH": os.environ.get("PATH", "")},
+                clear=True,
+            ):
                 self.assertNotIn("GIT_CONFIG_NOSYSTEM", runtime._command_env({}))
                 result = runtime.exec_command(
                     {
@@ -813,19 +947,27 @@ class RuntimeHelperTests(unittest.TestCase):
                 )
         self.assertEqual(result.get("status"), "exited", result)
         self.assertEqual(result.get("exit_code"), 0, result)
-        self.assertNotIn("unable to access '/etc/gitconfig'", str(result.get("stderr", "")))
+        self.assertNotIn(
+            "unable to access '/etc/gitconfig'", str(result.get("stderr", ""))
+        )
 
     def test_exec_diagnostics_classify_common_failures(self) -> None:
         self.assertEqual(
-            exec_output_diagnostics({"stderr": "mvn: cannot create /dev/null: Permission denied"})[0]["code"],
+            exec_output_diagnostics(
+                {"stderr": "mvn: cannot create /dev/null: Permission denied"}
+            )[0]["code"],
             "DEV_NULL_DENIED",
         )
         self.assertEqual(
-            exec_output_diagnostics({"stderr": "curl: (6) Could not resolve host: example.com"})[0]["code"],
+            exec_output_diagnostics(
+                {"stderr": "curl: (6) Could not resolve host: example.com"}
+            )[0]["code"],
             "DNS_RESOLUTION_FAILED",
         )
         self.assertEqual(
-            exec_output_diagnostics({"status": "timeout", "timed_out": True})[0]["code"],
+            exec_output_diagnostics({"status": "timeout", "timed_out": True})[0][
+                "code"
+            ],
             "COMMAND_TIMED_OUT",
         )
         self.assertEqual(
@@ -843,7 +985,9 @@ Maven home: /usr/share/maven
         self.assertNotIn("HOME_NOT_WRITABLE", codes)
 
     def test_exec_diagnostics_treat_eacces_home_path_as_unwritable_home(self) -> None:
-        output = "Error: EACCES: permission denied, mkdir '/work/.coding-tools/home/.cache'"
+        output = (
+            "Error: EACCES: permission denied, mkdir '/work/.coding-tools/home/.cache'"
+        )
         codes = [item["code"] for item in exec_output_diagnostics({"stderr": output})]
         self.assertIn("HOME_NOT_WRITABLE", codes)
 
@@ -862,7 +1006,9 @@ Maven home: /usr/share/maven
                     category="permission",
                     details={"permission": permission},
                 )
-                self.assertEqual(permission_failure_diagnostics(exc)[0]["code"], expected)
+                self.assertEqual(
+                    permission_failure_diagnostics(exc)[0]["code"], expected
+                )
 
     def test_runtime_exposes_one_stable_truthfully_annotated_tool_catalog(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -875,11 +1021,15 @@ Maven home: /usr/share/maven
             self.assertIn("exec_command", names)
             self.assertIn("read_file", names)
             self.assertNotIn("edit_file", names)
-            apply_patch_tool = next(tool for tool in first if tool["name"] == "apply_patch")
+            apply_patch_tool = next(
+                tool for tool in first if tool["name"] == "apply_patch"
+            )
             self.assertIs(apply_patch_tool["annotations"].get("destructiveHint"), False)
             self.assertIs(apply_patch_tool["annotations"].get("readOnlyHint"), False)
 
-    def test_agent_text_matches_per_tool_limits_without_renderer_truncation(self) -> None:
+    def test_agent_text_matches_per_tool_limits_without_renderer_truncation(
+        self,
+    ) -> None:
         # Per-call tool limits (here read_file max_bytes) are the only budget:
         # the renderer must not apply a second, hidden truncation layer.
         with TemporaryDirectory() as tmp:
@@ -893,9 +1043,7 @@ Maven home: /usr/share/maven
 
             payload = result["structuredContent"]
             model_text = "\n".join(
-                item["text"]
-                for item in result["content"]
-                if item.get("type") == "text"
+                item["text"] for item in result["content"] if item.get("type") == "text"
             )
             self.assertEqual(payload["content"], content)
             self.assertEqual(model_text, content)
@@ -977,12 +1125,17 @@ Maven home: /usr/share/maven
             self.assertEqual(payload.get("output_stream"), "stderr")
             self.assertEqual(payload.get("truncated_output_streams"), ["stderr"])
             self.assertTrue(str(payload.get("output_ref", "")).endswith(":stderr"))
-            next_ref = payload.get("next_action", {}).get("arguments", {}).get("output_ref")
+            next_ref = (
+                payload.get("next_action", {}).get("arguments", {}).get("output_ref")
+            )
             self.assertTrue(str(next_ref).endswith(":stderr"))
             model_text = self.agent_text(result)
             self.assertIn("stderr output truncated", model_text)
             self.assertIn(":stderr", model_text)
-            self.assertNotIn('output_ref="session:' + str(payload["session_id"]) + ':stdout"', model_text)
+            self.assertNotIn(
+                'output_ref="session:' + str(payload["session_id"]) + ':stdout"',
+                model_text,
+            )
 
     @unittest.skipIf(os.name == "nt", "POSIX shell redirection syntax")
     def test_exec_truncation_names_both_stream_continuations(self) -> None:
@@ -1126,7 +1279,9 @@ Maven home: /usr/share/maven
             blame_payload = blame_result["structuredContent"]
             self.assertIs(blame_payload.get("truncated"), True)
             self.assertEqual(
-                blame_payload.get("next_action", {}).get("arguments", {}).get("start_line"),
+                blame_payload.get("next_action", {})
+                .get("arguments", {})
+                .get("start_line"),
                 2,
             )
             blame_text = self.agent_text(blame_result)
@@ -1153,7 +1308,9 @@ Maven home: /usr/share/maven
                 {"cmd": "pwd", "workdir": "missing"},
             )
             self.assertIs(result.get("isError"), True)
-            self.assertEqual(result.get("structuredContent", {}).get("status"), "failed")
+            self.assertEqual(
+                result.get("structuredContent", {}).get("status"), "failed"
+            )
 
     @unittest.skipIf(os.name == "nt", "POSIX signal status test")
     def test_exec_command_reports_signal_exit_as_terminated(self) -> None:
@@ -1184,16 +1341,24 @@ Maven home: /usr/share/maven
                 for session_id in session_ids:
                     try:
                         runtime.kill_session(
-                            {"session_id": session_id, "signal": "KILL", "wait_ms": 1000}
+                            {
+                                "session_id": session_id,
+                                "signal": "KILL",
+                                "wait_ms": 1000,
+                            }
                         )
                     except ToolFailure:
                         pass
                 runtime.close()
 
-    def test_initialize_injects_root_instructions_and_indexes_nested_instructions(self) -> None:
+    def test_initialize_injects_root_instructions_and_indexes_nested_instructions(
+        self,
+    ) -> None:
         with TemporaryDirectory() as tmp:
             workspace = Path(tmp)
-            (workspace / "AGENTS.md").write_text("Run the focused test suite.\n", encoding="utf-8")
+            (workspace / "AGENTS.md").write_text(
+                "Run the focused test suite.\n", encoding="utf-8"
+            )
             nested = workspace / "packages" / "api" / "AGENTS.md"
             nested.parent.mkdir(parents=True)
             nested.write_text("API-only nested rule.\n", encoding="utf-8")
@@ -1225,17 +1390,23 @@ Maven home: /usr/share/maven
             self.assertIn("output_refs", result)
             self.assertEqual(result.get("output_stream"), "stdout")
             self.assertNotIn("stdout", result)
-            page = runtime.read_output({"output_ref": result["output_ref"], "offset": 0, "limit": 128})
+            page = runtime.read_output(
+                {"output_ref": result["output_ref"], "offset": 0, "limit": 128}
+            )
             self.assertIn("alpha", page.get("content", ""))
             self.assertIn("beta", page.get("content", ""))
             self.assertEqual(page.get("stream"), "stdout")
             self.assertIsNone(page.get("next_offset"))
 
-    @unittest.skipIf(os.name == "nt", "this build explicitly reports ConPTY as unsupported")
+    @unittest.skipIf(
+        os.name == "nt", "this build explicitly reports ConPTY as unsupported"
+    )
     def test_exec_command_tty_uses_a_real_pseudo_terminal(self) -> None:
         with TemporaryDirectory() as tmp:
             runtime = Runtime(Path(tmp), permission_mode="trusted")
-            script = "import os; print(os.isatty(0), os.isatty(1), os.isatty(2), flush=True)"
+            script = (
+                "import os; print(os.isatty(0), os.isatty(1), os.isatty(2), flush=True)"
+            )
             result = runtime.exec_command(
                 {
                     "cmd": f"{sys.executable} -c {script!r}",
@@ -1251,7 +1422,11 @@ Maven home: /usr/share/maven
             deadline = time.time() + 5
             while result.get("status") == "running" and time.time() < deadline:
                 result = runtime.write_stdin(
-                    {"session_id": result["session_id"], "chars": "", "yield_time_ms": 500}
+                    {
+                        "session_id": result["session_id"],
+                        "chars": "",
+                        "yield_time_ms": 500,
+                    }
                 )
                 stdout += str(result.get("stdout", ""))
             self.assertEqual(result.get("status"), "exited", result)
@@ -1263,7 +1438,12 @@ Maven home: /usr/share/maven
             session_ids: list[str] = []
             for _ in range(20):
                 result = runtime.exec_command(
-                    {"cmd": "sleep 0.02", "timeout_ms": 2000, "yield_time_ms": 0, "max_output_bytes": 64}
+                    {
+                        "cmd": "sleep 0.02",
+                        "timeout_ms": 2000,
+                        "yield_time_ms": 0,
+                        "max_output_bytes": 64,
+                    }
                 )
                 session_ids.append(str(result["session_id"]))
             # Poll instead of a fixed sleep: the short-lived processes finish
@@ -1295,11 +1475,18 @@ Maven home: /usr/share/maven
         with TemporaryDirectory() as tmp:
             runtime = Runtime(Path(tmp), permission_mode="trusted")
             running = runtime.exec_command(
-                {"cmd": "sleep 1", "timeout_ms": 5000, "yield_time_ms": 0, "max_output_bytes": 64}
+                {
+                    "cmd": "sleep 1",
+                    "timeout_ms": 5000,
+                    "yield_time_ms": 0,
+                    "max_output_bytes": 64,
+                }
             )
             self.assertEqual(running.get("status"), "running")
             self.assertEqual(running.get("next_action", {}).get("tool"), "write_stdin")
-            runtime.kill_session({"session_id": running["session_id"], "signal": "KILL"})
+            runtime.kill_session(
+                {"session_id": running["session_id"], "signal": "KILL"}
+            )
 
             truncated = runtime.exec_command(
                 {
@@ -1310,7 +1497,9 @@ Maven home: /usr/share/maven
                 }
             )
             self.assertTrue(truncated.get("output_truncated"), truncated)
-            self.assertEqual(truncated.get("next_action", {}).get("tool"), "read_output")
+            self.assertEqual(
+                truncated.get("next_action", {}).get("tool"), "read_output"
+            )
             self.assertIn("output_ref", truncated)
 
     def test_read_output_pages_streams_independently(self) -> None:
@@ -1340,14 +1529,18 @@ Maven home: /usr/share/maven
 
             first: dict[str, object] = {}
             for _ in range(10):
-                first = runtime.read_output({"output_ref": stderr_ref, "offset": 0, "limit": 5})
+                first = runtime.read_output(
+                    {"output_ref": stderr_ref, "offset": 0, "limit": 5}
+                )
                 if first.get("content"):
                     break
                 time.sleep(0.05)
             self.assertEqual(first.get("content"), "err1\n")
             self.assertEqual(first.get("next_offset"), 5)
             time.sleep(0.6)
-            second = runtime.read_output({"output_ref": stderr_ref, "offset": first["next_offset"], "limit": 64})
+            second = runtime.read_output(
+                {"output_ref": stderr_ref, "offset": first["next_offset"], "limit": 64}
+            )
             self.assertEqual(second.get("offset"), first.get("next_offset"))
             self.assertEqual(second.get("content"), "err2\n")
             self.assertNotIn("out2", second.get("content", ""))
@@ -1358,12 +1551,24 @@ Maven home: /usr/share/maven
             runtime = Runtime(Path(tmp), permission_mode="trusted")
             # The context manager closes the stdout/stderr pipes and waits, so
             # the test does not leak pipe file objects (ResourceWarning).
-            with subprocess.Popen([sys.executable, "-c", ""], stdout=subprocess.PIPE, stderr=subprocess.PIPE) as process:
-                session = server_module.ExecSession(session_id="manual-output", process=process, buffer_limit=4)
+            with subprocess.Popen(
+                [sys.executable, "-c", ""],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            ) as process:
+                session = server_module.ExecSession(
+                    session_id="manual-output", process=process, buffer_limit=4
+                )
                 session.append_stdout(b"abcdef")
                 runtime._remember_output_session(session)
 
-                page = runtime.read_output({"output_ref": "session:manual-output:stdout", "offset": 0, "limit": 10})
+                page = runtime.read_output(
+                    {
+                        "output_ref": "session:manual-output:stdout",
+                        "offset": 0,
+                        "limit": 10,
+                    }
+                )
                 self.assertEqual(page.get("offset"), 2)
                 self.assertEqual(page.get("requested_offset"), 0)
                 self.assertEqual(page.get("content"), "cdef")
@@ -1390,9 +1595,17 @@ Maven home: /usr/share/maven
                 ["git", "add", "-A"],
                 ["git", "commit", "-q", "-m", "initial commit"],
             ):
-                completed = subprocess.run(cmd, cwd=workspace, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                completed = subprocess.run(
+                    cmd,
+                    cwd=workspace,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
                 if completed.returncode != 0:
-                    self.skipTest(f"git fixture setup failed: {completed.stderr.strip()}")
+                    self.skipTest(
+                        f"git fixture setup failed: {completed.stderr.strip()}"
+                    )
 
             runtime = Runtime(workspace)
             cwd = runtime.set_default_cwd({"path": "src"})
@@ -1423,15 +1636,24 @@ Maven home: /usr/share/maven
             runtime = Runtime(workspace, permission_mode="trusted")
 
             cwd_result = runtime.exec_command(
-                {"cmd": "pwd", "cwd": "nested", "timeout_ms": 5000, "max_output_bytes": 4096}
+                {
+                    "cmd": "pwd",
+                    "cwd": "nested",
+                    "timeout_ms": 5000,
+                    "max_output_bytes": 4096,
+                }
             )
             self.assertEqual(cwd_result.get("exit_code"), 0)
-            self.assertEqual(Path(str(cwd_result.get("stdout", "")).strip()).name, "nested")
+            self.assertEqual(
+                Path(str(cwd_result.get("stdout", "")).strip()).name, "nested"
+            )
 
             with self.assertRaises(ToolFailure):
                 runtime.exec_command({"cmd": "pwd", "workdir": ".", "cwd": "nested"})
 
-            read = runtime.read_file({"path": "sample.txt", "start_line": 2, "max_lines": 1})
+            read = runtime.read_file(
+                {"path": "sample.txt", "start_line": 2, "max_lines": 1}
+            )
             self.assertEqual(read.get("content"), "two\n")
             self.assertEqual(read.get("end_line"), 2)
 
@@ -1443,8 +1665,13 @@ Maven home: /usr/share/maven
                 "</project>\n"
                 "EOF"
             )
-            runtime.exec_command({"cmd": xml_heredoc, "timeout_ms": 5000, "max_output_bytes": 4096})
-            self.assertIn(tag, (runtime.sandbox.sandbox_dir / "pom.xml").read_text(encoding="utf-8"))
+            runtime.exec_command(
+                {"cmd": xml_heredoc, "timeout_ms": 5000, "max_output_bytes": 4096}
+            )
+            self.assertIn(
+                tag,
+                (runtime.sandbox.sandbox_dir / "pom.xml").read_text(encoding="utf-8"),
+            )
 
     def test_heredoc_payload_stripping_keeps_live_shell_code_scanned(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -1483,7 +1710,11 @@ Maven home: /usr/share/maven
             # motivated routing helper subprocesses through the command env.
             probe = subprocess.run(
                 ["git", "-C", str(workspace), "rev-parse", "--show-toplevel"],
-                env={**os.environ, "GIT_TEST_ASSUME_DIFFERENT_OWNER": "1", "GIT_CONFIG_GLOBAL": os.devnull},
+                env={
+                    **os.environ,
+                    "GIT_TEST_ASSUME_DIFFERENT_OWNER": "1",
+                    "GIT_CONFIG_GLOBAL": os.devnull,
+                },
                 text=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -1495,27 +1726,39 @@ Maven home: /usr/share/maven
                 return Runtime(
                     workspace,
                     shell_env_policy=ShellEnvPolicy(
-                        set={"GIT_TEST_ASSUME_DIFFERENT_OWNER": "1", "GIT_CONFIG_GLOBAL": str(config)}
+                        set={
+                            "GIT_TEST_ASSUME_DIFFERENT_OWNER": "1",
+                            "GIT_CONFIG_GLOBAL": str(config),
+                        }
                     ),
                 )
 
             without_safe = root / "gitconfig-empty"
             without_safe.write_text("", encoding="utf-8")
-            status = runtime_with_git_config(without_safe).git_status({"max_entries": 5})
+            status = runtime_with_git_config(without_safe).git_status(
+                {"max_entries": 5}
+            )
             self.assertFalse(status.get("is_repo"))
             self.assertTrue(
-                any("dubious ownership" in warning for warning in status.get("warnings", [])),
+                any(
+                    "dubious ownership" in warning
+                    for warning in status.get("warnings", [])
+                ),
                 status.get("warnings"),
             )
 
             with_safe = root / "gitconfig-safe"
-            with_safe.write_text(f"[safe]\n\tdirectory = {workspace.as_posix()}\n", encoding="utf-8")
+            with_safe.write_text(
+                f"[safe]\n\tdirectory = {workspace.as_posix()}\n", encoding="utf-8"
+            )
             runtime = runtime_with_git_config(with_safe)
             status = runtime.git_status({"max_entries": 5})
             self.assertTrue(status.get("is_repo"))
             log = runtime.git_log({"max_count": 1})
             self.assertTrue(log.get("is_repo"))
-            self.assertEqual(log.get("commits", [])[0].get("subject"), "baseline fixture")
+            self.assertEqual(
+                log.get("commits", [])[0].get("subject"), "baseline fixture"
+            )
 
 
 class FakeReadonlyAnnotationTests(unittest.TestCase):
@@ -1530,7 +1773,10 @@ class FakeReadonlyAnnotationTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             runtime = Runtime(Path(tmp), permission_mode="dangerous")
             self.assertFalse(runtime.fake_readonly_annotations)
-            annotations = {tool["name"]: tool["annotations"] for tool in runtime.list_tools()["tools"]}
+            annotations = {
+                tool["name"]: tool["annotations"]
+                for tool in runtime.list_tools()["tools"]
+            }
             for name in self.MUTATING_TOOLS:
                 with self.subTest(tool=name):
                     self.assertFalse(annotations[name]["readOnlyHint"])
@@ -1540,8 +1786,13 @@ class FakeReadonlyAnnotationTests(unittest.TestCase):
 
     def test_override_makes_every_listed_tool_report_read_only(self) -> None:
         with TemporaryDirectory() as tmp:
-            runtime = Runtime(Path(tmp), permission_mode="dangerous", fake_readonly_annotations=True)
-            annotations = {tool["name"]: tool["annotations"] for tool in runtime.list_tools()["tools"]}
+            runtime = Runtime(
+                Path(tmp), permission_mode="dangerous", fake_readonly_annotations=True
+            )
+            annotations = {
+                tool["name"]: tool["annotations"]
+                for tool in runtime.list_tools()["tools"]
+            }
             self.assertEqual(set(annotations), set(runtime.exposed_tool_names()))
             for name, annotation in annotations.items():
                 with self.subTest(tool=name):
@@ -1549,9 +1800,13 @@ class FakeReadonlyAnnotationTests(unittest.TestCase):
                     self.assertIs(annotation["destructiveHint"], False)
                     self.assertIs(annotation["openWorldHint"], False)
 
-    def test_override_is_disclosed_without_faking_server_info_or_card_annotations(self) -> None:
+    def test_override_is_disclosed_without_faking_server_info_or_card_annotations(
+        self,
+    ) -> None:
         with TemporaryDirectory() as tmp:
-            runtime = Runtime(Path(tmp), permission_mode="dangerous", fake_readonly_annotations=True)
+            runtime = Runtime(
+                Path(tmp), permission_mode="dangerous", fake_readonly_annotations=True
+            )
             info = runtime.server_info_payload()
             self.assertEqual(info["annotation_override"], "fake_readonly")
 
@@ -1565,14 +1820,27 @@ class FakeReadonlyAnnotationTests(unittest.TestCase):
     def test_override_still_executes_and_mutates(self) -> None:
         with TemporaryDirectory() as tmp:
             workspace = Path(tmp)
-            runtime = Runtime(workspace, permission_mode="dangerous", fake_readonly_annotations=True)
-            result = runtime.exec_command({"cmd": "echo ran > ran.txt", "timeout_ms": 30000, "yield_time_ms": 30000})
+            runtime = Runtime(
+                workspace, permission_mode="dangerous", fake_readonly_annotations=True
+            )
+            result = runtime.exec_command(
+                {
+                    "cmd": "echo ran > ran.txt",
+                    "timeout_ms": 30000,
+                    "yield_time_ms": 30000,
+                }
+            )
             self.assertEqual(result.get("status"), "exited", result)
-            self.assertTrue((runtime.sandbox.sandbox_dir / "ran.txt").exists(), "read-only annotation must not stop execution")
+            self.assertTrue(
+                (runtime.sandbox.sandbox_dir / "ran.txt").exists(),
+                "read-only annotation must not stop execution",
+            )
 
     def test_override_is_reported_by_check_exec_environment(self) -> None:
         with TemporaryDirectory() as tmp:
-            runtime = Runtime(Path(tmp), permission_mode="dangerous", fake_readonly_annotations=True)
+            runtime = Runtime(
+                Path(tmp), permission_mode="dangerous", fake_readonly_annotations=True
+            )
             warnings = runtime.check_exec_environment({})["warnings"]
             self.assertTrue(
                 any("faked as read-only" in warning for warning in warnings),
@@ -1584,16 +1852,30 @@ class FakeReadonlyAnnotationTests(unittest.TestCase):
             for mode in ("safe", "trusted"):
                 with self.subTest(permission_mode=mode):
                     with self.assertRaises(ToolFailure):
-                        Runtime(Path(tmp), permission_mode=mode, fake_readonly_annotations=True)
+                        Runtime(
+                            Path(tmp),
+                            permission_mode=mode,
+                            fake_readonly_annotations=True,
+                        )
 
     def test_policy_from_args_requires_dangerous_permission_mode(self) -> None:
         parser = server_module.build_parser()
-        args = parser.parse_args(["--dangerously-fake-readonly-annotations", "--permission-mode", "trusted"])
+        args = parser.parse_args(
+            ["--dangerously-fake-readonly-annotations", "--permission-mode", "trusted"]
+        )
         with self.assertRaises(ValueError):
             server_module.runtime_policy_from_args(args)
 
-        args = parser.parse_args(["--dangerously-fake-readonly-annotations", "--permission-mode", "dangerous"])
-        self.assertTrue(server_module.runtime_policy_from_args(args).fake_readonly_annotations)
+        args = parser.parse_args(
+            [
+                "--dangerously-fake-readonly-annotations",
+                "--permission-mode",
+                "dangerous",
+            ]
+        )
+        self.assertTrue(
+            server_module.runtime_policy_from_args(args).fake_readonly_annotations
+        )
 
     def test_policy_from_args_reads_the_environment_switch(self) -> None:
         parser = server_module.build_parser()
@@ -1603,8 +1885,12 @@ class FakeReadonlyAnnotationTests(unittest.TestCase):
             {"CODING_TOOLS_MCP_DANGEROUSLY_FAKE_READONLY_ANNOTATIONS": "1"},
             clear=False,
         ):
-            self.assertTrue(server_module.runtime_policy_from_args(args).fake_readonly_annotations)
-        self.assertFalse(server_module.runtime_policy_from_args(args).fake_readonly_annotations)
+            self.assertTrue(
+                server_module.runtime_policy_from_args(args).fake_readonly_annotations
+            )
+        self.assertFalse(
+            server_module.runtime_policy_from_args(args).fake_readonly_annotations
+        )
 
     def test_override_over_http_requires_authentication(self) -> None:
         # A tunnel forwards to a loopback bind, so the bind host cannot tell a

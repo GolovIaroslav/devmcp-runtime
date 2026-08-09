@@ -165,7 +165,11 @@ class CaseResult:
 
 class ToolAdapter:
     def __init__(self, tools: list[dict[str, Any]]) -> None:
-        self.tools = {tool.get("name"): tool for tool in tools if isinstance(tool.get("name"), str)}
+        self.tools = {
+            tool.get("name"): tool
+            for tool in tools
+            if isinstance(tool.get("name"), str)
+        }
 
     def names(self) -> list[str]:
         return sorted(self.tools)
@@ -208,15 +212,29 @@ class ToolAdapter:
         if cwd:
             canonical.update({"cwd": cwd, "workdir": cwd, "working_directory": cwd})
         args = self._args("exec_command", canonical)
-        if "cmd" not in args and "command" not in args and "argv" in self._properties("exec_command"):
+        if (
+            "cmd" not in args
+            and "command" not in args
+            and "argv" in self._properties("exec_command")
+        ):
             args["argv"] = shlex.split(command)
         return args
 
     def write_stdin_args(self, session_id: str, chars: str) -> dict[str, Any]:
-        return self._args("write_stdin", {"session_id": session_id, "sessionId": session_id, "chars": chars, "input": chars})
+        return self._args(
+            "write_stdin",
+            {
+                "session_id": session_id,
+                "sessionId": session_id,
+                "chars": chars,
+                "input": chars,
+            },
+        )
 
     def kill_session_args(self, session_id: str) -> dict[str, Any]:
-        return self._args("kill_session", {"session_id": session_id, "sessionId": session_id})
+        return self._args(
+            "kill_session", {"session_id": session_id, "sessionId": session_id}
+        )
 
     def git_diff_args(self, path: str | None = None) -> dict[str, Any]:
         if path is None:
@@ -227,7 +245,11 @@ class ToolAdapter:
         properties = self._properties(tool_name)
         required = self._required(tool_name)
         if not properties:
-            return {key: value for key, value in canonical.items() if key in ("path", "query", "patch", "cmd", "command")}
+            return {
+                key: value
+                for key, value in canonical.items()
+                if key in ("path", "query", "patch", "cmd", "command")
+            }
         args: dict[str, Any] = {}
         for key, value in canonical.items():
             if key in properties:
@@ -278,29 +300,61 @@ class DogfoodRunner:
 
     def case_js_bugfix(self) -> CaseResult:
         case = CaseResult("js_bugfix", "FAIL")
-        search = self.call("search_text", self.adapter.search_text_args("function add", "tiny-js-project"))
-        case.add_check("search_text finds add", not is_error_result(search), summarize(search))
-        read = self.call("read_file", self.adapter.read_file_args("tiny-js-project/src/math.js"))
-        case.add_check("read_file returns buggy source", result_contains(read, "return a - b"), summarize(read))
+        search = self.call(
+            "search_text",
+            self.adapter.search_text_args("function add", "tiny-js-project"),
+        )
+        case.add_check(
+            "search_text finds add", not is_error_result(search), summarize(search)
+        )
+        read = self.call(
+            "read_file", self.adapter.read_file_args("tiny-js-project/src/math.js")
+        )
+        case.add_check(
+            "read_file returns buggy source",
+            result_contains(read, "return a - b"),
+            summarize(read),
+        )
         patch = self.call("apply_patch", self.adapter.apply_patch_args(JS_PATCH))
-        case.add_check("apply_patch fixes add", not is_error_result(patch), summarize(patch))
+        case.add_check(
+            "apply_patch fixes add", not is_error_result(patch), summarize(patch)
+        )
         test = self.call(
             "exec_command",
-            self.adapter.exec_args("npm test", cwd="tiny-js-project", timeout_seconds=20),
+            self.adapter.exec_args(
+                "npm test", cwd="tiny-js-project", timeout_seconds=20
+            ),
         )
-        case.add_check("exec_command npm test passes", command_passed(test), summarize(test))
-        diff = self.call("git_diff", self.adapter.git_diff_args("tiny-js-project/src/math.js"))
+        case.add_check(
+            "exec_command npm test passes", command_passed(test), summarize(test)
+        )
+        diff = self.call(
+            "git_diff", self.adapter.git_diff_args("tiny-js-project/src/math.js")
+        )
         diff_text = result_text(diff)
         expected_diff = "return a + b" in diff_text and "return a - b" in diff_text
-        case.add_check("git_diff shows only math.js fix", expected_diff and "outside-secret" not in diff_text, summarize(diff))
+        case.add_check(
+            "git_diff shows only math.js fix",
+            expected_diff and "outside-secret" not in diff_text,
+            summarize(diff),
+        )
         return case.finalize()
 
     def case_python_function(self) -> CaseResult:
         case = CaseResult("python_new_function", "FAIL")
-        read = self.call("read_file", self.adapter.read_file_args("tiny-python-project/src/math_utils.py"))
-        case.add_check("read_file returns python source", result_contains(read, "def add"), summarize(read))
+        read = self.call(
+            "read_file",
+            self.adapter.read_file_args("tiny-python-project/src/math_utils.py"),
+        )
+        case.add_check(
+            "read_file returns python source",
+            result_contains(read, "def add"),
+            summarize(read),
+        )
         patch = self.call("apply_patch", self.adapter.apply_patch_args(PYTHON_PATCH))
-        case.add_check("apply_patch adds multiply", not is_error_result(patch), summarize(patch))
+        case.add_check(
+            "apply_patch adds multiply", not is_error_result(patch), summarize(patch)
+        )
         test = self.call(
             "exec_command",
             self.adapter.exec_args(
@@ -309,9 +363,18 @@ class DogfoodRunner:
                 timeout_seconds=20,
             ),
         )
-        case.add_check("exec_command unittest passes", command_passed(test), summarize(test))
-        diff = self.call("git_diff", self.adapter.git_diff_args("tiny-python-project/src/math_utils.py"))
-        case.add_check("git_diff shows multiply", result_contains(diff, "def multiply"), summarize(diff))
+        case.add_check(
+            "exec_command unittest passes", command_passed(test), summarize(test)
+        )
+        diff = self.call(
+            "git_diff",
+            self.adapter.git_diff_args("tiny-python-project/src/math_utils.py"),
+        )
+        case.add_check(
+            "git_diff shows multiply",
+            result_contains(diff, "def multiply"),
+            summarize(diff),
+        )
         return case.finalize()
 
     def case_long_running_stdin(self) -> CaseResult:
@@ -326,14 +389,30 @@ class DogfoodRunner:
             ),
         )
         session_id = find_session_id(started)
-        case.add_check("exec_command returns session_id", bool(session_id), summarize(started))
+        case.add_check(
+            "exec_command returns session_id", bool(session_id), summarize(started)
+        )
         if not session_id:
             return case.finalize()
-        hello = self.call("write_stdin", self.adapter.write_stdin_args(session_id, "hello\n"))
-        case.add_check("write_stdin accepts hello", not is_error_result(hello), summarize(hello))
-        exit_reply = self.call("write_stdin", self.adapter.write_stdin_args(session_id, "exit\n"))
-        case.add_check("write_stdin accepts exit", not is_error_result(exit_reply), summarize(exit_reply))
-        killed = self.call("kill_session", self.adapter.kill_session_args(session_id), expected_rejection=True)
+        hello = self.call(
+            "write_stdin", self.adapter.write_stdin_args(session_id, "hello\n")
+        )
+        case.add_check(
+            "write_stdin accepts hello", not is_error_result(hello), summarize(hello)
+        )
+        exit_reply = self.call(
+            "write_stdin", self.adapter.write_stdin_args(session_id, "exit\n")
+        )
+        case.add_check(
+            "write_stdin accepts exit",
+            not is_error_result(exit_reply),
+            summarize(exit_reply),
+        )
+        killed = self.call(
+            "kill_session",
+            self.adapter.kill_session_args(session_id),
+            expected_rejection=True,
+        )
         case.add_check(
             "kill_session terminates or reports already closed",
             not is_error_result(killed) or rejected_as_expected(killed),
@@ -343,20 +422,40 @@ class DogfoodRunner:
 
     def case_workspace_escape(self) -> CaseResult:
         case = CaseResult("workspace_escape", "FAIL")
-        read = self.call("read_file", self.adapter.read_file_args("../outside-secret.txt"), expected_rejection=True)
-        case.add_check("read_file rejects ../ escape", rejected_as_expected(read), summarize(read))
-        patch = self.call("apply_patch", self.adapter.apply_patch_args(ESCAPE_PATCH), expected_rejection=True)
-        case.add_check("apply_patch rejects ../ escape", rejected_as_expected(patch), summarize(patch))
+        read = self.call(
+            "read_file",
+            self.adapter.read_file_args("../outside-secret.txt"),
+            expected_rejection=True,
+        )
+        case.add_check(
+            "read_file rejects ../ escape", rejected_as_expected(read), summarize(read)
+        )
+        patch = self.call(
+            "apply_patch",
+            self.adapter.apply_patch_args(ESCAPE_PATCH),
+            expected_rejection=True,
+        )
+        case.add_check(
+            "apply_patch rejects ../ escape",
+            rejected_as_expected(patch),
+            summarize(patch),
+        )
         escaped = self.call(
             "exec_command",
             self.adapter.exec_args("cat ../outside-secret.txt", timeout_seconds=10),
             expected_rejection=True,
         )
         leaked_secret = result_contains(escaped, "DOGFOOD-OUTSIDE-SECRET")
-        case.add_check("exec_command does not expose outside secret", rejected_as_expected(escaped) and not leaked_secret, summarize(escaped))
+        case.add_check(
+            "exec_command does not expose outside secret",
+            rejected_as_expected(escaped) and not leaked_secret,
+            summarize(escaped),
+        )
         return case.finalize()
 
-    def call(self, tool: str, arguments: dict[str, Any], *, expected_rejection: bool = False) -> dict[str, Any]:
+    def call(
+        self, tool: str, arguments: dict[str, Any], *, expected_rejection: bool = False
+    ) -> dict[str, Any]:
         argument_bytes = len(json.dumps(arguments, sort_keys=True).encode("utf-8"))
         started = time.perf_counter()
         try:
@@ -366,7 +465,11 @@ class DogfoodRunner:
             summary = summarize(result)
         except McpHttpError as exc:
             duration_ms = round((time.perf_counter() - started) * 1000, 3)
-            result = {"isError": True, "transport_error": str(exc), "payload": exc.payload}
+            result = {
+                "isError": True,
+                "transport_error": str(exc),
+                "payload": exc.payload,
+            }
             ok = False
             summary = str(exc)
         self.calls.append(
@@ -410,21 +513,33 @@ def prepare_workspace(base_dir: Path | None = None) -> tuple[Path, Path]:
         target = workspace / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
-    (root / "outside-secret.txt").write_text("DOGFOOD-OUTSIDE-SECRET\n", encoding="utf-8")
+    (root / "outside-secret.txt").write_text(
+        "DOGFOOD-OUTSIDE-SECRET\n", encoding="utf-8"
+    )
     return root, workspace
 
 
-def start_server(command: str | None, workspace: Path, endpoint: str) -> subprocess.Popen[bytes] | None:
+def start_server(
+    command: str | None, workspace: Path, endpoint: str
+) -> subprocess.Popen[bytes] | None:
     if not command:
         return None
     env = os.environ.copy()
     env.setdefault("CODING_TOOLS_MCP_WORKSPACE", str(workspace))
     env.setdefault("CODING_TOOLS_MCP_ENDPOINT", endpoint)
     argv = shlex.split(command.format(workspace=str(workspace), endpoint=endpoint))
-    return subprocess.Popen(argv, cwd=str(ROOT), env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return subprocess.Popen(
+        argv,
+        cwd=str(ROOT),
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
 
 
-def connect(endpoint: str, startup_timeout: float) -> tuple[McpHttpClient | None, dict[str, Any] | None, str | None]:
+def connect(
+    endpoint: str, startup_timeout: float
+) -> tuple[McpHttpClient | None, dict[str, Any] | None, str | None]:
     return connect_with_retry(endpoint, startup_timeout, poll_interval=0.25)
 
 
@@ -472,7 +587,9 @@ def rejected_as_expected(result: dict[str, Any]) -> bool:
     if is_error_result(result):
         return True
     text = result_text(result).lower()
-    return any(marker in text for marker in REJECTION_MARKERS) and not command_passed(result)
+    return any(marker in text for marker in REJECTION_MARKERS) and not command_passed(
+        result
+    )
 
 
 def result_contains(result: dict[str, Any], needle: str) -> bool:
@@ -524,7 +641,9 @@ def summarize(result: dict[str, Any], limit: int = 180) -> str:
 def write_reports(report_json: Path, report_md: Path, report: dict[str, Any]) -> None:
     report_json.parent.mkdir(parents=True, exist_ok=True)
     report_md.parent.mkdir(parents=True, exist_ok=True)
-    report_json.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    report_json.write_text(
+        json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
     report_md.write_text(render_markdown(report), encoding="utf-8")
 
 
@@ -538,7 +657,9 @@ def write_transcript(path: Path, report: dict[str, Any]) -> None:
         "tool_calls": report.get("tool_calls", []),
         "cases": report.get("cases", []),
     }
-    path.write_text(json.dumps(transcript, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    path.write_text(
+        json.dumps(transcript, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
 
 
 def render_markdown(report: dict[str, Any]) -> str:
@@ -589,7 +710,9 @@ def render_markdown(report: dict[str, Any]) -> str:
     lines.extend(["## MCP Tool Calls", ""])
     for call in report.get("tool_calls", []):
         expected = " expected_rejection" if call["expected_rejection"] else ""
-        lines.append(f"- `{call['tool']}` ok={call['ok']}{expected} args={json.dumps(call['arguments'], sort_keys=True)}")
+        lines.append(
+            f"- `{call['tool']}` ok={call['ok']}{expected} args={json.dumps(call['arguments'], sort_keys=True)}"
+        )
     if not report.get("tool_calls"):
         lines.append("- none")
     raw_diff = str(report.get("final_git_diff") or "Not available.")
@@ -619,7 +742,9 @@ def efficiency_metrics(
     started_at: float,
 ) -> dict[str, Any]:
     first_patch_attempts = [
-        call for call in calls if call.tool == "apply_patch" and not call.expected_rejection
+        call
+        for call in calls
+        if call.tool == "apply_patch" and not call.expected_rejection
     ]
     successful_first_patches = sum(call.ok for call in first_patch_attempts)
     completed = sum(case.status == "PASS" for case in cases)
@@ -631,7 +756,8 @@ def efficiency_metrics(
         "argument_bytes": sum(call.argument_bytes for call in calls),
         "result_bytes": sum(call.result_bytes for call in calls),
         "first_patch_success": bool(
-            first_patch_attempts and successful_first_patches == len(first_patch_attempts)
+            first_patch_attempts
+            and successful_first_patches == len(first_patch_attempts)
         ),
         "first_patch_attempts": len(first_patch_attempts),
         "first_patch_success_rate": (
@@ -655,9 +781,21 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--server-command", default=None)
     parser.add_argument("--fixture-root", type=Path, default=None)
     parser.add_argument("--startup-timeout", type=float, default=5.0)
-    parser.add_argument("--report-json", type=Path, default=ROOT / "reports/dogfood/coding-tools-dogfood.json")
-    parser.add_argument("--report-md", type=Path, default=ROOT / "reports/dogfood/coding-tools-dogfood.md")
-    parser.add_argument("--transcript-json", type=Path, default=ROOT / "docs/dogfood/coding-tools-dogfood-transcript.json")
+    parser.add_argument(
+        "--report-json",
+        type=Path,
+        default=ROOT / "reports/dogfood/coding-tools-dogfood.json",
+    )
+    parser.add_argument(
+        "--report-md",
+        type=Path,
+        default=ROOT / "reports/dogfood/coding-tools-dogfood.md",
+    )
+    parser.add_argument(
+        "--transcript-json",
+        type=Path,
+        default=ROOT / "docs/dogfood/coding-tools-dogfood-transcript.json",
+    )
     args = parser.parse_args(argv)
     benchmark_started = time.perf_counter()
 
@@ -681,10 +819,14 @@ def main(argv: list[str] | None = None) -> int:
         "known_limitations": [],
     }
     try:
-        client, initialize_result, connect_error = connect(args.endpoint, args.startup_timeout)
+        client, initialize_result, connect_error = connect(
+            args.endpoint, args.startup_timeout
+        )
         report["initialize"] = initialize_result
         if client is None:
-            report["known_limitations"].append(f"No local MCP HTTP server was reachable: {connect_error}")
+            report["known_limitations"].append(
+                f"No local MCP HTTP server was reachable: {connect_error}"
+            )
             write_reports(args.report_json, args.report_md, report)
             write_transcript(args.transcript_json, report)
             return 2
@@ -704,7 +846,9 @@ def main(argv: list[str] | None = None) -> int:
         missing = adapter.missing(required)
         if missing:
             report["conclusion"] = "FAIL"
-            report["known_limitations"].append(f"Required MCP tools missing: {', '.join(missing)}")
+            report["known_limitations"].append(
+                f"Required MCP tools missing: {', '.join(missing)}"
+            )
             write_reports(args.report_json, args.report_md, report)
             write_transcript(args.transcript_json, report)
             return 1
@@ -726,9 +870,13 @@ def main(argv: list[str] | None = None) -> int:
         final_diff = runner.call("git_diff", adapter.git_diff_args())
         report["cases"] = [case.__dict__ for case in cases]
         report["tool_calls"] = [call.__dict__ for call in runner.calls]
-        report["metrics"] = efficiency_metrics(runner.calls, cases, started_at=benchmark_started)
+        report["metrics"] = efficiency_metrics(
+            runner.calls, cases, started_at=benchmark_started
+        )
         report["final_git_diff"] = result_text(final_diff)
-        report["conclusion"] = "PASS" if all(case.status == "PASS" for case in cases) else "FAIL"
+        report["conclusion"] = (
+            "PASS" if all(case.status == "PASS" for case in cases) else "FAIL"
+        )
         write_reports(args.report_json, args.report_md, report)
         write_transcript(args.transcript_json, report)
         return 0 if report["conclusion"] == "PASS" else 1

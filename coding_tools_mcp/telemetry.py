@@ -53,7 +53,11 @@ SEND_TIMEOUT_SECONDS = 3.0
 
 _LABEL_LIMIT = 64
 _OFF_VALUES = {"0", "off", "false", "no", "disable", "disabled"}
-_DURATION_BUCKETS = ((100, "dur_lt_100ms"), (1_000, "dur_lt_1s"), (10_000, "dur_lt_10s"))
+_DURATION_BUCKETS = (
+    (100, "dur_lt_100ms"),
+    (1_000, "dur_lt_1s"),
+    (10_000, "dur_lt_10s"),
+)
 _DURATION_OVERFLOW = "dur_gte_10s"
 
 
@@ -81,7 +85,9 @@ def _label(value: Any) -> str | None:
 
 
 def _looks_like_install_id(value: str) -> bool:
-    return len(value) == 32 and all(character in "0123456789abcdef" for character in value)
+    return len(value) == 32 and all(
+        character in "0123456789abcdef" for character in value
+    )
 
 
 _install_id_lock = threading.Lock()
@@ -138,8 +144,13 @@ def _post(events: list[dict[str, Any]]) -> None:
     try:
         request = Request(
             POSTHOG_ENDPOINT,
-            data=json.dumps({"api_key": POSTHOG_PROJECT_KEY, "batch": events}).encode("utf-8"),
-            headers={"Content-Type": "application/json", "User-Agent": "coding-tools-mcp-telemetry"},
+            data=json.dumps({"api_key": POSTHOG_PROJECT_KEY, "batch": events}).encode(
+                "utf-8"
+            ),
+            headers={
+                "Content-Type": "application/json",
+                "User-Agent": "coding-tools-mcp-telemetry",
+            },
         )
         with urlopen(request, timeout=SEND_TIMEOUT_SECONDS):
             pass
@@ -153,7 +164,9 @@ class _Sender:
     def __init__(self) -> None:
         self._wake = threading.Condition(threading.Lock())
         self._queue: list[dict[str, Any]] = []
-        threading.Thread(target=self._run, name="coding-tools-mcp-telemetry", daemon=True).start()
+        threading.Thread(
+            target=self._run, name="coding-tools-mcp-telemetry", daemon=True
+        ).start()
 
     def enqueue(self, events: list[dict[str, Any]], *, wake: bool = False) -> None:
         if not events:
@@ -224,7 +237,9 @@ class SessionTelemetry:
         self._finished = False
         self._lock = threading.Lock()
 
-    def record_session_start(self, client_info: dict[str, Any] | None, protocol_version: str) -> None:
+    def record_session_start(
+        self, client_info: dict[str, Any] | None, protocol_version: str
+    ) -> None:
         with self._lock:
             if self._active or self._finished:
                 return
@@ -237,13 +252,24 @@ class SessionTelemetry:
             self._emit([self._event("session_start", {})], wake=True)
 
     def record_tool_call(
-        self, tool: str, *, ok: bool, error_code: str | None, duration_ms: int, truncated: bool
+        self,
+        tool: str,
+        *,
+        ok: bool,
+        error_code: str | None,
+        duration_ms: int,
+        truncated: bool,
     ) -> None:
         emit_error: tuple[str, int] | None = None
         with self._lock:
             stats = self._tools.get(tool)
             if stats is None:
-                stats = self._tools[tool] = {"calls": 0, "errors": {}, "buckets": {}, "truncated": 0}
+                stats = self._tools[tool] = {
+                    "calls": 0,
+                    "errors": {},
+                    "buckets": {},
+                    "truncated": 0,
+                }
             stats["calls"] += 1
             bucket = _DURATION_OVERFLOW
             for limit, name in _DURATION_BUCKETS:
@@ -310,7 +336,9 @@ class SessionTelemetry:
                     "session_end",
                     {
                         "duration_ms": duration_ms,
-                        "tool_calls": sum(stats["calls"] for stats in self._tools.values()),
+                        "tool_calls": sum(
+                            stats["calls"] for stats in self._tools.values()
+                        ),
                         "distinct_tools": len(self._tools),
                         "errors_dropped": self._errors_dropped,
                     },

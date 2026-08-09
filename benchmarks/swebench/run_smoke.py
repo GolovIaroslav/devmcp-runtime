@@ -35,7 +35,9 @@ def load_subset(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def selected_instances(subset: dict[str, Any], requested: list[str]) -> list[dict[str, Any]]:
+def selected_instances(
+    subset: dict[str, Any], requested: list[str]
+) -> list[dict[str, Any]]:
     instances = [item for item in subset.get("instances", []) if isinstance(item, dict)]
     if not requested:
         return instances
@@ -72,10 +74,19 @@ def validate_predictions(path: Path, expected_ids: set[str]) -> PredictionSet:
     missing = sorted(expected_ids - set(ids))
     if missing:
         errors.append(f"missing predictions for: {', '.join(missing)}")
-    return PredictionSet(path, len(ids), ids, sorted(model_names), all(not patch.strip() for patch in patches), errors)
+    return PredictionSet(
+        path,
+        len(ids),
+        ids,
+        sorted(model_names),
+        all(not patch.strip() for patch in patches),
+        errors,
+    )
 
 
-def capture(command: list[str], raw_dir: Path, name: str, *, timeout: int = 120) -> dict[str, Any]:
+def capture(
+    command: list[str], raw_dir: Path, name: str, *, timeout: int = 120
+) -> dict[str, Any]:
     raw_dir.mkdir(parents=True, exist_ok=True)
     try:
         result = subprocess.run(
@@ -94,8 +105,16 @@ def capture(command: list[str], raw_dir: Path, name: str, *, timeout: int = 120)
             "command": command,
         }
     except Exception as exc:  # pragma: no cover - environment dependent
-        output = {"ran": False, "returncode": None, "stdout": "", "stderr": repr(exc), "command": command}
-    (raw_dir / f"{name}.json").write_text(json.dumps(output, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        output = {
+            "ran": False,
+            "returncode": None,
+            "stdout": "",
+            "stderr": repr(exc),
+            "command": command,
+        }
+    (raw_dir / f"{name}.json").write_text(
+        json.dumps(output, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
     (raw_dir / f"{name}.stdout.txt").write_text(str(output["stdout"]), encoding="utf-8")
     (raw_dir / f"{name}.stderr.txt").write_text(str(output["stderr"]), encoding="utf-8")
     return output
@@ -134,14 +153,20 @@ def capture_environment(raw_dir: Path) -> dict[str, Any]:
             "runner_os": os.environ.get("RUNNER_OS"),
         },
     }
-    (raw_dir / "environment.json").write_text(json.dumps(output, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    (raw_dir / "environment.json").write_text(
+        json.dumps(output, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
     return output
 
 
 def check_docker(raw_dir: Path) -> tuple[bool, str, dict[str, Any]]:
     docker = shutil.which("docker")
     if docker is None:
-        return False, "docker executable not found", {"ran": False, "returncode": None, "stdout": "", "stderr": ""}
+        return (
+            False,
+            "docker executable not found",
+            {"ran": False, "returncode": None, "stdout": "", "stderr": ""},
+        )
     result = capture([docker, "version"], raw_dir, "docker-version", timeout=20)
     if result["returncode"] != 0:
         detail = (str(result["stderr"]) or str(result["stdout"])).strip()
@@ -149,19 +174,38 @@ def check_docker(raw_dir: Path) -> tuple[bool, str, dict[str, Any]]:
     return True, "docker version succeeded", result
 
 
-def check_swebench(raw_dir: Path, *, install: bool) -> tuple[bool, str, dict[str, Any] | None, dict[str, Any]]:
+def check_swebench(
+    raw_dir: Path, *, install: bool
+) -> tuple[bool, str, dict[str, Any] | None, dict[str, Any]]:
     install_result: dict[str, Any] | None = None
     if install and importlib.util.find_spec("swebench") is None:
-        install_result = capture([sys.executable, "-m", "pip", "install", "swebench"], raw_dir, "pip-install-swebench", timeout=900)
-    help_result = capture([sys.executable, "-m", "swebench.harness.run_evaluation", "--help"], raw_dir, "swebench-help", timeout=120)
+        install_result = capture(
+            [sys.executable, "-m", "pip", "install", "swebench"],
+            raw_dir,
+            "pip-install-swebench",
+            timeout=900,
+        )
+    help_result = capture(
+        [sys.executable, "-m", "swebench.harness.run_evaluation", "--help"],
+        raw_dir,
+        "swebench-help",
+        timeout=120,
+    )
     if help_result["returncode"] != 0:
         if importlib.util.find_spec("swebench") is None:
-            return False, "Python package swebench is not installed or not importable", install_result, help_result
+            return (
+                False,
+                "Python package swebench is not installed or not importable",
+                install_result,
+                help_result,
+            )
         return False, "swebench harness help/import failed", install_result, help_result
     return True, "swebench harness help succeeded", install_result, help_result
 
 
-def evaluation_command(predictions: Path, run_id: str, max_workers: int, instance_ids: list[str]) -> list[str]:
+def evaluation_command(
+    predictions: Path, run_id: str, max_workers: int, instance_ids: list[str]
+) -> list[str]:
     command = [
         sys.executable,
         "-m",
@@ -181,9 +225,17 @@ def evaluation_command(predictions: Path, run_id: str, max_workers: int, instanc
     return command
 
 
-def maybe_run(command: list[str], enabled: bool, raw_dir: Path, name: str) -> dict[str, Any]:
+def maybe_run(
+    command: list[str], enabled: bool, raw_dir: Path, name: str
+) -> dict[str, Any]:
     if not enabled:
-        return {"ran": False, "returncode": None, "stdout": "", "stderr": "", "command": command}
+        return {
+            "ran": False,
+            "returncode": None,
+            "stdout": "",
+            "stderr": "",
+            "command": command,
+        }
     return capture(command, raw_dir, name, timeout=7200)
 
 
@@ -210,7 +262,10 @@ def copy_if_exists(source: Path, destination: Path) -> str | None:
 def collect_harness_artifacts(raw_dir: Path, run_id: str, label: str) -> list[str]:
     copied: list[str] = []
     for source, destination in (
-        (Path("logs/run_evaluation") / run_id, raw_dir / f"{label}-logs-run_evaluation"),
+        (
+            Path("logs/run_evaluation") / run_id,
+            raw_dir / f"{label}-logs-run_evaluation",
+        ),
         (Path("evaluation_results"), raw_dir / f"{label}-evaluation_results"),
     ):
         copied_path = copy_if_exists(source, destination)
@@ -219,7 +274,9 @@ def collect_harness_artifacts(raw_dir: Path, run_id: str, label: str) -> list[st
     return copied
 
 
-def parse_resolved_count(run_id: str, model_names: list[str], expected_ids: set[str]) -> dict[str, Any]:
+def parse_resolved_count(
+    run_id: str, model_names: list[str], expected_ids: set[str]
+) -> dict[str, Any]:
     report_paths: list[str] = []
     seen: dict[str, bool] = {}
     for model_name in model_names:
@@ -243,8 +300,12 @@ def parse_resolved_count(run_id: str, model_names: list[str], expected_ids: set[
         "completed": len(seen),
         "expected": len(expected_ids),
         "report_paths": report_paths,
-        "resolved_ids": sorted(instance_id for instance_id, value in seen.items() if value),
-        "unresolved_ids": sorted(instance_id for instance_id, value in seen.items() if not value),
+        "resolved_ids": sorted(
+            instance_id for instance_id, value in seen.items() if value
+        ),
+        "unresolved_ids": sorted(
+            instance_id for instance_id, value in seen.items() if not value
+        ),
         "missing_report_ids": sorted(expected_ids - set(seen)),
     }
 
@@ -252,7 +313,9 @@ def parse_resolved_count(run_id: str, model_names: list[str], expected_ids: set[
 def write_reports(report: dict[str, Any], json_path: Path, md_path: Path) -> None:
     json_path.parent.mkdir(parents=True, exist_ok=True)
     md_path.parent.mkdir(parents=True, exist_ok=True)
-    json_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    json_path.write_text(
+        json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
     md_path.write_text(render_markdown(report), encoding="utf-8")
 
 
@@ -278,7 +341,9 @@ def render_markdown(report: dict[str, Any]) -> str:
         lines.append(f"- {item}")
     lines.extend(["", "## Instances", ""])
     for instance in report.get("instances", []):
-        lines.append(f"- `{instance['instance_id']}` ({instance.get('project', 'unknown')})")
+        lines.append(
+            f"- `{instance['instance_id']}` ({instance.get('project', 'unknown')})"
+        )
     lines.extend(["", "## Evaluation Commands", ""])
     lines.append("```bash")
     lines.append(" ".join(report["baseline"]["command"]))
@@ -301,7 +366,11 @@ def render_markdown(report: dict[str, Any]) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--subset", type=Path, default=BENCHMARK_ROOT / "swebench/subsets/smoke-lite-10.json")
+    parser.add_argument(
+        "--subset",
+        type=Path,
+        default=BENCHMARK_ROOT / "swebench/subsets/smoke-lite-10.json",
+    )
     parser.add_argument(
         "--baseline-predictions",
         type=Path,
@@ -312,8 +381,16 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         default=BENCHMARK_ROOT / "swebench/predictions/candidate_mcp.jsonl",
     )
-    parser.add_argument("--report-json", type=Path, default=Path("reports/benchmark/swebench-regression.json"))
-    parser.add_argument("--report-md", type=Path, default=Path("reports/benchmark/swebench-regression.md"))
+    parser.add_argument(
+        "--report-json",
+        type=Path,
+        default=Path("reports/benchmark/swebench-regression.json"),
+    )
+    parser.add_argument(
+        "--report-md",
+        type=Path,
+        default=Path("reports/benchmark/swebench-regression.md"),
+    )
     parser.add_argument("--raw-dir", type=Path)
     parser.add_argument("--max-workers", type=int, default=2)
     parser.add_argument("--instance-id", action="append", default=[])
@@ -337,7 +414,9 @@ def main(argv: list[str] | None = None) -> int:
     baseline = validate_predictions(args.baseline_predictions, expected_ids)
     candidate = validate_predictions(args.candidate_predictions, expected_ids)
     docker_ok, docker_detail, docker_run = check_docker(raw_dir)
-    swebench_ok, swebench_detail, install_run, help_run = check_swebench(raw_dir, install=args.install_swebench)
+    swebench_ok, swebench_detail, install_run, help_run = check_swebench(
+        raw_dir, install=args.install_swebench
+    )
     environment = capture_environment(raw_dir)
     baseline_command = evaluation_command(
         args.baseline_predictions,
@@ -363,11 +442,17 @@ def main(argv: list[str] | None = None) -> int:
         for error in prediction_set.errors:
             limitations.append(f"{prediction_set.path}: {error}")
     if baseline.placeholder or candidate.placeholder:
-        limitations.append("Prediction files are schema-valid placeholders, not model-generated patches.")
+        limitations.append(
+            "Prediction files are schema-valid placeholders, not model-generated patches."
+        )
     if not docker_ok:
-        limitations.append("Official SWE-bench evaluation requires a working Docker daemon.")
+        limitations.append(
+            "Official SWE-bench evaluation requires a working Docker daemon."
+        )
     if not swebench_ok:
-        limitations.append("Official SWE-bench evaluation requires an importable swebench harness.")
+        limitations.append(
+            "Official SWE-bench evaluation requires an importable swebench harness."
+        )
 
     can_run = (
         args.run_evaluation
@@ -375,17 +460,44 @@ def main(argv: list[str] | None = None) -> int:
         and swebench_ok
         and not baseline.errors
         and not candidate.errors
-        and (args.allow_placeholder_evaluation or (not baseline.placeholder and not candidate.placeholder))
+        and (
+            args.allow_placeholder_evaluation
+            or (not baseline.placeholder and not candidate.placeholder)
+        )
     )
     if args.run_evaluation and not can_run:
-        limitations.append("Evaluation was requested but preflight/resource checks prevent a valid comparison.")
+        limitations.append(
+            "Evaluation was requested but preflight/resource checks prevent a valid comparison."
+        )
 
     baseline_run = maybe_run(baseline_command, can_run, raw_dir, "baseline-evaluation")
-    candidate_run = maybe_run(candidate_command, can_run, raw_dir, "candidate-evaluation")
-    baseline_artifacts = collect_harness_artifacts(raw_dir, "coding_tools_native_smoke", "baseline") if can_run else []
-    candidate_artifacts = collect_harness_artifacts(raw_dir, "coding_tools_mcp_smoke", "candidate") if can_run else []
-    baseline_counts = parse_resolved_count("coding_tools_native_smoke", baseline.model_names, expected_ids) if can_run else {}
-    candidate_counts = parse_resolved_count("coding_tools_mcp_smoke", candidate.model_names, expected_ids) if can_run else {}
+    candidate_run = maybe_run(
+        candidate_command, can_run, raw_dir, "candidate-evaluation"
+    )
+    baseline_artifacts = (
+        collect_harness_artifacts(raw_dir, "coding_tools_native_smoke", "baseline")
+        if can_run
+        else []
+    )
+    candidate_artifacts = (
+        collect_harness_artifacts(raw_dir, "coding_tools_mcp_smoke", "candidate")
+        if can_run
+        else []
+    )
+    baseline_counts = (
+        parse_resolved_count(
+            "coding_tools_native_smoke", baseline.model_names, expected_ids
+        )
+        if can_run
+        else {}
+    )
+    candidate_counts = (
+        parse_resolved_count(
+            "coding_tools_mcp_smoke", candidate.model_names, expected_ids
+        )
+        if can_run
+        else {}
+    )
     if can_run and baseline_run["returncode"] == 0 and candidate_run["returncode"] == 0:
         baseline_resolved = baseline_counts.get("resolved")
         candidate_resolved = candidate_counts.get("resolved")
@@ -393,7 +505,9 @@ def main(argv: list[str] | None = None) -> int:
             conclusion = "PASS" if candidate_resolved >= baseline_resolved else "FAIL"
         else:
             conclusion = "INCONCLUSIVE"
-            limitations.append("Harness ran, but resolved counts could not be parsed from report.json files.")
+            limitations.append(
+                "Harness ran, but resolved counts could not be parsed from report.json files."
+            )
     elif can_run:
         conclusion = "FAIL"
     elif args.run_evaluation:

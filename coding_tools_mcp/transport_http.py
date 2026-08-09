@@ -82,7 +82,11 @@ class HTTPSessionManager:
     def prune(self) -> None:
         cutoff = time.time() - HTTP_SESSION_TTL_SECONDS
         with self._lock:
-            expired = [session_id for session_id, record in self._sessions.items() if record.last_seen < cutoff]
+            expired = [
+                session_id
+                for session_id, record in self._sessions.items()
+                if record.last_seen < cutoff
+            ]
             records = [self._sessions.pop(session_id) for session_id in expired]
         for record in records:
             _close_runtime(record.runtime)

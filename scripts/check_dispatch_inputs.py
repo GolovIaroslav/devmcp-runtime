@@ -138,7 +138,9 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    triggers = workflow_triggers(yaml.safe_load(args.workflow.read_text(encoding="utf-8")))
+    triggers = workflow_triggers(
+        yaml.safe_load(args.workflow.read_text(encoding="utf-8"))
+    )
     dispatch = declared_inputs(triggers, "workflow_dispatch")
     call = declared_inputs(triggers, "workflow_call")
     sent = worker_sent_inputs(args.worker.read_text(encoding="utf-8"))
