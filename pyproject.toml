@@ -30,7 +30,7 @@ dev = [
     "PyYAML>=6.0",
     "types-PyYAML>=6.0.12",
     "types-psutil>=7.0.0",
-  "ruff>=0.15,<0.16",
+  "ruff>=0.15,<0.17",
   "typing_extensions>=4.12",
 ]
 desktop = [
