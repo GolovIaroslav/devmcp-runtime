@@ -621,7 +621,7 @@ def policy_profile_from_args(args: argparse.Namespace) -> str | None:
 
 
 def policy_rules_from_config_file(
-    path: str | None, profile: str
+    path: str | None, profile: str | None
 ) -> dict[str, str] | None:
     """Load only non-secret custom policy data for a configured server process."""
 
@@ -721,7 +721,8 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     ),
     "apply_patch": ToolSpec(
         title="Apply patch",
-        description="Apply a previewed Add/Update patch. Small non-destructive updates run automatically; deletes, moves, and high-risk updates are blocked or require local approval.",
+        description="Apply a previewed Add/Update/Delete/Move patch. Small updates run automatically; deletes, moves, and high-risk updates are blocked or require local approval.",
+        destructive=True,
     ),
     "git_status": ToolSpec(
         title="Git status", description="Git status.", read_only=True, idempotent=True
@@ -749,7 +750,9 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     ),
     "run_task": ToolSpec(
         title="Run task",
-        description="Run a registered local test, lint, typecheck, build, or check task in the isolated sandbox. Safe non-network tasks run automatically.",
+        description="Run a registered local test, lint, typecheck, build, check, or dependency task in the isolated sandbox. Safe non-network tasks run automatically; network and higher-impact tasks require local policy approval.",
+        destructive=True,
+        open_world=True,
     ),
     "exec_command": ToolSpec(
         title="Exec command",
@@ -764,7 +767,11 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     "read_output": ToolSpec(
         title="Read output", description="Read output.", read_only=True, idempotent=True
     ),
-    "write_stdin": ToolSpec(title="Write stdin", description="Write stdin."),
+    "write_stdin": ToolSpec(
+        title="Write stdin",
+        description="Write input to a running process.",
+        destructive=True,
+    ),
     "kill_session": ToolSpec(
         title="Kill session", description="Kill session.", destructive=True
     ),
@@ -7647,11 +7654,8 @@ def build_runtime(
     workspace = Path(
         args.workspace or os.environ.get(f"{ENV_PREFIX}_WORKSPACE") or os.getcwd()
     )
-    active_profile = runtime_policy.policy_profile or legacy_profile(
-        runtime_policy.permission_mode
-    )
     policy_rules = policy_rules_from_config_file(
-        os.environ.get("DEVMCP_POLICY_CONFIG_FILE"), active_profile
+        os.environ.get("DEVMCP_POLICY_CONFIG_FILE"), runtime_policy.policy_profile
     )
     runtime = Runtime(
         workspace,
@@ -7664,7 +7668,11 @@ def build_runtime(
         project_context=project_context,
         fake_readonly_annotations=runtime_policy.fake_readonly_annotations,
         transport=transport,
-        policy_profile=active_profile,
+        # Preserve legacy safe/trusted/dangerous behavior when no explicit
+        # data-driven profile was selected. Runtime maps that compatibility
+        # mode internally; passing a mapped profile here would make it look
+        # explicitly managed and change its command gates.
+        policy_profile=runtime_policy.policy_profile,
         sandbox_backend=str(getattr(args, "sandbox_backend", "bwrap")),
         max_removed_lines=int(getattr(args, "max_removed_lines", 200)),
         max_removed_percent=float(getattr(args, "max_removed_percent", 30.0)),

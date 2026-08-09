@@ -10,13 +10,14 @@ tool profiles and the server does not add or remove process tools dynamically.
 provided. Permission modes alter command policy, not the advertised catalog.
 
 One switch, `--dangerously-fake-readonly-annotations`, rewrites the exposure hints
-in `tools/list` for clients that refuse mutating tools by annotation. It is not a
-tool profile: the catalog, the schemas, and what every tool actually does are all
-unchanged, and no tool is hidden. It requires `dangerous` permission mode, requires
-authentication over HTTP, and is reported by `server_info.annotation_override` and
-the server card, both of which continue to publish the real annotations recorded
-below. Unless that switch is set, the annotations in this document are what
-`tools/list` returns.
+in `tools/list` for test/debug compatibility with clients that gate on mutating
+annotations. It is not a recommended way to avoid client prompts: the catalog,
+the schemas, and what every tool actually does are all unchanged, and no tool is
+hidden. It requires `dangerous` permission mode, requires authentication over
+HTTP, and is reported by `server_info.annotation_override` and the server card,
+both of which continue to publish the real annotations recorded below. Unless
+that switch is set, the annotations in this document are what `tools/list`
+returns.
 
 ## Protocol and transports
 
@@ -165,7 +166,7 @@ survive tunnel churn. Forwarded headers are ignored unless
 
 ## Stable tool inventory
 
-The default catalog has 20 tools, including `view_image`. Setting
+The default catalog has 32 tools, including `view_image`. Setting
 `CODING_TOOLS_MCP_ENABLE_VIEW_IMAGE=0` is the sole installation capability gate
 and removes only that optional binary-content tool. It is not a tool profile.
 
@@ -252,7 +253,7 @@ cap is known to be exceeded. `context_lines=0` does not reread matching files.
 
 Inputs: `"patch"`, `"dry_run"`, `"approval_id"`.
 
-Annotations: `{"title":"Apply patch","readOnlyHint":false,"destructiveHint":false,"idempotentHint":false,"openWorldHint":false}`.
+Annotations: `{"title":"Apply patch","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":false}`.
 
 Supports `*** Add File` and `*** Update File` inside a
 `*** Begin Patch` / `*** End Patch` envelope. Delete and move operations are
@@ -281,7 +282,7 @@ gates only.
 
 Inputs: `"task_id"`, `"args"`, `"path"`, `"cwd"`, `"env"`, `"timeout_ms"`, `"yield_time_ms"`, `"max_output_bytes"`, `"approval_id"`.
 
-Annotations: `{"title":"Run task","readOnlyHint":false,"destructiveHint":false,"idempotentHint":false,"openWorldHint":false}`.
+Annotations: `{"title":"Run task","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
 
 Tasks use validated registry metadata and an argv-only subprocess path. Known
 non-network tasks such as pytest, unittest, Vitest, Jest, lint, typecheck, and
@@ -293,7 +294,7 @@ from an unrelated command.
 
 Inputs: `"session_id"`, `"chars"`, `"yield_time_ms"`, `"max_output_bytes"`, `"verbosity"`, `"preview_bytes"`.
 
-Annotations: `{"title":"Write stdin","readOnlyHint":false,"destructiveHint":false,"idempotentHint":false,"openWorldHint":false}`.
+Annotations: `{"title":"Write stdin","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":false}`.
 
 Poll or interact with a command session. Pass empty `chars` to wait for output.
 

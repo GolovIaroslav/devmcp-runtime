@@ -604,6 +604,7 @@ class RuntimeHelperTests(unittest.TestCase):
             )
             self.assertEqual(output[1:4], [str(expected_tmp)] * 3)
             self.assertEqual(output[4], "False", output)
+            self.assertFalse(expected_tmp.exists())
 
     def test_runtime_and_server_info_do_not_create_exec_dirs(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -1024,7 +1025,7 @@ Maven home: /usr/share/maven
             apply_patch_tool = next(
                 tool for tool in first if tool["name"] == "apply_patch"
             )
-            self.assertIs(apply_patch_tool["annotations"].get("destructiveHint"), False)
+            self.assertIs(apply_patch_tool["annotations"].get("destructiveHint"), True)
             self.assertIs(apply_patch_tool["annotations"].get("readOnlyHint"), False)
 
     def test_agent_text_matches_per_tool_limits_without_renderer_truncation(
@@ -1780,8 +1781,12 @@ class FakeReadonlyAnnotationTests(unittest.TestCase):
             for name in self.MUTATING_TOOLS:
                 with self.subTest(tool=name):
                     self.assertFalse(annotations[name]["readOnlyHint"])
+            self.assertTrue(annotations["apply_patch"]["destructiveHint"])
             self.assertTrue(annotations["exec_command"]["destructiveHint"])
             self.assertTrue(annotations["exec_command"]["openWorldHint"])
+            self.assertTrue(annotations["run_task"]["destructiveHint"])
+            self.assertTrue(annotations["run_task"]["openWorldHint"])
+            self.assertTrue(annotations["write_stdin"]["destructiveHint"])
             self.assertIsNone(runtime.server_info_payload()["annotation_override"])
 
     def test_override_makes_every_listed_tool_report_read_only(self) -> None:
