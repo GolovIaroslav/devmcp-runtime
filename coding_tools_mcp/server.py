@@ -2011,7 +2011,7 @@ class Runtime:
         needle = query if case_sensitive else query.lower()
 
         roots = [resolved.path] if resolved.path.is_file() else walk_files(resolved.path)
-        for batch in path_batches(roots, 256):
+        for batch in path_batches(iter(roots), 256):
             # Filter by glob first so git check-ignore runs once per batch of
             # candidates instead of once per walked file.
             candidates = []
@@ -2746,6 +2746,8 @@ class Runtime:
     def _execute_command_legacy(self, args: dict[str, Any]) -> dict[str, Any]:
         self._prune_sessions()
         cmd_raw = args.get("cmd", "")
+        cmd: str | list[str]
+        cmd_str: str
         if isinstance(cmd_raw, list):
             cmd = [str(x) for x in cmd_raw]
             cmd_str = " ".join(cmd)
@@ -2802,7 +2804,7 @@ class Runtime:
         if not workdir.path.is_dir():
             raise ToolFailure("NOT_A_DIRECTORY", "workdir is not a directory.", category="validation")
         if not args.get("_argv_task"):
-            self._check_command_policy(cmd, args, granted_capabilities=set(approved_caps))
+            self._check_command_policy(cmd_str, args, granted_capabilities=set(approved_caps))
         
         if self.sandbox is None:
             from .sandbox import ExecutionSandbox
@@ -2818,6 +2820,7 @@ class Runtime:
         approved_capabilities = set(approved_caps)
         env = self._command_env(
             args.get("env", {}),
+            sandboxed=True,
             allow_sensitive=(
                 "sensitive_env" in approved_capabilities
                 or "env.sensitive" in approved_capabilities
@@ -2886,10 +2889,11 @@ class Runtime:
         # but bwrap provides the primary namespace isolation.
         if self.landlock_enabled():
             try:
+                write_roots = [self.sandbox.sandbox_dir, self.runtime_dir]
                 landlock_fd = open_landlock_ruleset(
                     self.sandbox.sandbox_dir,
                     guard_allow_roots(),
-                    write_roots=[self.sandbox.sandbox_dir, self.runtime_dir],
+                    write_roots=write_roots,
                 )
                 actual_cmd = landlock_exec_argv(landlock_fd, actual_cmd)
                 popen_extra["pass_fds"] = (landlock_fd,)
@@ -3173,7 +3177,13 @@ class Runtime:
                 details={"permission": "privileged_executable", "path": str(executable_path)},
             )
 
-    def _command_env(self, extra: Any, *, allow_sensitive: bool = False) -> dict[str, str]:
+    def _command_env(
+        self,
+        extra: Any,
+        *,
+        allow_sensitive: bool = False,
+        sandboxed: bool = False,
+    ) -> dict[str, str]:
         env = self._base_command_env()
         if not self.dangerously_skip_all_permissions and not allow_sensitive:
             env = {key: value for key, value in env.items() if not is_filtered_env_var(key, value)}
@@ -3192,12 +3202,6 @@ class Runtime:
             }
         env.update({str(key): str(value) for key, value in self.shell_env_policy.set.items()})
         self._ensure_runtime_dirs()
-        tmp_dir = self.command_tmp_dir()
-        env["HOME"] = str(self.command_home_dir())
-        env["TMPDIR"] = str(tmp_dir)
-        if os.name == "nt":
-            env["TEMP"] = str(tmp_dir)
-            env["TMP"] = str(tmp_dir)
         if isinstance(extra, dict):
             for key, value in extra.items():
                 key_text = str(key)
@@ -3205,6 +3209,25 @@ class Runtime:
                 if not self.dangerously_skip_all_permissions and not allow_sensitive and is_filtered_env_var(key_text, value_text):
                     continue
                 env[key_text] = value_text
+        if sandboxed and self.sandbox_backend.name == "bwrap":
+            # bwrap mounts a fresh tmpfs at /tmp. Do not point a child at the
+            # host-side runtime directory: it is not mounted in the namespace.
+            # These private directories are inside the already-authorized
+            # sandbox bind, so Landlock can authorize them without exposing
+            # the host /tmp hierarchy.
+            assert self.sandbox is not None
+            sandbox_tmp = str(self.sandbox.temp_dir)
+            env["HOME"] = str(self.sandbox.home_dir)
+            env["TMPDIR"] = sandbox_tmp
+            env["TMP"] = sandbox_tmp
+            env["TEMP"] = sandbox_tmp
+            env["XDG_CACHE_HOME"] = str(self.sandbox.cache_dir)
+        else:
+            tmp_dir = self.command_tmp_dir()
+            env["HOME"] = str(self.command_home_dir())
+            env["TMPDIR"] = str(tmp_dir)
+            env["TMP"] = str(tmp_dir)
+            env["TEMP"] = str(tmp_dir)
         return env
 
     def _git_env(self) -> dict[str, str]:
@@ -5116,7 +5139,7 @@ def resize_image_bytes(
     except Exception:
         return None
     try:
-        image = Image.open(BytesIO(data))
+        image: Any = Image.open(BytesIO(data))
         image.thumbnail((max_width, max_height))
         output = BytesIO()
         output_format = "JPEG" if mime_type == "image/jpeg" else "PNG" if mime_type == "image/png" else "WEBP"
@@ -6239,9 +6262,8 @@ def build_runtime(
     transport: str = "stdio",
 ) -> Runtime:
     workspace = Path(args.workspace or os.environ.get(f"{ENV_PREFIX}_WORKSPACE") or os.getcwd())
-    policy_rules = policy_rules_from_config_file(
-        os.environ.get("DEVMCP_POLICY_CONFIG_FILE"), runtime_policy.policy_profile
-    )
+    active_profile = runtime_policy.policy_profile or legacy_profile(runtime_policy.permission_mode)
+    policy_rules = policy_rules_from_config_file(os.environ.get("DEVMCP_POLICY_CONFIG_FILE"), active_profile)
     runtime = Runtime(
         workspace,
         enable_view_image=args.enable_view_image,
@@ -6253,7 +6275,7 @@ def build_runtime(
         project_context=project_context,
         fake_readonly_annotations=runtime_policy.fake_readonly_annotations,
         transport=transport,
-        policy_profile=runtime_policy.policy_profile,
+        policy_profile=active_profile,
         sandbox_backend=str(getattr(args, "sandbox_backend", "bwrap")),
         max_removed_lines=int(getattr(args, "max_removed_lines", 200)),
         max_removed_percent=float(getattr(args, "max_removed_percent", 30.0)),

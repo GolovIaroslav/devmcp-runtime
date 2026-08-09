@@ -95,7 +95,7 @@ def connect(endpoint: str, timeout_seconds: float) -> McpHttpClient:
     return client
 
 
-def measure(name: str, iterations: int, warmup: int, func: Callable[[], None]) -> Metric:
+def measure(name: str, iterations: int, warmup: int, func: Callable[[], Any]) -> Metric:
     for _ in range(warmup):
         func()
     samples: list[float] = []

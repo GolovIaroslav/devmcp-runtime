@@ -229,7 +229,7 @@ def _read_service_logs(selected: ConfigPaths) -> tuple[str, str, int]:
 
 
 def _logs(_: argparse.Namespace) -> int:
-    selected, _ = _config()
+    selected, _config_data = _config()
     output, stderr, returncode = _read_service_logs(selected)
     sys.stdout.write(output)
     sys.stderr.write(stderr)
@@ -472,7 +472,7 @@ def _unit_environment(name: str, value: str | Path) -> str:
 
 
 def _service_install(_: argparse.Namespace) -> int:
-    selected, _ = _config()
+    selected, _config_data = _config()
     systemd_dir = Path.home() / ".config/systemd/user"
     systemd_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     python = sys.executable
@@ -564,7 +564,7 @@ def _service_uninstall(_: argparse.Namespace) -> int:
 def _ui(_: argparse.Namespace) -> int:
     from .ui import serve_ui
 
-    _, config = _config()
+    _selected, config = _config()
     return serve_ui(str(config.get("ui_host", "127.0.0.1")), int(config.get("ui_port", 47158)))
 
 

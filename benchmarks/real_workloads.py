@@ -132,7 +132,7 @@ def toolchain_allow_roots() -> list[str]:
             roots.add(str(Path(path).resolve().parent))
         except OSError:
             pass
-    for raw in (
+    for raw_path in (
         os.environ.get("CARGO_HOME"),
         os.environ.get("RUSTUP_HOME"),
         str(Path.home() / ".cargo"),
@@ -140,14 +140,14 @@ def toolchain_allow_roots() -> list[str]:
         command_stdout(["go", "env", "GOROOT"]),
         command_stdout(["go", "env", "GOPATH"]),
     ):
-        if not raw:
+        if not raw_path:
             continue
         try:
-            path = Path(raw).expanduser().resolve()
+            resolved_path = Path(raw_path).expanduser().resolve()
         except OSError:
             continue
-        if path.exists():
-            roots.add(str(path))
+        if resolved_path.exists():
+            roots.add(str(resolved_path))
     return sorted(roots)
 
 
@@ -264,7 +264,8 @@ def run_workload(workload: Workload, checkout_root: Path, raw_dir: Path, port: i
                 {"path": ".", "patterns": ["*", "**/*"], "max_results": 2000, "include_ignored": True},
             )
         )
-        listed_files = listed.get("files") if isinstance(listed.get("files"), list) else []
+        raw_listed_files = listed.get("files")
+        listed_files = raw_listed_files if isinstance(raw_listed_files, list) else []
         result["checks"].append({"name": "list_files", "count": len(listed_files), "ok": bool(listed_files)})
 
         read = tool_payload(client.call_tool("read_file", {"path": workload.read_path, "max_bytes": 65536}))

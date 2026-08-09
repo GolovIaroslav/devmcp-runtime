@@ -220,7 +220,7 @@ class ExecutionSandbox:
 
     @staticmethod
     def _is_secret_path(filename: str) -> bool:
-        if filename == ".git":
+        if filename in {".git", ".devmcp-tmp", ".devmcp-home", ".devmcp-cache"}:
             return True
         if filename == ".env.example":
             return False
@@ -308,6 +308,23 @@ class ExecutionSandbox:
             shutil.rmtree(self.sandbox_dir)
         except OSError:
             pass
+
+    def _private_dir(self, name: str) -> Path:
+        path = self.sandbox_dir / f".devmcp-{name}"
+        path.mkdir(mode=0o700, exist_ok=True)
+        return path
+
+    @property
+    def temp_dir(self) -> Path:
+        return self._private_dir("tmp")
+
+    @property
+    def home_dir(self) -> Path:
+        return self._private_dir("home")
+
+    @property
+    def cache_dir(self) -> Path:
+        return self._private_dir("cache")
 
     def translate_path_for_exec(self, raw_cwd: Path) -> Path:
         try:

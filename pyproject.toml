@@ -28,6 +28,8 @@ dev = [
     "mypy>=2.1,<2.2",
     "pytest>=8,<10",
     "PyYAML>=6.0",
+    "types-PyYAML>=6.0.12",
+    "types-psutil>=7.0.0",
   "ruff>=0.15,<0.16",
   "typing_extensions>=4.12",
 ]
@@ -56,3 +58,18 @@ include = ["coding_tools_mcp*", "mcp_desktop_client*", "apps.devmcp*"]
 
 [tool.setuptools.package-data]
 mcp_desktop_client = ["locales/*.qm", "locales/*.ts"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Compliance fixture projects are launched by their owning tests. They are not
+# part of the runtime repository's root test collection.
+norecursedirs = ["fixtures"]
+
+[tool.mypy]
+python_version = "3.11"
+explicit_package_bases = true
+
+[[tool.mypy.overrides]]
+module = ["PySide6.*"]
+# PySide6 is an optional GUI extra and does not ship complete mypy stubs.
+ignore_missing_imports = true

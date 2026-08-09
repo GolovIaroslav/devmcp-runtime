@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import builtins
 import os
+import shlex
 import signal
 import shutil
 import subprocess
@@ -484,6 +485,42 @@ class RuntimeHelperTests(unittest.TestCase):
                 self.assertNotIn(key, env)
             self.assertTrue(runtime.cache_dir.is_dir())
             self.assertFalse((workspace / ".coding-tools").exists())
+
+    @unittest.skipUnless(os.name != "nt" and shutil.which("bwrap"), "bwrap sandbox is required")
+    def test_bwrap_has_private_writable_tmp_and_cannot_read_host_tmp(self) -> None:
+        with TemporaryDirectory() as tmp, TemporaryDirectory() as host_tmp:
+            workspace = Path(tmp) / "workspace"
+            workspace.mkdir()
+            host_sentinel = Path(host_tmp) / "host-only.txt"
+            host_sentinel.write_text("host secret", encoding="utf-8")
+            runtime = Runtime(workspace, permission_mode="trusted")
+            probe = (
+                "import os, tempfile; "
+                "f = tempfile.NamedTemporaryFile(prefix='devmcp-', delete=False); "
+                "f.write(b'private'); f.close(); "
+                "print(f.name); "
+                "print(os.environ['TMPDIR']); print(os.environ['TMP']); print(os.environ['TEMP']); "
+                "print(os.path.exists(os.environ['HOST_TMP_PROBE']))"
+            )
+            try:
+                result = runtime.exec_command(
+                    {
+                        "cmd": f"python3 -c {shlex.quote(probe)}",
+                        "env": {"HOST_TMP_PROBE": str(host_sentinel)},
+                        "timeout_ms": 10000,
+                    }
+                )
+                expected_tmp = runtime.sandbox.temp_dir if runtime.sandbox is not None else None
+            finally:
+                runtime.close()
+
+            self.assertEqual(result.get("exit_code"), 0, result)
+            output = str(result.get("stdout", "")).splitlines()
+            self.assertGreaterEqual(len(output), 5, result)
+            self.assertIsNotNone(expected_tmp)
+            self.assertTrue(output[0].startswith(str(expected_tmp) + "/devmcp-"), output)
+            self.assertEqual(output[1:4], [str(expected_tmp)] * 3)
+            self.assertEqual(output[4], "False", output)
 
     def test_runtime_and_server_info_do_not_create_exec_dirs(self) -> None:
         with TemporaryDirectory() as tmp:

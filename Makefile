@@ -3,7 +3,7 @@ PROJECT_VERSION := $(shell $(PYTHON) -c 'import tomllib; print(tomllib.load(open
 RELEASE_TAG ?= v$(PROJECT_VERSION)
 COMPLIANCE_RUNNER := PYTHONDONTWRITEBYTECODE=1 $(PYTHON) -m tests.compliance.runner
 PYTHON_SOURCES := coding_tools_mcp apps/devmcp apps/desktop-client/mcp_desktop_client tests benchmarks
-MYPY_TARGETS := coding_tools_mcp apps/devmcp benchmarks/mcp_http.py benchmarks/runtime_latency.py benchmarks/swebench/run_smoke.py benchmarks/swebench/generate_reference_predictions.py benchmarks/real_workloads.py
+MYPY_TARGETS := coding_tools_mcp apps/devmcp apps/desktop-client/mcp_desktop_client scripts/check_dispatch_inputs.py benchmarks/mcp_http.py benchmarks/runtime_latency.py benchmarks/swebench/run_smoke.py benchmarks/swebench/generate_reference_predictions.py benchmarks/real_workloads.py
 REPORT_FLAG ?= --report
 SWE_BENCH_ARGS ?=
 DOGFOOD_PORT ?= 18772
@@ -12,7 +12,7 @@ MCP_HOST ?= 127.0.0.1
 MCP_PORT ?= 8765
 MCP_ARGS ?=
 RUFF_FLAGS ?= --exclude benchmarks/dogfood --ignore=E501
-MYPY_FLAGS ?= --python-version 3.11 --disable-error-code union-attr --disable-error-code assignment --disable-error-code arg-type --disable-error-code no-untyped-def
+MYPY_FLAGS ?= --python-version 3.11
 PYSIDE6_LUPDATE ?= pyside6-lupdate
 PYSIDE6_LRELEASE ?= pyside6-lrelease
 DESKTOP_PACKAGE := apps/desktop-client/mcp_desktop_client

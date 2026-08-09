@@ -395,34 +395,34 @@ class UIHandler(http.server.BaseHTTPRequestHandler):
                 rows_list.append(
                     f'<tr><td>{html.escape(root)}</td><td>{"active" if root == status["workspace"] else ""}</td><td>{remove_form}</td></tr>'
                 )
-            rows = "".join(rows_list)
-            body = f'<h2>Configured workspaces</h2><table><tr><th>Root</th><th>State</th><th></th></tr>{rows}</table><form method="post" action="/api/workspaces/add"><input type="hidden" name="csrf" value="{html.escape(self.state.csrf_token)}"><input name="workspace" size="70" placeholder="/absolute/path"><button>Add root</button></form><p>The model cannot add or remove roots through MCP tools.</p>'
+            workspace_rows = "".join(rows_list)
+            body = f'<h2>Configured workspaces</h2><table><tr><th>Root</th><th>State</th><th></th></tr>{workspace_rows}</table><form method="post" action="/api/workspaces/add"><input type="hidden" name="csrf" value="{html.escape(self.state.csrf_token)}"><input name="workspace" size="70" placeholder="/absolute/path"><button>Add root</button></form><p>The model cannot add or remove roots through MCP tools.</p>'
             return _page("Workspaces", body, self.state)
         if route == "approvals":
             pending = ApprovalEngine(self.state.config_paths.approvals_db).list_pending()
-            rows = "".join(f'<tr><td>{html.escape(str(item["id"]))}</td><td>{html.escape(str(item["command_or_action"]))}</td><td>{html.escape(str(item.get("risk_class", "")))}</td><td>{html.escape(str(item.get("expires_at", "")))}</td><td>{html.escape(", ".join(item.get("capabilities", [])))}</td><td><form method="post" action="/api/approvals/{html.escape(str(item["id"]))}/approve"><input type="hidden" name="csrf" value="{html.escape(self.state.csrf_token)}"><button>Approve once</button></form><form method="post" action="/api/approvals/{html.escape(str(item["id"]))}/approve-always"><input type="hidden" name="csrf" value="{html.escape(self.state.csrf_token)}"><input name="pattern" value="{html.escape(str(item["command_or_action"]))}" size="24"><button>Always Allow scoped</button></form></td><td><form method="post" action="/api/approvals/{html.escape(str(item["id"]))}/deny"><input type="hidden" name="csrf" value="{html.escape(self.state.csrf_token)}"><button>Deny</button></form></td></tr>' for item in pending)
-            return _page("Approvals", f"<h2>Pending approvals</h2><form method=\"post\" action=\"/api/approvals/clear-expired\"><input type=\"hidden\" name=\"csrf\" value=\"{html.escape(self.state.csrf_token)}\"><button>Prune expired approvals</button></form><table><tr><th>ID</th><th>Operation</th><th>Risk</th><th>Expires</th><th>Capabilities</th><th>Allow</th><th></th></tr>{rows}</table>", self.state)
+            approval_rows = "".join(f'<tr><td>{html.escape(str(item["id"]))}</td><td>{html.escape(str(item["command_or_action"]))}</td><td>{html.escape(str(item.get("risk_class", "")))}</td><td>{html.escape(str(item.get("expires_at", "")))}</td><td>{html.escape(", ".join(item.get("capabilities", [])))}</td><td><form method="post" action="/api/approvals/{html.escape(str(item["id"]))}/approve"><input type="hidden" name="csrf" value="{html.escape(self.state.csrf_token)}"><button>Approve once</button></form><form method="post" action="/api/approvals/{html.escape(str(item["id"]))}/approve-always"><input type="hidden" name="csrf" value="{html.escape(self.state.csrf_token)}"><input name="pattern" value="{html.escape(str(item["command_or_action"]))}" size="24"><button>Always Allow scoped</button></form></td><td><form method="post" action="/api/approvals/{html.escape(str(item["id"]))}/deny"><input type="hidden" name="csrf" value="{html.escape(self.state.csrf_token)}"><button>Deny</button></form></td></tr>' for item in pending)
+            return _page("Approvals", f"<h2>Pending approvals</h2><form method=\"post\" action=\"/api/approvals/clear-expired\"><input type=\"hidden\" name=\"csrf\" value=\"{html.escape(self.state.csrf_token)}\"><button>Prune expired approvals</button></form><table><tr><th>ID</th><th>Operation</th><th>Risk</th><th>Expires</th><th>Capabilities</th><th>Allow</th><th></th></tr>{approval_rows}</table>", self.state)
         if route == "diagnostics":
             return _page("Diagnostics", "<h2>Diagnostics</h2>" + _table([("bwrap", status["sandbox_backend"]), ("secure", status["sandbox_secure"]), ("MCP token", status["auth"]["mcp_token_configured"]), ("Tunnel key", status["auth"]["control_plane_key_configured"])]), self.state)
         if route == "about":
             return _page("About", "<h2>About</h2><p>DevMCP Runtime is an independent open-source project and is not affiliated with, endorsed by, or supported by OpenAI.</p>" + _table([("version", __version__), ("license", "Apache-2.0")]), self.state)
         if route == "tasks":
             tasks = TaskRegistry().list_tasks()
-            rows = "".join(f"<tr><td>{html.escape(str(item['id']))}</td><td>{html.escape(str(item['category']))}</td><td>{html.escape(str(item['executable']))}</td><td>{html.escape(str(item['network_requirement']))}</td><td>{html.escape(str(item['approval_class']))}</td></tr>" for item in tasks)
-            return _page("Tasks", f"<h2>Task registry</h2><table><tr><th>ID</th><th>Category</th><th>Executable</th><th>Network</th><th>Policy</th></tr>{rows}</table>", self.state)
+            task_rows = "".join(f"<tr><td>{html.escape(str(item['id']))}</td><td>{html.escape(str(item['category']))}</td><td>{html.escape(str(item['executable']))}</td><td>{html.escape(str(item['network_requirement']))}</td><td>{html.escape(str(item['approval_class']))}</td></tr>" for item in tasks)
+            return _page("Tasks", f"<h2>Task registry</h2><table><tr><th>ID</th><th>Category</th><th>Executable</th><th>Network</th><th>Policy</th></tr>{task_rows}</table>", self.state)
         if route == "services":
             body = "<h2>Services</h2>" + _table([("MCP process", status["mcp_service"]), ("Tunnel process", status["tunnel_process"]), ("Tunnel readiness", status["tunnel_state"])])
             body += f'<form method="post" action="/api/services/start"><input type="hidden" name="csrf" value="{html.escape(self.state.csrf_token)}"><button>Start</button></form><form method="post" action="/api/services/stop"><input type="hidden" name="csrf" value="{html.escape(self.state.csrf_token)}"><button>Stop</button></form><form method="post" action="/api/services/restart"><input type="hidden" name="csrf" value="{html.escape(self.state.csrf_token)}"><button>Restart</button></form><p><a href="/api/services/logs">Open redacted service logs</a> · <code>devmcp logs</code></p>'
             return _page("Services", body, self.state)
         if route == "audit":
             events = read_recent_events(self.state.config_paths.audit_log)
-            rows = "".join(
+            audit_rows = "".join(
                 "<tr>"
                 + "".join(f"<td>{html.escape(str(item.get(key, '')))}</td>" for key in ("timestamp", "tool", "ok", "error_code", "policy_profile"))
                 + "</tr>"
                 for item in events
             )
-            body = f'<h2>Audit log</h2><p>Recent local events; arguments, paths, commands, and secret values are excluded.</p><table><tr><th>Time</th><th>Tool</th><th>OK</th><th>Error</th><th>Policy</th></tr>{rows}</table>'
+            body = f'<h2>Audit log</h2><p>Recent local events; arguments, paths, commands, and secret values are excluded.</p><table><tr><th>Time</th><th>Tool</th><th>OK</th><th>Error</th><th>Policy</th></tr>{audit_rows}</table>'
             return _page("Audit log", body, self.state)
         return _page("Not found", "<h2>Not found</h2>", self.state)
 

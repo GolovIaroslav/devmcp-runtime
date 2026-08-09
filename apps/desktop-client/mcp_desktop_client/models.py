@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from typing import Any
 from uuid import uuid4
 
@@ -86,11 +86,12 @@ class WorkspaceProfile:
 
     @classmethod
     def from_record(cls, record: dict[str, Any]) -> "WorkspaceProfile":
-        def known_fields(config_cls: type, key: str) -> dict[str, Any]:
+        def known_fields(config_cls: type[Any], key: str) -> dict[str, Any]:
             # Drop keys removed or renamed in newer releases so stale
             # profiles.json records keep loading.
             data = dict(record.get(key, {}))
-            return {name: value for name, value in data.items() if name in config_cls.__dataclass_fields__}
+            field_names = {item.name for item in fields(config_cls)}
+            return {name: value for name, value in data.items() if name in field_names}
 
         return cls(
             id=record["id"],
