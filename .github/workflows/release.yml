@@ -28,6 +28,14 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITLEAKS_ENABLE_COMMENTS: "false"
+          GITLEAKS_VERSION: "8.24.3"
+
+      # The action's push-event default scans only the pushed range.  Tags are
+      # release candidates, so scan all reachable history and the current tree.
+      - name: Verify current tree and full reachable history with Gitleaks
+        run: |
+          gitleaks git --no-banner --redact --exit-code 1 --log-opts="--all" .
+          gitleaks dir --no-banner --redact --exit-code 1 .
 
   validate-and-build:
     name: Validate and build release artifacts

@@ -23,6 +23,14 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITLEAKS_ENABLE_COMMENTS: "false"
+          GITLEAKS_VERSION: "8.24.3"
+
+      # The action's push-event default scans only the pushed range.  A public
+      # release gate must also cover every reachable historical ref.
+      - name: Verify current tree and full reachable history with Gitleaks
+        run: |
+          gitleaks git --no-banner --redact --exit-code 1 --log-opts="--all" .
+          gitleaks dir --no-banner --redact --exit-code 1 .
 
       - name: Set up Python
         uses: actions/setup-python@v6.2.0

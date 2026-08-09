@@ -142,6 +142,8 @@ class RequiredDocsTests(unittest.TestCase):
             "scripts/check_release_versions.py",
             "workflow_dispatch",
             "gitleaks/gitleaks-action@v3.0.0",
+            'gitleaks git --no-banner --redact --exit-code 1 --log-opts="--all" .',
+            "gitleaks dir --no-banner --redact --exit-code 1 .",
             "Build source and wheel distributions",
             "Verify a clean wheel installation",
             "Upload release artifacts",
