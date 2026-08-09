@@ -44,7 +44,9 @@ jobs:
       - name: Install runtime and CI tools
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e ".[dev]"
+          # Unit discovery imports the browser-suite module; Chromium itself is
+          # installed only by the dedicated public-beta browser matrix below.
+          python -m pip install -e ".[dev,gui]"
 
       - name: Run lint
         run: make lint
