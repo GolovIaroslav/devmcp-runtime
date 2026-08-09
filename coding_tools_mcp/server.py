@@ -3570,6 +3570,13 @@ class Runtime:
             if bwrap_available
             else []
         )
+        if bwrap_available:
+            # Keep the namespace's temp/home contract explicit at the bwrap
+            # boundary as well as in Popen's inherited environment. This
+            # prevents a runner-specific environment handoff from dropping
+            # the private paths while retaining the fresh /tmp tmpfs.
+            for key in ("HOME", "TMPDIR", "TMP", "TEMP", "XDG_CACHE_HOME"):
+                bwrap_args.extend(["--setenv", key, env[key]])
         if isinstance(cmd, str):
             actual_cmd = (
                 ["cmd.exe", "/d", "/s", "/c", cmd]
