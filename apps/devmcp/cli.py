@@ -753,6 +753,7 @@ def _serve(_: argparse.Namespace) -> int:
     from coding_tools_mcp.server import main as server_main
 
     os.environ["DEVMCP_POLICY_CONFIG_FILE"] = str(selected.config_file)
+    os.environ["DEVMCP_ACTIVE_PROJECT_FILE"] = str(selected.root / "active-project")
     if secret_status(selected)["git_credentials_configured"]:
         os.environ["DEVMCP_GIT_CREDENTIALS_FILE"] = str(selected.git_credentials)
     server_args = [

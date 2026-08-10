@@ -6,9 +6,10 @@ in [docs/runtime-contract-v0.2.md](docs/runtime-contract-v0.2.md).
 ## Product boundary
 
 The server exposes low-level coding primitives over MCP: inspect a workspace,
-apply structured patches, run and interact with commands, and inspect Git. It is
-not an agent wrapper and does not expose accounts, memory, cloud tasks, web
-search, model routing, plugins, image generation, or subagent orchestration.
+apply structured patches, run and interact with commands, inspect Git, and use
+one bounded host-side Antigravity delegation fallback. It does not expose
+accounts, memory, cloud tasks, web search, model routing, plugins, image
+generation, or arbitrary subagent orchestration.
 
 ## Fixed tool model
 
@@ -17,7 +18,7 @@ no dynamic `tools/list_changed`, and no required `open_workspace` call.
 `apply_patch` is the only direct file-write tool. `safe`, `trusted`, and
 `dangerous` are command permission policies and never alter `tools/list`.
 
-The default catalog contains 49 tools:
+The default catalog contains 50 tools:
 
 - runtime/context: `server_info`, `health`, `workspace_info`, `service_status`,
   `service_doctor`, `service_restart`, `activate_policy_profile`,
@@ -33,6 +34,7 @@ The default catalog contains 49 tools:
 - Git: `git_status`, `git_diff`, `git_log`, `git_show`, `git_blame`,
   `git_create_branch`, `git_switch_branch`, `git_fetch`, `git_pull`,
   `git_delete_branch`, `git_delete_remote_branch`, `git_commit`, `git_push`
+- delegation: `antigravity_delegate`
 - approvals: `approval_status`, `list_pending_approvals`
 
 `view_image` can be disabled as an installation capability. All other tools are

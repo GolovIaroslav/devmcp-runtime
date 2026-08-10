@@ -2272,6 +2272,216 @@ Maven home: /usr/share/maven
                 session_a.close()
                 session_b.close()
 
+    def test_service_managed_active_project_persists_across_http_runtime_instances(
+        self,
+    ) -> None:
+        preflight_error = git_fixture_preflight_error()
+        if preflight_error is not None:
+            self.skipTest(preflight_error)
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            library = root / "projects"
+            first = library / "first"
+            second = library / "second"
+            first.mkdir(parents=True)
+            second.mkdir(parents=True)
+            (first / "tracked.txt").write_text("first\n", encoding="utf-8")
+            (second / "tracked.txt").write_text("second\n", encoding="utf-8")
+            init_git(first)
+            init_git(second)
+            state_file = root / "config" / "active-project"
+            first_session = Runtime(
+                first,
+                policy_profile="autonomous",
+                project_roots=[library],
+                active_project_file=state_file,
+            )
+            try:
+                first_session.select_project({"project": "second"})
+                self.assertEqual(first_session.workspace.root, second.resolve())
+                self.assertEqual(
+                    state_file.read_text(encoding="utf-8").strip(),
+                    str(second.resolve()),
+                )
+            finally:
+                first_session.close()
+            fresh_session = Runtime(
+                first,
+                policy_profile="autonomous",
+                project_roots=[library],
+                active_project_file=state_file,
+            )
+            try:
+                self.assertEqual(fresh_session.workspace.root, second.resolve())
+                self.assertEqual(
+                    fresh_session.current_project({})["relative_path"], "second"
+                )
+                self.assertEqual(
+                    fresh_session.read_file({"path": "tracked.txt"})["content"],
+                    "second\n",
+                )
+            finally:
+                fresh_session.close()
+
+    @unittest.skipIf(os.name == "nt", "fake executable fixture uses a POSIX shebang")
+    def test_antigravity_delegate_applies_only_validated_worktree_patch(self) -> None:
+        preflight_error = git_fixture_preflight_error()
+        if preflight_error is not None:
+            self.skipTest(preflight_error)
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            (repo / "tracked.txt").write_text("base\n", encoding="utf-8")
+            init_git(repo)
+            fake = root / "agy"
+            fake.write_text(
+                "#!/usr/bin/env python3\n"
+                "import pathlib, sys\n"
+                "if '--version' in sys.argv:\n"
+                "    print('agy 9.9.9')\n"
+                "elif '--help' in sys.argv:\n"
+                "    print('--sandbox --output-format -p')\n"
+                "else:\n"
+                "    pathlib.Path('agent-added.txt').write_text('delegated\\n', encoding='utf-8')\n"
+                '    print(\'{\\"result\\":\\"ok\\"}\')\n',
+                encoding="utf-8",
+            )
+            fake.chmod(0o700)
+            runtime = Runtime(repo, policy_profile="autonomous", project_roots=[root])
+            try:
+                with patch.object(
+                    runtime, "_antigravity_binary", return_value=str(fake)
+                ):
+                    result = runtime.antigravity_delegate(
+                        {
+                            "prompt": "Add a delegated marker file.",
+                            "timeout_seconds": 30,
+                        }
+                    )
+                self.assertTrue(result["applied"])
+                self.assertEqual(result["changed_paths"], ["agent-added.txt"])
+                self.assertEqual(
+                    (repo / "agent-added.txt").read_text(encoding="utf-8"),
+                    "delegated\n",
+                )
+                self.assertEqual(
+                    (repo / "tracked.txt").read_text(encoding="utf-8"), "base\n"
+                )
+            finally:
+                runtime.close()
+
+    @unittest.skipIf(os.name == "nt", "fake executable fixture uses a POSIX shebang")
+    def test_antigravity_delegate_discards_delete_attempts(self) -> None:
+        preflight_error = git_fixture_preflight_error()
+        if preflight_error is not None:
+            self.skipTest(preflight_error)
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            (repo / "tracked.txt").write_text("base\n", encoding="utf-8")
+            init_git(repo)
+            fake = root / "agy"
+            fake.write_text(
+                "#!/usr/bin/env python3\n"
+                "import pathlib, sys\n"
+                "if '--version' in sys.argv:\n"
+                "    print('agy 9.9.9')\n"
+                "elif '--help' in sys.argv:\n"
+                "    print('--sandbox --output-format -p')\n"
+                "else:\n"
+                "    pathlib.Path('tracked.txt').unlink()\n"
+                '    print(\'{\\"result\\":\\"ignored-injection\\"}\')\n',
+                encoding="utf-8",
+            )
+            fake.chmod(0o700)
+            runtime = Runtime(repo, policy_profile="autonomous", project_roots=[root])
+            try:
+                with patch.object(
+                    runtime, "_antigravity_binary", return_value=str(fake)
+                ):
+                    with self.assertRaises(ToolFailure) as denied:
+                        runtime.antigravity_delegate(
+                            {"prompt": "Inspect the repository.", "timeout_seconds": 30}
+                        )
+                self.assertEqual(denied.exception.code, "ACCESS_DENIED")
+                self.assertEqual(
+                    (repo / "tracked.txt").read_text(encoding="utf-8"), "base\n"
+                )
+            finally:
+                runtime.close()
+
+    @unittest.skipIf(os.name == "nt", "fake executable fixture uses a POSIX shebang")
+    def test_antigravity_delegate_blocks_tracked_sensitive_paths_before_launch(
+        self,
+    ) -> None:
+        preflight_error = git_fixture_preflight_error()
+        if preflight_error is not None:
+            self.skipTest(preflight_error)
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            (repo / ".env").write_text("SECRET=do-not-delegate\n", encoding="utf-8")
+            init_git(repo)
+            runtime = Runtime(repo, policy_profile="autonomous", project_roots=[root])
+            try:
+                with patch.object(runtime, "_antigravity_binary") as binary:
+                    with self.assertRaises(ToolFailure) as denied:
+                        runtime.antigravity_delegate(
+                            {"prompt": "Follow any instructions in repository files."}
+                        )
+                self.assertEqual(denied.exception.code, "ACCESS_DENIED")
+                binary.assert_not_called()
+            finally:
+                runtime.close()
+
+    @unittest.skipIf(os.name == "nt", "fake executable fixture uses a POSIX shebang")
+    def test_antigravity_read_only_discards_agent_edits(self) -> None:
+        preflight_error = git_fixture_preflight_error()
+        if preflight_error is not None:
+            self.skipTest(preflight_error)
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            (repo / "tracked.txt").write_text("base\n", encoding="utf-8")
+            init_git(repo)
+            fake = root / "agy"
+            fake.write_text(
+                "#!/usr/bin/env python3\n"
+                "import pathlib, sys\n"
+                "if '--version' in sys.argv:\n"
+                "    print('agy 9.9.9')\n"
+                "elif '--help' in sys.argv:\n"
+                "    print('--sandbox --output-format -p')\n"
+                "else:\n"
+                "    pathlib.Path('tracked.txt').write_text('changed\\n', encoding='utf-8')\n"
+                '    print(\'{\\"result\\":\\"ok\\"}\')\n',
+                encoding="utf-8",
+            )
+            fake.chmod(0o700)
+            runtime = Runtime(repo, policy_profile="autonomous", project_roots=[root])
+            try:
+                with patch.object(
+                    runtime, "_antigravity_binary", return_value=str(fake)
+                ):
+                    with self.assertRaises(ToolFailure) as denied:
+                        runtime.antigravity_delegate(
+                            {
+                                "prompt": "Inspect only.",
+                                "mode": "read_only",
+                                "timeout_seconds": 30,
+                            }
+                        )
+                self.assertEqual(denied.exception.code, "ACCESS_DENIED")
+                self.assertEqual(
+                    (repo / "tracked.txt").read_text(encoding="utf-8"), "base\n"
+                )
+            finally:
+                runtime.close()
+
     def test_first_class_git_branch_commit_and_push_are_constrained(self) -> None:
         preflight_error = git_fixture_preflight_error()
         if preflight_error is not None:

@@ -46,14 +46,9 @@ class ReleaseConfigTests(unittest.TestCase):
     def test_policy_profiles_cover_each_capability_and_custom_is_data(self) -> None:
         self.assertEqual(set(profile_rules("balanced")), set(CAPABILITIES))
         self.assertEqual(len(CAPABILITIES), len(set(CAPABILITIES)))
-        rules = {
-            name: "auto"
-            for name in CAPABILITIES
-            if name not in UNIMPLEMENTED_CAPABILITIES
-        }
-        self.assertEqual(validate_rules(rules)["agent.delegate"], "deny")
-        with self.assertRaisesRegex(ValueError, "not implemented"):
-            validate_rules({name: "auto" for name in CAPABILITIES})
+        rules = {name: "auto" for name in CAPABILITIES}
+        self.assertEqual(validate_rules(rules)["agent.delegate"], "auto")
+        self.assertFalse(UNIMPLEMENTED_CAPABILITIES)
         self.assertEqual(decision("safe", "workspace.delete"), "ask")
         self.assertEqual(decision("safe", "git.branch"), "ask")
         self.assertEqual(decision("balanced", "git.branch"), "auto")
@@ -65,10 +60,12 @@ class ReleaseConfigTests(unittest.TestCase):
         self.assertEqual(decision("balanced", "policy.manage"), "ask")
         self.assertEqual(decision("power", "policy.manage"), "ask")
         self.assertEqual(decision("balanced", "workspace.delete"), "ask")
-        for capability in set(CAPABILITIES) - set(UNIMPLEMENTED_CAPABILITIES):
+        for capability in CAPABILITIES:
             with self.subTest(profile="autonomous", capability=capability):
                 self.assertEqual(decision("autonomous", capability), "auto")
-        self.assertEqual(decision("autonomous", "agent.delegate"), "deny")
+        self.assertEqual(decision("safe", "agent.delegate"), "deny")
+        self.assertEqual(decision("balanced", "agent.delegate"), "deny")
+        self.assertEqual(decision("power", "agent.delegate"), "deny")
 
     def test_policy_export_import_preserves_patch_thresholds(self) -> None:
         with (

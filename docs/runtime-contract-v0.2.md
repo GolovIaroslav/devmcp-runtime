@@ -55,11 +55,17 @@ depth, per-file, and total-byte limits.
 
 The operator may configure one or more project-library roots. The runtime
 recursively discovers Git repositories below those roots without following
-symlinks. Each Streamable HTTP MCP session owns an independent active project;
-`select_project` changes that session only and never mutates the configured
-roots. Selection uses the existing checkout directly and does not create a
-worktree. The initialize instructions tell clients to discover/select a named
-project and then read its returned root authority files before modifying code.
+symlinks. When DevMCP is started through the service CLI, `select_project`
+atomically persists the selected canonical checkout in the private DevMCP config
+directory. Fresh Streamable HTTP runtime instances for that service reload the
+same selected project, which makes project selection stable across clients that
+do not reuse one MCP session for every tool call. The persisted value is accepted
+only when it resolves to a Git checkout inside an operator-configured project
+root; invalid or stale values are ignored. Direct Runtime instances without the
+state-file option remain session-scoped. Selection never mutates the configured
+project roots. The initialize instructions tell clients to discover/select a
+named project and then read its returned root authority files before modifying
+code.
 
 ## Workspace and patch guarantees
 
@@ -135,8 +141,12 @@ unexpected server failure `-32603`.
 ## Process lifecycle
 
 `exec_command`, `write_stdin`, `read_output`, and `kill_session` are always in
-the catalog. `exec_command` and `write_stdin` default to a 10-second yield. A
-short command normally finishes in one call. A running command returns:
+the catalog. `exec_command` and `write_stdin` default to a 10-second yield.
+Initial execution honors requested `yield_time_ms` values up to the schema
+maximum of 300 seconds instead of silently capping them at 30 seconds, allowing
+long project checks to complete in one tool call when a client does not retain
+the same MCP runtime for polling. A short command normally finishes in one call.
+A running command returns:
 
 ```json
 {
@@ -187,7 +197,7 @@ survive tunnel churn. Forwarded headers are ignored unless
 
 ## Stable tool inventory
 
-The default catalog has 49 tools, including `view_image`. Setting
+The default catalog has 50 tools, including `view_image`. Setting
 `CODING_TOOLS_MCP_ENABLE_VIEW_IMAGE=0` is the sole installation capability gate
 and removes only that optional binary-content tool. It is not a tool profile.
 
@@ -287,10 +297,12 @@ Inputs: `"project"`.
 
 Annotations: `{"title":"Select project","readOnlyHint":false,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}`.
 
-Selects exactly one discovered repository for the current MCP session. Running
-command sessions prevent switching. Existing execution sandboxes are discarded,
-the new repository becomes the file/patch/exec/Git root, and project context is
-reloaded. No configured root is added or persisted.
+Selects exactly one discovered repository. Running command sessions prevent
+switching. Existing execution sandboxes are discarded, the new repository
+becomes the file/patch/exec/Git/delegation root, and project context is reloaded.
+When the service supplies `DEVMCP_ACTIVE_PROJECT_FILE`, the canonical selected
+path is atomically persisted for subsequent HTTP Runtime instances. No configured
+project root is added or changed.
 
 ### current_project
 
@@ -532,6 +544,30 @@ Arbitrary URL remotes and force push are rejected. `git.push` is controlled by
 the active policy profile, and failed push output is withheld to avoid credential
 disclosure.
 
+### antigravity_delegate
+
+Inputs: `"prompt"`, `"mode"`, `"timeout_seconds"`, `"approval_id"`.
+
+Annotations: `{"title":"Delegate to Antigravity","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
+
+Runs one bounded host-side Antigravity CLI task in a temporary detached Git
+worktree at the selected project's current HEAD. It is controlled by
+`agent.delegate`, which is automatically allowed by the built-in Autonomous
+profile and may also be explicitly configured by Custom. The live checkout must
+have no tracked or staged changes; untracked files are not copied into the
+delegate worktree. Sensitive tracked paths block delegation entirely.
+The binary is discovered from `DEVMCP_ANTIGRAVITY_BIN`, the service `PATH`,
+`~/.local/bin/agy`, or `/usr/local/bin/agy`, in that order.
+
+The delegate receives an explicit untrusted-data/prompt-injection boundary and a
+filtered environment. Its process cannot use the selected repository's real Git
+remote through inherited Git configuration, and DevMCP requests Antigravity
+sandboxing when the installed CLI advertises that option. After completion,
+DevMCP rejects Git-history changes, file deletes/moves, sensitive-path changes,
+and any modification in `read_only` or `verify` mode. `workspace_edit` applies
+only a validated `M`/`A` binary patch to the real selected checkout. Rejected,
+failed, or timed-out delegate work is discarded with the temporary worktree.
+
 ### view_image
 
 Inputs: `"path"`, `"max_bytes"`, `"max_width"`, `"max_height"`, `"auto_resize"`.
@@ -546,7 +582,8 @@ URL. Pillow is optional and used only for requested auto-resize.
 
 The runtime does not expose external-agent login/accounts, agent memory, cloud
 tasks, web search/fetch, image generation, model routing, plugin installation,
-subagent orchestration, or high-level prompt wrappers.
+or arbitrary subagent orchestration. `antigravity_delegate` is the sole bounded
+delegation primitive and follows the isolation/validation contract above.
 
 ## Compatibility note for 0.2
 
