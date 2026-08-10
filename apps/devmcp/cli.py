@@ -718,7 +718,6 @@ WantedBy=default.target
 """
     tunnel_unit = f"""[Unit]
 Description=DevMCP Runtime Secure MCP Tunnel
-Requires={MCP_SERVICE}
 After={MCP_SERVICE}
 
 [Service]
