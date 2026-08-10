@@ -710,6 +710,12 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         description="Schedule a host-side restart of the DevMCP MCP and tunnel user services after this tool response is returned.",
         destructive=True,
     ),
+    "service_update": ToolSpec(
+        title="Update DevMCP service runtime",
+        description="Schedule a user-level update of the installed DevMCP runtime from a clean, synced local devmcp-runtime checkout, reinstall user services, and safely restart them.",
+        destructive=True,
+        open_world=True,
+    ),
     "activate_policy_profile": ToolSpec(
         title="Activate policy profile",
         description="Persist one DevMCP policy profile on the host and schedule a safe service restart.",
@@ -6536,6 +6542,145 @@ class Runtime:
             return pending
         return self._schedule_devmcp_restart()
 
+    @staticmethod
+    def _is_devmcp_source_checkout(path: Path) -> bool:
+        pyproject = path / "pyproject.toml"
+        cli_module = path / "apps" / "devmcp" / "cli.py"
+        if not pyproject.is_file() or not cli_module.is_file():
+            return False
+        try:
+            with pyproject.open("rb") as handle:
+                project = tomllib.load(handle).get("project", {})
+        except (OSError, tomllib.TOMLDecodeError):
+            return False
+        return str(project.get("name", "")).strip() == "devmcp-runtime"
+
+    def _validated_devmcp_update_source(
+        self, source_project: str | None
+    ) -> tuple[Path, str]:
+        candidates = [
+            item
+            for item in self._discover_projects()
+            if self._is_devmcp_source_checkout(Path(str(item["path"])))
+        ]
+        if source_project:
+            candidates = [
+                item
+                for item in candidates
+                if source_project
+                in {
+                    str(item["id"]),
+                    str(item["relative_path"]),
+                    str(item["name"]),
+                }
+            ]
+        if len(candidates) != 1:
+            raise ToolFailure(
+                "NOT_FOUND" if not candidates else "INVALID_ARGUMENT",
+                "No eligible devmcp-runtime source checkout was found."
+                if not candidates
+                else "Multiple eligible devmcp-runtime source checkouts were found; specify source_project.",
+                category="not_found" if not candidates else "validation",
+                details={"matches": [item["id"] for item in candidates]},
+            )
+        source = Path(str(candidates[0]["path"])).resolve(strict=True)
+        git = require_git()
+        branch = self._run_git_text(
+            [git, "-C", str(source), "branch", "--show-current"], timeout=30
+        )
+        if branch.returncode != 0 or branch.stdout.strip() != "main":
+            raise ToolFailure(
+                "INVALID_STATE",
+                "DevMCP service update requires the source checkout to be on main.",
+                category="runtime",
+            )
+        for diff_args in (("diff", "--quiet"), ("diff", "--cached", "--quiet")):
+            dirty = self._run_git_text([git, "-C", str(source), *diff_args], timeout=30)
+            if dirty.returncode != 0:
+                raise ToolFailure(
+                    "INVALID_STATE",
+                    "DevMCP service update requires no tracked or staged source changes; untracked files are allowed.",
+                    category="runtime",
+                )
+        head = self._git_rev_parse(source, "HEAD")
+        upstream = self._git_rev_parse(source, "origin/main")
+        if not head or not upstream or head != upstream:
+            raise ToolFailure(
+                "INVALID_STATE",
+                "DevMCP service update requires local main to exactly match origin/main.",
+                category="runtime",
+                details={"head": head or None, "origin_main": upstream or None},
+            )
+        return source, head
+
+    def _schedule_devmcp_update(
+        self, source: Path, expected_sha: str
+    ) -> dict[str, Any]:
+        systemd_run = shutil.which("systemd-run")
+        if systemd_run is None:
+            raise ToolFailure(
+                "SERVICE_UNAVAILABLE",
+                "systemd-run is required for a reliable self-update.",
+                category="environment",
+            )
+        unit = f"devmcp-self-update-{os.getpid()}-{secrets.token_hex(4)}"
+        result = subprocess.run(
+            [
+                systemd_run,
+                "--user",
+                "--quiet",
+                "--collect",
+                f"--unit={unit}",
+                "--on-active=1s",
+                f"--working-directory={source}",
+                sys.executable,
+                "-m",
+                "apps.devmcp.cli",
+                "service",
+                "update",
+                "--source",
+                str(source),
+                "--expected-sha",
+                expected_sha,
+            ],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=10,
+        )
+        if result.returncode != 0:
+            raise ToolFailure(
+                "SERVICE_COMMAND_FAILED",
+                "Failed to schedule DevMCP service update.",
+                category="internal",
+                details={
+                    "exit_code": result.returncode,
+                    "stdout": result.stdout,
+                    "stderr": result.stderr,
+                },
+            )
+        return {
+            "status": "scheduled",
+            "unit": unit,
+            "delay_seconds": 1,
+            "source": str(source),
+            "expected_sha": expected_sha,
+        }
+
+    def service_update(self, args: dict[str, Any]) -> dict[str, Any]:
+        source_project_raw = args.get("source_project")
+        source_project = (
+            str(source_project_raw).strip() if source_project_raw is not None else None
+        )
+        if source_project == "":
+            source_project = None
+        action = "update installed DevMCP runtime from synced local main"
+        pending = self._profile_authorize_operation("service.manage", args, action)
+        if pending is not None:
+            return pending
+        source, expected_sha = self._validated_devmcp_update_source(source_project)
+        return self._schedule_devmcp_update(source, expected_sha)
+
     def activate_policy_profile(self, args: dict[str, Any]) -> dict[str, Any]:
         profile = str(args.get("profile", "")).strip().lower()
         if profile not in PROFILE_NAMES:
@@ -8096,6 +8241,12 @@ def input_schemas() -> dict[str, dict[str, Any]]:
         "service_status": object_schema(),
         "service_doctor": object_schema(),
         "service_restart": object_schema({"approval_id": string}),
+        "service_update": object_schema(
+            {
+                "source_project": string,
+                "approval_id": string,
+            }
+        ),
         "activate_policy_profile": object_schema(
             {
                 "profile": {**string, "enum": list(PROFILE_NAMES)},

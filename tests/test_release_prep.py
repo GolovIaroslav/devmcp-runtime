@@ -525,6 +525,149 @@ class ReleaseLifecycleTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    def test_autonomous_profile_schedules_service_update_from_synced_main(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            projects = root / "projects"
+            source = projects / "devmcp-runtime"
+            (source / "apps" / "devmcp").mkdir(parents=True)
+            (source / "pyproject.toml").write_text(
+                '[project]\nname = "devmcp-runtime"\nversion = "0.1.0"\n',
+                encoding="utf-8",
+            )
+            (source / "apps" / "devmcp" / "cli.py").write_text(
+                "# fixture\n", encoding="utf-8"
+            )
+            subprocess.run(["git", "init", "-qb", "main"], cwd=source, check=True)
+            subprocess.run(
+                ["git", "config", "user.email", "test@example.invalid"],
+                cwd=source,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "config", "user.name", "Release Test"],
+                cwd=source,
+                check=True,
+            )
+            subprocess.run(["git", "add", "-A"], cwd=source, check=True)
+            subprocess.run(["git", "commit", "-qm", "fixture"], cwd=source, check=True)
+            head = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=source,
+                check=True,
+                text=True,
+                stdout=subprocess.PIPE,
+            ).stdout.strip()
+            subprocess.run(
+                ["git", "update-ref", "refs/remotes/origin/main", head],
+                cwd=source,
+                check=True,
+            )
+            runtime = Runtime(
+                source,
+                policy_profile="autonomous",
+                project_roots=[projects],
+            )
+            try:
+                with patch.object(
+                    runtime,
+                    "_schedule_devmcp_update",
+                    return_value={"status": "scheduled"},
+                ) as schedule:
+                    result = runtime.service_update(
+                        {"source_project": "devmcp-runtime"}
+                    )
+                self.assertEqual(result["status"], "scheduled")
+                schedule.assert_called_once_with(source.resolve(), head)
+            finally:
+                runtime.close()
+
+    def test_service_update_rejects_dirty_source_checkout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "devmcp-runtime"
+            (source / "apps" / "devmcp").mkdir(parents=True)
+            tracked = source / "apps" / "devmcp" / "cli.py"
+            tracked.write_text("# fixture\n", encoding="utf-8")
+            (source / "pyproject.toml").write_text(
+                '[project]\nname = "devmcp-runtime"\nversion = "0.1.0"\n',
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "init", "-qb", "main"], cwd=source, check=True)
+            subprocess.run(
+                ["git", "config", "user.email", "test@example.invalid"],
+                cwd=source,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "config", "user.name", "Release Test"],
+                cwd=source,
+                check=True,
+            )
+            subprocess.run(["git", "add", "-A"], cwd=source, check=True)
+            subprocess.run(["git", "commit", "-qm", "fixture"], cwd=source, check=True)
+            head = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=source,
+                check=True,
+                text=True,
+                stdout=subprocess.PIPE,
+            ).stdout.strip()
+            subprocess.run(
+                ["git", "update-ref", "refs/remotes/origin/main", head],
+                cwd=source,
+                check=True,
+            )
+            tracked.write_text("# dirty\n", encoding="utf-8")
+            runtime = Runtime(
+                source,
+                policy_profile="autonomous",
+                project_roots=[root],
+            )
+            try:
+                with self.assertRaises(ToolFailure) as denied:
+                    runtime.service_update({})
+                self.assertEqual(denied.exception.code, "INVALID_STATE")
+            finally:
+                runtime.close()
+
+    def test_cli_service_update_revalidates_sha_and_runs_install_restart_sequence(
+        self,
+    ) -> None:
+        expected_sha = "a" * 40
+        completed = [
+            subprocess.CompletedProcess([], 0, expected_sha + "\n", ""),
+            subprocess.CompletedProcess([], 0, "main\n", ""),
+            subprocess.CompletedProcess([], 0, "", ""),
+            subprocess.CompletedProcess([], 0, "", ""),
+            subprocess.CompletedProcess([], 0, "installed\n", ""),
+            subprocess.CompletedProcess([], 0, "units\n", ""),
+            subprocess.CompletedProcess([], 0, "restarted\n", ""),
+        ]
+        source = Path("/tmp/devmcp-runtime-source")
+        with (
+            patch.object(cli, "_validated_runtime_source", return_value=source),
+            patch.object(
+                cli.shutil,
+                "which",
+                side_effect=lambda name: {
+                    "git": "/usr/bin/git",
+                    "uv": "/usr/bin/uv",
+                }.get(name),
+            ),
+            patch.object(cli.subprocess, "run", side_effect=completed) as run,
+        ):
+            result = cli._service_update(
+                SimpleNamespace(source=str(source), expected_sha=expected_sha)
+            )
+        self.assertEqual(result, 0)
+        commands = [call.args[0] for call in run.call_args_list]
+        self.assertEqual(commands[0][-2:], ["rev-parse", "HEAD"])
+        self.assertEqual(commands[1][-2:], ["branch", "--show-current"])
+        self.assertEqual(commands[4][:4], ["/usr/bin/uv", "tool", "install", "--force"])
+        self.assertEqual(commands[5][-2:], ["service", "install"])
+        self.assertEqual(commands[6][-1], "restart")
+
     def test_http_pressure_eviction_repairs_orphaned_sandbox_lease(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runtime = Runtime(Path(tmp), sandbox_backend="unsafe")
