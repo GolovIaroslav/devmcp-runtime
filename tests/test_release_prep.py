@@ -61,7 +61,14 @@ class ReleaseConfigTests(unittest.TestCase):
         self.assertEqual(decision("balanced", "git.push"), "ask")
         self.assertEqual(decision("power", "server.public"), "ask")
         self.assertEqual(decision("power", "workspace.delete"), "auto")
+        self.assertEqual(decision("power", "service.manage"), "auto")
+        self.assertEqual(decision("balanced", "policy.manage"), "ask")
+        self.assertEqual(decision("power", "policy.manage"), "ask")
         self.assertEqual(decision("balanced", "workspace.delete"), "ask")
+        for capability in set(CAPABILITIES) - set(UNIMPLEMENTED_CAPABILITIES):
+            with self.subTest(profile="autonomous", capability=capability):
+                self.assertEqual(decision("autonomous", capability), "auto")
+        self.assertEqual(decision("autonomous", "agent.delegate"), "deny")
 
     def test_policy_export_import_preserves_patch_thresholds(self) -> None:
         with (
@@ -287,6 +294,7 @@ class ReleaseConfigTests(unittest.TestCase):
             FakeResponse(b'{"result": {}}', {"Mcp-Session-Id": "session-1"}),
             FakeResponse(b""),
             FakeResponse(b'{"result": {"structuredContent": {"status": "ok"}}}'),
+            FakeResponse(b""),
         ]
         with (
             tempfile.TemporaryDirectory() as tmp,
@@ -302,6 +310,37 @@ class ReleaseConfigTests(unittest.TestCase):
 
             health_request = urlopen.call_args_list[2].args[0]
             self.assertEqual(health_request.get_header("Mcp-session-id"), "session-1")
+            delete_request = urlopen.call_args_list[3].args[0]
+            self.assertEqual(delete_request.method, "DELETE")
+            self.assertEqual(delete_request.get_header("Mcp-session-id"), "session-1")
+
+    def test_service_restart_waits_for_mcp_health_before_tunnel_restart(self) -> None:
+        calls: list[tuple[str, ...]] = []
+
+        def fake_systemctl(
+            *args: str, check: bool = False
+        ) -> subprocess.CompletedProcess[str]:
+            del check
+            calls.append(args)
+            if args[:2] == ("show", "--property=LoadState"):
+                return subprocess.CompletedProcess(args, 0, "loaded\n", "")
+            return subprocess.CompletedProcess(args, 0, "", "")
+
+        with (
+            patch.object(cli, "_systemctl", side_effect=fake_systemctl),
+            patch.object(cli, "_wait_for_mcp_health", return_value=True) as wait_health,
+        ):
+            self.assertEqual(cli._service_action("restart"), 0)
+
+        wait_health.assert_called_once_with()
+        self.assertEqual(
+            calls,
+            [
+                ("show", "--property=LoadState", "--value", cli.TUNNEL_SERVICE),
+                ("restart", cli.MCP_SERVICE),
+                ("restart", cli.TUNNEL_SERVICE),
+            ],
+        )
 
 
 class ReleaseLifecycleTests(unittest.TestCase):
@@ -431,6 +470,109 @@ class ReleaseLifecycleTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    def test_autonomous_profile_runs_arbitrary_exec_without_approval_but_not_sudo(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = Runtime(
+                Path(tmp), permission_mode="safe", policy_profile="autonomous"
+            )
+            try:
+                with patch.object(
+                    runtime, "_execute_command_legacy", return_value={"reached": True}
+                ) as execute:
+                    self.assertEqual(
+                        runtime.exec_command({"cmd": "printf autonomous"}),
+                        {"reached": True},
+                    )
+                self.assertIn(
+                    "exec.arbitrary",
+                    execute.call_args.args[0]["_approved_capabilities"],
+                )
+                with self.assertRaisesRegex(ToolFailure, "denied"):
+                    runtime.exec_command({"cmd": "sudo true"})
+                with self.assertRaisesRegex(ToolFailure, "denied"):
+                    runtime.exec_command({"cmd": "bwrap --bind / / true"})
+            finally:
+                runtime.close()
+
+    def test_autonomous_profile_runs_host_diagnostics_and_schedules_restart(
+        self,
+    ) -> None:
+        completed = subprocess.CompletedProcess([], 0, "operator-ok\n", "")
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = Runtime(Path(tmp), policy_profile="autonomous")
+            try:
+                with patch(
+                    "coding_tools_mcp.server.subprocess.run", return_value=completed
+                ) as run:
+                    status = runtime.service_status({})
+                    self.assertEqual(status["stdout"], "operator-ok\n")
+                    self.assertIn("status", run.call_args.args[0])
+
+                with (
+                    patch(
+                        "coding_tools_mcp.server.shutil.which",
+                        side_effect=lambda name: f"/usr/bin/{name}",
+                    ),
+                    patch(
+                        "coding_tools_mcp.server.subprocess.run", return_value=completed
+                    ) as run,
+                ):
+                    restart = runtime.service_restart({})
+                    self.assertEqual(restart["status"], "scheduled")
+                    command = run.call_args.args[0]
+                    self.assertEqual(command[0], "/usr/bin/systemd-run")
+                    self.assertIn("apps.devmcp.cli", command)
+                    self.assertEqual(command[-1], "restart")
+            finally:
+                runtime.close()
+
+    def test_http_pressure_eviction_repairs_orphaned_sandbox_lease(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = Runtime(Path(tmp), sandbox_backend="unsafe")
+            try:
+                sandbox = runtime._acquire_execution_sandbox()
+                self.assertEqual(runtime.sandbox_users, 1)
+                self.assertIs(runtime.sandbox, sandbox)
+
+                self.assertTrue(runtime.http_session_evictable())
+
+                self.assertEqual(runtime.sandbox_users, 0)
+                self.assertIsNone(runtime.sandbox)
+                self.assertFalse(sandbox.sandbox_dir.exists())
+            finally:
+                runtime.close()
+
+    def test_autonomous_profile_can_activate_policy_profile_and_schedule_restart(
+        self,
+    ) -> None:
+        completed = subprocess.CompletedProcess([], 0, "Policy profile: power\n", "")
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = Runtime(Path(tmp), policy_profile="autonomous")
+            try:
+                with (
+                    patch(
+                        "coding_tools_mcp.server.subprocess.run", return_value=completed
+                    ) as run,
+                    patch.object(
+                        runtime,
+                        "_schedule_devmcp_restart",
+                        return_value={"status": "scheduled", "unit": "fixture"},
+                    ) as schedule,
+                ):
+                    result = runtime.activate_policy_profile({"profile": "power"})
+
+                self.assertEqual(result["profile"], "power")
+                self.assertEqual(result["previous_profile"], "autonomous")
+                self.assertEqual(result["status"], "scheduled")
+                self.assertEqual(
+                    run.call_args.args[0][-3:], ["policy", "profile", "power"]
+                )
+                schedule.assert_called_once_with()
+            finally:
+                runtime.close()
+
     def test_custom_ask_requires_and_consumes_an_approval_before_execution(
         self,
     ) -> None:
@@ -491,6 +633,7 @@ class ReleaseLifecycleTests(unittest.TestCase):
             "db.migrate": ("alembic upgrade head", None),
             "git.branch": ("git branch", None),
             "git.commit": ("git commit -m policy", None),
+            "git.sync": ("git fetch origin", None),
             "git.push": ("git push", None),
             "env.sensitive": ("printf policy", None),
         }

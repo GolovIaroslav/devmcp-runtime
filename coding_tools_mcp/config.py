@@ -20,7 +20,7 @@ from typing import Any
 
 import tomllib
 
-from .policy import CAPABILITIES, DEFAULT_PROFILE, effective_rules
+from .policy import CAPABILITIES, DEFAULT_PROFILE, PROFILE_NAMES, effective_rules
 
 CONFIG_SCHEMA_VERSION = 1
 PUBLIC_CONFIG_ENV = "DEVMCP_CONFIG_DIR"
@@ -36,6 +36,7 @@ class ConfigPaths:
     mcp_token: Path
     mcp_authorization_header: Path
     control_plane_key: Path
+    git_credentials: Path
     tunnel_health_url: Path
     approvals_db: Path
     audit_log: Path
@@ -58,6 +59,7 @@ def paths() -> ConfigPaths:
         mcp_token=secrets_dir / "mcp-token",
         mcp_authorization_header=secrets_dir / "mcp-authorization-header",
         control_plane_key=secrets_dir / "control-plane-api-key",
+        git_credentials=secrets_dir / "git-credentials",
         tunnel_health_url=root / "tunnel-health.url",
         approvals_db=root / "approvals.db",
         audit_log=root / "audit.jsonl",
@@ -200,8 +202,8 @@ def validate_config(config: dict[str, Any]) -> None:
     ):
         raise ValueError("workspaces must be a list of absolute paths")
     profile = str(config.get("profile", DEFAULT_PROFILE)).lower()
-    if profile not in {"safe", "balanced", "power", "custom"}:
-        raise ValueError("profile must be safe, balanced, power, or custom")
+    if profile not in PROFILE_NAMES:
+        raise ValueError(f"profile must be one of: {', '.join(PROFILE_NAMES)}")
     patch = config.get("patch", {})
     if (
         int(patch.get("max_removed_lines", 0)) < 0
@@ -318,6 +320,8 @@ def secret_status(target: ConfigPaths | None = None) -> dict[str, Any]:
         "mcp_token_path": str(selected.mcp_token),
         "control_plane_key_configured": bool(read_secret(selected.control_plane_key)),
         "control_plane_key_path": str(selected.control_plane_key),
+        "git_credentials_configured": bool(read_secret(selected.git_credentials)),
+        "git_credentials_path": str(selected.git_credentials),
     }
 
 

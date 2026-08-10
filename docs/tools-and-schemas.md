@@ -11,11 +11,15 @@ app remains a draft.
 
 ## Fixed inventory
 
-The default catalog contains exactly 41 tools:
+The default catalog contains exactly 49 tools:
 
 - `server_info`: Server info.
 - `health`: Health check.
 - `workspace_info`: Workspace info.
+- `service_status`: Run host-side DevMCP status diagnostics.
+- `service_doctor`: Run host-side DevMCP doctor diagnostics.
+- `service_restart`: Schedule a delayed restart of the DevMCP user services.
+- `activate_policy_profile`: Persist a policy profile and schedule a safe restart.
 - `list_projects`: Discover Git repositories under operator-approved project roots.
 - `select_project`: Select one writable repository for the current MCP session.
 - `current_project`: Show the repository selected for the current MCP session.
@@ -36,6 +40,10 @@ The default catalog contains exactly 41 tools:
 - `git_blame`: Git blame.
 - `git_create_branch`: Create and switch to a local branch in the selected repository.
 - `git_switch_branch`: Switch to an existing local branch in the selected repository.
+- `git_fetch`: Fetch and prune one configured remote.
+- `git_pull`: Fast-forward only the current branch from one configured remote.
+- `git_delete_branch`: Safely delete one merged local branch.
+- `git_delete_remote_branch`: Delete one branch from a configured remote.
 - `git_commit`: Commit only explicitly named paths.
 - `git_push`: Push the current branch to a configured remote; force is rejected.
 - `list_tasks`: List tasks.
@@ -55,8 +63,21 @@ The default catalog contains exactly 41 tools:
 - `get_default_cwd`: Get default cwd.
 - `set_default_cwd`: Set default cwd.
 `view_image` may be disabled when an installation cannot accept binary image
-content. That capability gate is not a tool profile. The other 40 tools are
+content. That capability gate is not a tool profile. The other 48 tools are
 always advertised, and `listChanged` is `false`.
+
+`service_status` and `service_doctor` execute only fixed DevMCP operator
+commands on the host; they do not accept arbitrary command text. `service_restart`
+is controlled by the `service.manage` policy capability and uses a delayed
+user-systemd transient unit so the current MCP response can complete before the
+running service is replaced.
+
+`activate_policy_profile` is the first-class bootstrap path for changing the
+persistent host policy without arbitrary shell access. It is controlled by the
+separate `policy.manage` capability, which asks in Safe, Balanced, and Power and
+is automatic only in Autonomous. A successful change schedules the same safe
+restart path; a restart-scheduling failure attempts to restore the previous
+profile.
 
 ## Project selection boundary
 
@@ -75,12 +96,19 @@ does not create a worktree.
 
 ## First-class Git mutations
 
-Branch create/switch, explicit-path commit, and push are host-side Git
+Branch create/switch/delete, fetch/prune, fast-forward-only pull, explicit-path
+commit, push, and remote-branch deletion are host-side Git
 operations scoped to the selected repository rather than generic sandbox tasks.
 `git_commit` requires a non-empty path list, rejects unrelated pre-staged paths,
 and does not run `git add -A`. `git_push` accepts only a configured remote name,
 rejects force push, withholds raw push output on failure, and remains controlled
 by the `git.push` policy capability.
+
+`git_fetch` always uses `--prune`; `git_pull` always uses `--ff-only` and refuses
+to run with tracked or staged worktree changes. Both are controlled by
+`git.sync`. Local branch deletion uses only `git branch -d`, never `-D`. Remote
+branch deletion accepts only a configured remote and is controlled by
+`git.push`.
 
 The generic task registry intentionally does not advertise Git commands because
 the execution sandbox does not expose repository Git metadata. Read-only Git

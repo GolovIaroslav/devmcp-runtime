@@ -53,6 +53,17 @@ class HTTPSessionManagerTests(unittest.TestCase):
                     record.active_requests == 0 for record in manager._sessions.values()
                 )
             )
+            self.assertEqual(
+                manager.stats(),
+                {
+                    "capacity": MAX_HTTP_SESSIONS,
+                    "total": MAX_HTTP_SESSIONS,
+                    "creating": 0,
+                    "active_sessions": 0,
+                    "active_requests": 0,
+                    "closing": 0,
+                },
+            )
         finally:
             manager.close()
         self.assertTrue(all(runtime.close_count == 1 for runtime in factory.created))

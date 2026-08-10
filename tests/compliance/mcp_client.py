@@ -24,6 +24,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 REQUIRED_TOOLS = (
     "server_info",
+    "activate_policy_profile",
     "check_exec_environment",
     "get_default_cwd",
     "set_default_cwd",
@@ -48,6 +49,10 @@ REQUIRED_TOOLS = (
     "git_blame",
     "git_create_branch",
     "git_switch_branch",
+    "git_fetch",
+    "git_pull",
+    "git_delete_branch",
+    "git_delete_remote_branch",
     "git_commit",
     "git_push",
     "view_image",
