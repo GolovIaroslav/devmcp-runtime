@@ -41,7 +41,7 @@ The server accepts only the protocol versions listed above. A supported version
 is echoed in `initialize`; arbitrary older dates and unknown future dates are
 rejected rather than compared lexicographically.
 
-## Automatic project context
+## Automatic project context and session project selection
 
 Initialization automatically loads bounded root project instructions from
 `AGENTS.md`, `AGENTS.MD`, `CLAUDE.md`, and `CLAUDE.MD` when present. The content
@@ -50,9 +50,17 @@ is included in the MCP `instructions` field, so an agent does not need an
 eagerly injected. Loading is UTF-8 safe and bounded by file-count, scan-count,
 depth, per-file, and total-byte limits.
 
+The operator may configure one or more project-library roots. The runtime
+recursively discovers Git repositories below those roots without following
+symlinks. Each Streamable HTTP MCP session owns an independent active project;
+`select_project` changes that session only and never mutates the configured
+roots. Selection uses the existing checkout directly and does not create a
+worktree. The initialize instructions tell clients to discover/select a named
+project and then read its returned root authority files before modifying code.
+
 ## Workspace and patch guarantees
 
-- One server runtime owns one canonical workspace root.
+- One MCP-session runtime owns one canonical active repository root at a time.
 - Direct path inputs are workspace-relative. Absolute paths, `..` traversal,
   NUL bytes, and symlink escapes are rejected.
 - `apply_patch` parses and validates every operation before committing.
@@ -149,6 +157,16 @@ runtime bytes are bounded. Completed sessions have a TTL. POSIX `tty=true` uses
 a real pseudo-terminal; Windows reports `TTY_UNSUPPORTED` in this build instead
 of pretending pipes are a TTY.
 
+Execution snapshots have explicit runtime ownership. A sandbox is created only
+under the runtime's private `sandboxes/` directory and carries an ownership
+marker outside the writable snapshot. Active command sessions hold leases on
+the snapshot; normal exit, non-zero exit, timeout, kill/cancellation, startup
+failure, and runtime shutdown release those leases. The last lease removes the
+snapshot synchronously before terminal completion is reported. Cleanup verifies
+the canonical owned path and marker before removal, so it cannot delete the
+selected repository or an unrelated caller-owned path. Completed commands do
+not retain repository-sized sandbox copies for later commands.
+
 ## HTTP authentication
 
 Non-loopback deployment requires bearer or OAuth authentication unless the
@@ -166,7 +184,7 @@ survive tunnel churn. Forwarded headers are ignored unless
 
 ## Stable tool inventory
 
-The default catalog has 32 tools, including `view_image`. Setting
+The default catalog has 41 tools, including `view_image`. Setting
 `CODING_TOOLS_MCP_ENABLE_VIEW_IMAGE=0` is the sole installation capability gate
 and removes only that optional binary-content tool. It is not a tool profile.
 
@@ -207,6 +225,56 @@ Inputs: `"path"`.
 Annotations: `{"title":"Set default cwd","readOnlyHint":false,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}`.
 
 Changes only this MCP runtime's navigation base; it does not modify files.
+
+### list_projects
+
+Inputs: none.
+
+Annotations: `{"title":"List projects","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}`.
+
+Discovers Git repositories under operator-approved project roots. Discovery is
+bounded, canonicalized, does not follow symlinks, and does not change the active
+project.
+
+### select_project
+
+Inputs: `"project"`.
+
+Annotations: `{"title":"Select project","readOnlyHint":false,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}`.
+
+Selects exactly one discovered repository for the current MCP session. Running
+command sessions prevent switching. Existing execution sandboxes are discarded,
+the new repository becomes the file/patch/exec/Git root, and project context is
+reloaded. No configured root is added or persisted.
+
+### current_project
+
+Inputs: none.
+
+Annotations: `{"title":"Current project","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}`.
+
+Returns the selected repository, its operator root, relative path, and known
+root authority files.
+
+### project_checks
+
+Inputs: none.
+
+Annotations: `{"title":"Project checks","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}`.
+
+Returns bounded project-native verification argv. Repository Makefile targets
+are preferred. A uv Python fallback uses `uv run --offline --frozen --no-sync`
+and never silently chooses host bare `pytest`.
+
+### run_project_check
+
+Inputs: `"check_id"`, `"timeout_ms"`, `"yield_time_ms"`, `"max_output_bytes"`, `"approval_id"`.
+
+Annotations: `{"title":"Run project check","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":false}`.
+
+Runs only an argv returned by `project_checks`, inside the selected repository's
+normal execution sandbox. It does not automatically install dependencies or
+grant network access.
 
 ### read_file
 
@@ -341,6 +409,44 @@ Annotations: `{"title":"Git show","readOnlyHint":true,"destructiveHint":false,"i
 Inputs: `"path"`, `"rev"`, `"start_line"`, `"end_line"`, `"max_lines"`.
 
 Annotations: `{"title":"Git blame","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}`.
+
+### git_create_branch
+
+Inputs: `"name"`, `"approval_id"`.
+
+Annotations: `{"title":"Create Git branch","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":false}`.
+
+Creates and switches to a validated local branch in the selected repository.
+The `git.branch` policy capability is authoritative.
+
+### git_switch_branch
+
+Inputs: `"name"`, `"approval_id"`.
+
+Annotations: `{"title":"Switch Git branch","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":false}`.
+
+Switches only to an existing validated local branch in the selected repository.
+
+### git_commit
+
+Inputs: `"message"`, `"paths"`, `"approval_id"`.
+
+Annotations: `{"title":"Git commit","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":false}`.
+
+Requires an explicit bounded path list, rejects unrelated pre-staged paths,
+stages only the named paths, and never runs `git add -A`. Returns branch, commit
+SHA, and committed path set.
+
+### git_push
+
+Inputs: `"remote"`, `"force"`, `"approval_id"`.
+
+Annotations: `{"title":"Git push","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
+
+Pushes the current branch only to a configured remote name, normally `origin`.
+Arbitrary URL remotes and force push are rejected. `git.push` remains
+approval-gated by policy, and failed push output is withheld to avoid credential
+disclosure.
 
 ### view_image
 

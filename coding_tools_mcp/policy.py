@@ -40,6 +40,12 @@ CAPABILITIES = (
 
 
 def _profile(auto: set[str], ask: set[str], deny: set[str]) -> dict[str, str]:
+    overlap = (auto & ask) | (auto & deny) | (ask & deny)
+    if overlap:
+        raise ValueError(
+            "policy profile capability sets must be disjoint: "
+            + ", ".join(sorted(overlap))
+        )
     result = {capability: "deny" for capability in CAPABILITIES}
     result.update({capability: "auto" for capability in auto})
     result.update({capability: "ask" for capability in ask})
@@ -80,7 +86,7 @@ _PROFILES: dict[str, dict[str, str]] = {
     "safe": _profile(_SAFE_AUTO, _SAFE_ASK, _FLOOR_DENY),
     "balanced": _profile(
         _SAFE_AUTO | {"workspace.create", "git.branch", "git.commit"},
-        _SAFE_ASK
+        (_SAFE_ASK - {"workspace.create", "git.branch", "git.commit"})
         | {"workspace.delete", "workspace.move", "workspace.patch_destructive"},
         _FLOOR_DENY,
     ),

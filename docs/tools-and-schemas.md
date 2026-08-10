@@ -11,11 +11,16 @@ app remains a draft.
 
 ## Fixed inventory
 
-The default catalog contains exactly 32 tools:
+The default catalog contains exactly 41 tools:
 
 - `server_info`: Server info.
 - `health`: Health check.
 - `workspace_info`: Workspace info.
+- `list_projects`: Discover Git repositories under operator-approved project roots.
+- `select_project`: Select one writable repository for the current MCP session.
+- `current_project`: Show the repository selected for the current MCP session.
+- `project_checks`: Discover bounded project-native verification commands.
+- `run_project_check`: Run one discovered project-native check in the sandbox.
 - `read_file`: Read file.
 - `read_files`: Read multiple files.
 - `list_dir`: List directory.
@@ -29,6 +34,10 @@ The default catalog contains exactly 32 tools:
 - `git_log`: Git log.
 - `git_show`: Git show.
 - `git_blame`: Git blame.
+- `git_create_branch`: Create and switch to a local branch in the selected repository.
+- `git_switch_branch`: Switch to an existing local branch in the selected repository.
+- `git_commit`: Commit only explicitly named paths.
+- `git_push`: Push the current branch to a configured remote; force is rejected.
 - `list_tasks`: List tasks.
 - `describe_task`: Describe task.
 - `run_task`: Run task.
@@ -46,8 +55,46 @@ The default catalog contains exactly 32 tools:
 - `get_default_cwd`: Get default cwd.
 - `set_default_cwd`: Set default cwd.
 `view_image` may be disabled when an installation cannot accept binary image
-content. That capability gate is not a tool profile. The other 31 tools are
+content. That capability gate is not a tool profile. The other 40 tools are
 always advertised, and `listChanged` is `false`.
+
+## Project selection boundary
+
+Operator-configured `workspaces` are passed to the runtime as project discovery
+roots. `list_projects` recursively discovers Git repositories without following
+symlinks, and `select_project` changes only the current MCP session's active
+repository. It never persists a new root. Once selected, direct file tools,
+patches, sandboxed execution, project checks, and Git operations are all rooted
+at that one canonical repository. Absolute paths, `..`, and symlink escapes are
+rejected.
+
+HTTP sessions own independent `Runtime` instances, so two ChatGPT sessions can
+select different repositories without a process-global mutable selector. The
+default mode works directly against the existing checkout; selecting a project
+does not create a worktree.
+
+## First-class Git mutations
+
+Branch create/switch, explicit-path commit, and push are host-side Git
+operations scoped to the selected repository rather than generic sandbox tasks.
+`git_commit` requires a non-empty path list, rejects unrelated pre-staged paths,
+and does not run `git add -A`. `git_push` accepts only a configured remote name,
+rejects force push, withholds raw push output on failure, and remains controlled
+by the `git.push` policy capability.
+
+The generic task registry intentionally does not advertise Git commands because
+the execution sandbox does not expose repository Git metadata. Read-only Git
+inspection and mutations use the dedicated Git tools instead.
+
+## Project-native verification
+
+`project_checks` prefers repository-owned Makefile gates when present. For a
+Python project with `uv.lock` and `pyproject.toml`, the fallback test command is
+`uv run --offline --frozen --no-sync python -m pytest`; it never silently falls
+back to a host bare `pytest`. Existing `.venv` Python is used only when no uv
+lock is present. `run_project_check` executes only a discovered argv in the
+normal repository sandbox and does not auto-install dependencies or enable
+network access.
 
 ## Result envelope
 
@@ -111,6 +158,14 @@ Only truncated terminal output returns a `read_output` next action by default.
 are stream-specific absolute byte positions. Runtime limits bound active
 commands, retained completed sessions, per-session output, total output, and
 retention time.
+
+Repository snapshots used for execution are temporary leases, not session-long
+workspace copies. They live only below the runtime's private `sandboxes/`
+directory. Terminal completion, failure, timeout, cancellation, and runtime
+shutdown release the lease; the final lease removes the snapshot after checking
+its owned path and ownership marker. A later command starts from a fresh
+authoritative repository snapshot, so repeated checks do not accumulate
+repository-sized `/tmp` trees.
 
 Use `tty: true` only when a program requires a terminal. POSIX receives a real
 PTY (`isatty()` is true). This build returns `TTY_UNSUPPORTED` on Windows rather

@@ -7,7 +7,7 @@ import subprocess
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, BinaryIO
+from typing import Any, BinaryIO, Callable
 
 from .errors import ToolFailure
 from .textutils import DEFAULT_MAX_LINES, TextTruncation, truncate_text_tail
@@ -158,7 +158,12 @@ class ExecSession:
     timed_out: bool = False
     terminating: bool = False
     pty_master_fd: int | None = None
+    resource_cleanup: Callable[[], None] | None = field(default=None, repr=False)
     _stdin_closed: bool = False
+    _resource_cleanup_done: bool = field(default=False, repr=False)
+    _resource_cleanup_lock: threading.Lock = field(
+        default_factory=threading.Lock, repr=False
+    )
 
     @property
     def retained_bytes(self) -> int:
@@ -216,6 +221,16 @@ class ExecSession:
                 self.process.stdin.close()
             except OSError:
                 pass
+
+    def release_owned_resources(self) -> None:
+        with self._resource_cleanup_lock:
+            if self._resource_cleanup_done:
+                return
+            cleanup = self.resource_cleanup
+            self.resource_cleanup = None
+            if cleanup is not None:
+                cleanup()
+            self._resource_cleanup_done = True
 
     def snapshot_since_cursor(self, max_output_bytes: int) -> dict[str, Any]:
         self.refresh_status()
@@ -314,6 +329,7 @@ class ExecSession:
         self.closed = True
         if self.completed_at is None:
             self.completed_at = time.time()
+        self.release_owned_resources()
 
     def drain_readers(self, timeout: float = 0.2) -> None:
         deadline = time.time() + timeout

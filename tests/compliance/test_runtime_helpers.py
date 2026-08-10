@@ -18,7 +18,9 @@ from unittest.mock import patch
 
 from coding_tools_mcp import server as server_module
 from coding_tools_mcp import processes as processes_module
+from coding_tools_mcp.approval import ApprovalEngine
 from coding_tools_mcp.patching import AtomicPatchCommitter, FileBaseline, StagedFile
+from coding_tools_mcp.sandbox import ExecutionSandbox
 from coding_tools_mcp.server import (
     LANDLOCK_ACCESS_FS_IOCTL_DEV,
     LANDLOCK_ACCESS_FS_TRUNCATE,
@@ -589,16 +591,13 @@ class RuntimeHelperTests(unittest.TestCase):
                         "timeout_ms": 10000,
                     }
                 )
-                expected_tmp = (
-                    runtime.sandbox.temp_dir if runtime.sandbox is not None else None
-                )
             finally:
                 runtime.close()
 
             self.assertEqual(result.get("exit_code"), 0, result)
             output = str(result.get("stdout", "")).splitlines()
             self.assertGreaterEqual(len(output), 5, result)
-            self.assertIsNotNone(expected_tmp)
+            expected_tmp = Path(output[1])
             self.assertTrue(
                 output[0].startswith(str(expected_tmp) + "/devmcp-"), output
             )
@@ -834,10 +833,12 @@ class RuntimeHelperTests(unittest.TestCase):
             else:
                 self.assertIn("start_new_session", kwargs)
             self.assertEqual(kwargs.get("pass_fds"), (captured["read_fd"],))
-            self.assertEqual(
-                captured.get("write_roots"),
-                [runtime.sandbox.sandbox_dir, runtime.runtime_dir],
-            )
+            write_roots = captured.get("write_roots")
+            self.assertIsInstance(write_roots, list)
+            self.assertEqual(write_roots[1], runtime.runtime_dir)
+            self.assertEqual(write_roots[0].parent, runtime.runtime_dir / "sandboxes")
+            self.assertFalse(write_roots[0].exists())
+            self.assertIsNone(runtime.sandbox)
             popen_args = captured["args"]
             self.assertIsInstance(popen_args, tuple)
             argv = popen_args[0]
@@ -856,10 +857,184 @@ class RuntimeHelperTests(unittest.TestCase):
                         {"cmd": "printf ok", "timeout_ms": 5000, "yield_time_ms": 0}
                     )
 
+                write_roots = captured.get("write_roots")
+                self.assertIsInstance(write_roots, list)
+                self.assertEqual(write_roots[1], runtime.runtime_dir)
                 self.assertEqual(
-                    captured.get("write_roots"),
-                    [runtime.sandbox.sandbox_dir, runtime.runtime_dir],
+                    write_roots[0].parent, runtime.runtime_dir / "sandboxes"
                 )
+                self.assertFalse(write_roots[0].exists())
+                self.assertIsNone(runtime.sandbox)
+
+    def test_completed_execution_releases_owned_sandbox(self) -> None:
+        with TemporaryDirectory() as tmp:
+            runtime = Runtime(
+                Path(tmp), policy_profile="balanced", sandbox_backend="unsafe"
+            )
+            try:
+                result = runtime.run_task(
+                    {"task_id": "test.echo", "timeout_ms": 5000, "yield_time_ms": 5000}
+                )
+                self.assertEqual(result.get("status"), "exited", result)
+                self.assertEqual(result.get("exit_code"), 0, result)
+                self.assertIsNone(runtime.sandbox)
+                sandbox_root = runtime.runtime_dir / "sandboxes"
+                self.assertEqual(list(sandbox_root.glob("sandbox-*")), [])
+            finally:
+                runtime.close()
+
+    def test_failed_execution_releases_owned_sandbox(self) -> None:
+        with TemporaryDirectory() as tmp:
+            runtime = Runtime(
+                Path(tmp), permission_mode="trusted", sandbox_backend="unsafe"
+            )
+            try:
+                result = runtime.exec_command(
+                    {"cmd": "exit 7", "timeout_ms": 5000, "yield_time_ms": 5000}
+                )
+                self.assertEqual(result.get("status"), "exited", result)
+                self.assertEqual(result.get("exit_code"), 7, result)
+                self.assertIsNone(runtime.sandbox)
+                sandbox_root = runtime.runtime_dir / "sandboxes"
+                self.assertEqual(list(sandbox_root.glob("sandbox-*")), [])
+            finally:
+                runtime.close()
+
+    def test_repeated_executions_do_not_accumulate_sandboxes(self) -> None:
+        with TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            (workspace / "Makefile").write_text(
+                "test:\n\t@printf 'project-check-ok\\n'\n", encoding="utf-8"
+            )
+            runtime = Runtime(
+                workspace, policy_profile="balanced", sandbox_backend="unsafe"
+            )
+            try:
+                sandbox_root = runtime.runtime_dir / "sandboxes"
+                self.assertEqual(
+                    [item["id"] for item in runtime.project_checks({})["checks"]],
+                    ["test"],
+                )
+                for _ in range(4):
+                    result = runtime.run_project_check(
+                        {
+                            "check_id": "test",
+                            "timeout_ms": 5000,
+                            "yield_time_ms": 5000,
+                        }
+                    )
+                    self.assertEqual(result.get("exit_code"), 0, result)
+                    self.assertIn("project-check-ok", result.get("stdout", ""))
+                    self.assertIsNone(runtime.sandbox)
+                    self.assertEqual(list(sandbox_root.glob("sandbox-*")), [])
+            finally:
+                runtime.close()
+
+    def test_execution_exception_releases_owned_sandbox(self) -> None:
+        with TemporaryDirectory() as tmp:
+            runtime = Runtime(
+                Path(tmp), permission_mode="trusted", sandbox_backend="unsafe"
+            )
+            original_spawn = server_module.spawn_process
+
+            def fail_spawn(*args: object, **kwargs: object) -> object:
+                raise OSError("fixture spawn failure")
+
+            server_module.spawn_process = fail_spawn  # type: ignore[assignment]
+            try:
+                with self.assertRaises(OSError):
+                    runtime.exec_command(
+                        {"cmd": "printf unreachable", "timeout_ms": 5000}
+                    )
+                self.assertIsNone(runtime.sandbox)
+                sandbox_root = runtime.runtime_dir / "sandboxes"
+                self.assertEqual(list(sandbox_root.glob("sandbox-*")), [])
+            finally:
+                server_module.spawn_process = original_spawn  # type: ignore[assignment]
+                runtime.close()
+
+    def test_cancelled_execution_releases_owned_sandbox(self) -> None:
+        with TemporaryDirectory() as tmp:
+            runtime = Runtime(
+                Path(tmp), permission_mode="trusted", sandbox_backend="unsafe"
+            )
+            try:
+                started = runtime.exec_command(
+                    {"cmd": "sleep 30", "timeout_ms": 30000, "yield_time_ms": 0}
+                )
+                self.assertEqual(started.get("status"), "running", started)
+                session_id = str(started["session_id"])
+                sandbox = runtime.sandbox
+                self.assertIsNotNone(sandbox)
+                assert sandbox is not None
+                sandbox_path = sandbox.sandbox_dir
+                self.assertTrue(sandbox_path.is_dir())
+
+                runtime.cancel_session(session_id)
+
+                self.assertIsNone(runtime.sandbox)
+                self.assertFalse(sandbox_path.exists())
+            finally:
+                runtime.close()
+
+    def test_runtime_close_releases_running_sandbox(self) -> None:
+        with TemporaryDirectory() as tmp:
+            runtime = Runtime(
+                Path(tmp), permission_mode="trusted", sandbox_backend="unsafe"
+            )
+            started = runtime.exec_command(
+                {"cmd": "sleep 30", "timeout_ms": 30000, "yield_time_ms": 0}
+            )
+            self.assertEqual(started.get("status"), "running", started)
+            sandbox = runtime.sandbox
+            self.assertIsNotNone(sandbox)
+            assert sandbox is not None
+            sandbox_path = sandbox.sandbox_dir
+
+            runtime.close()
+
+            self.assertIsNone(runtime.sandbox)
+            self.assertFalse(sandbox_path.exists())
+
+    def test_sandbox_cleanup_cannot_escape_owned_temp_boundary(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            (workspace / "tracked.txt").write_text("tracked\n", encoding="utf-8")
+            owner_root = root / "owned-sandboxes"
+            outside = root / "outside"
+            outside.mkdir()
+            outside_file = outside / "keep.txt"
+            outside_file.write_text("keep\n", encoding="utf-8")
+
+            sandbox = ExecutionSandbox.create(workspace, owner_root=owner_root)
+            owned_path = sandbox.sandbox_dir
+            try:
+                sandbox.sandbox_dir = outside
+                sandbox.cleanup()
+                self.assertTrue(outside_file.is_file())
+            finally:
+                sandbox.sandbox_dir = owned_path
+                sandbox.cleanup()
+            self.assertFalse(owned_path.exists())
+
+    def test_sandbox_creation_interrupt_cleans_partial_owned_tree(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            (workspace / "tracked.txt").write_text("tracked\n", encoding="utf-8")
+            owner_root = root / "owned-sandboxes"
+
+            with patch.object(
+                ExecutionSandbox, "_sync", side_effect=KeyboardInterrupt()
+            ):
+                with self.assertRaises(KeyboardInterrupt):
+                    ExecutionSandbox.create(workspace, owner_root=owner_root)
+
+            self.assertEqual(list(owner_root.glob("sandbox-*")), [])
+            self.assertEqual(list(owner_root.glob(".*.owner")), [])
 
     def test_dangerously_skip_all_permissions_auto_grants_permission_gates(
         self,
@@ -1664,15 +1839,14 @@ Maven home: /usr/share/maven
                 "<project>\n"
                 f"  <{tag}>4.0.0</{tag}>\n"
                 "</project>\n"
-                "EOF"
+                "EOF\n"
+                "cat pom.xml"
             )
-            runtime.exec_command(
+            xml_result = runtime.exec_command(
                 {"cmd": xml_heredoc, "timeout_ms": 5000, "max_output_bytes": 4096}
             )
-            self.assertIn(
-                tag,
-                (runtime.sandbox.sandbox_dir / "pom.xml").read_text(encoding="utf-8"),
-            )
+            self.assertIn(tag, xml_result.get("stdout", ""))
+            self.assertIsNone(runtime.sandbox)
 
     def test_heredoc_payload_stripping_keeps_live_shell_code_scanned(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -1761,6 +1935,204 @@ Maven home: /usr/share/maven
                 log.get("commits", [])[0].get("subject"), "baseline fixture"
             )
 
+    def test_project_selection_scopes_operations_and_rejects_escape(self) -> None:
+        preflight_error = git_fixture_preflight_error()
+        if preflight_error is not None:
+            self.skipTest(preflight_error)
+        with TemporaryDirectory() as tmp:
+            library = Path(tmp) / "projects"
+            first = library / "first"
+            second = library / "nested" / "second"
+            first.mkdir(parents=True)
+            second.mkdir(parents=True)
+            (first / "tracked.txt").write_text("first\n", encoding="utf-8")
+            (second / "tracked.txt").write_text("second\n", encoding="utf-8")
+            init_git(first)
+            init_git(second)
+            runtime = Runtime(first, policy_profile="balanced", project_roots=[library])
+            try:
+                projects = runtime.list_projects({})["projects"]
+                self.assertEqual(
+                    {project["relative_path"] for project in projects},
+                    {"first", "nested/second"},
+                )
+                selected = runtime.select_project({"project": "first"})
+                self.assertEqual(selected["relative_path"], "first")
+                self.assertEqual(runtime.current_project({})["relative_path"], "first")
+                self.assertEqual(
+                    runtime.read_file({"path": "tracked.txt"})["content"], "first\n"
+                )
+                with self.assertRaises(ToolFailure) as sibling_escape:
+                    runtime.read_file({"path": "../nested/second/tracked.txt"})
+                self.assertEqual(
+                    sibling_escape.exception.code, "PATH_OUTSIDE_WORKSPACE"
+                )
+                if os.name != "nt":
+                    (first / "sibling-link").symlink_to(
+                        second, target_is_directory=True
+                    )
+                    with self.assertRaises(ToolFailure) as symlink_escape:
+                        runtime.read_file({"path": "sibling-link/tracked.txt"})
+                    self.assertEqual(symlink_escape.exception.code, "SYMLINK_ESCAPE")
+            finally:
+                runtime.close()
+
+    def test_active_project_is_runtime_session_scoped(self) -> None:
+        preflight_error = git_fixture_preflight_error()
+        if preflight_error is not None:
+            self.skipTest(preflight_error)
+        with TemporaryDirectory() as tmp:
+            library = Path(tmp) / "projects"
+            first = library / "first"
+            second = library / "second"
+            first.mkdir(parents=True)
+            second.mkdir(parents=True)
+            (first / "tracked.txt").write_text("first\n", encoding="utf-8")
+            (second / "tracked.txt").write_text("second\n", encoding="utf-8")
+            init_git(first)
+            init_git(second)
+            session_a = Runtime(
+                first, policy_profile="balanced", project_roots=[library]
+            )
+            session_b = Runtime(
+                first, policy_profile="balanced", project_roots=[library]
+            )
+            try:
+                session_a.select_project({"project": "first"})
+                session_b.select_project({"project": "second"})
+                self.assertEqual(
+                    session_a.current_project({})["relative_path"], "first"
+                )
+                self.assertEqual(
+                    session_b.current_project({})["relative_path"], "second"
+                )
+                self.assertEqual(session_a.workspace.root, first.resolve())
+                self.assertEqual(session_b.workspace.root, second.resolve())
+            finally:
+                session_a.close()
+                session_b.close()
+
+    def test_first_class_git_branch_commit_and_push_are_constrained(self) -> None:
+        preflight_error = git_fixture_preflight_error()
+        if preflight_error is not None:
+            self.skipTest(preflight_error)
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            remote = root / "remote.git"
+            repo.mkdir()
+            (repo / "tracked.txt").write_text("base\n", encoding="utf-8")
+            init_git(repo)
+            subprocess.run(["git", "init", "--bare", "-q", str(remote)], check=True)
+            subprocess.run(
+                ["git", "-C", str(repo), "remote", "add", "origin", str(remote)],
+                check=True,
+            )
+            with patch.dict(
+                os.environ,
+                {"DEVMCP_CONFIG_DIR": str(root / "config")},
+                clear=False,
+            ):
+                runtime = Runtime(repo, policy_profile="balanced", project_roots=[root])
+                try:
+                    branch = runtime.git_create_branch({"name": "feature/p0"})
+                    self.assertEqual(branch["branch"], "feature/p0")
+                    (repo / "tracked.txt").write_text("intended\n", encoding="utf-8")
+                    (repo / "unrelated.txt").write_text(
+                        "leave me dirty\n", encoding="utf-8"
+                    )
+                    committed = runtime.git_commit(
+                        {
+                            "message": "test: explicit path commit",
+                            "paths": ["tracked.txt"],
+                        }
+                    )
+                    self.assertEqual(committed["branch"], "feature/p0")
+                    self.assertEqual(len(committed["sha"]), 40)
+                    changed = subprocess.run(
+                        [
+                            "git",
+                            "-C",
+                            str(repo),
+                            "show",
+                            "--pretty=format:",
+                            "--name-only",
+                            "HEAD",
+                        ],
+                        check=True,
+                        text=True,
+                        stdout=subprocess.PIPE,
+                    ).stdout.strip()
+                    self.assertEqual(changed, "tracked.txt")
+                    status = subprocess.run(
+                        ["git", "-C", str(repo), "status", "--porcelain"],
+                        check=True,
+                        text=True,
+                        stdout=subprocess.PIPE,
+                    ).stdout
+                    self.assertIn("?? unrelated.txt", status)
+                    with self.assertRaises(ToolFailure):
+                        runtime.git_commit(
+                            {
+                                "message": "test: reject broad directory path",
+                                "paths": ["."],
+                            }
+                        )
+
+                    pending = runtime.git_push({})
+                    self.assertEqual(pending["status"], "approval_required")
+                    ApprovalEngine().approve(pending["approval_id"])
+                    pushed = runtime.git_push({"approval_id": pending["approval_id"]})
+                    self.assertEqual(pushed["branch"], "feature/p0")
+                    self.assertEqual(pushed["remote"], "origin")
+                    self.assertEqual(pushed["upstream"], "origin/feature/p0")
+                    with self.assertRaises(ToolFailure):
+                        runtime.git_push({"remote": "https://example.invalid/repo.git"})
+                    with self.assertRaises(ToolFailure):
+                        runtime.git_push({"force": True})
+                finally:
+                    runtime.close()
+
+    def test_uv_project_checks_never_fall_back_to_host_bare_pytest(self) -> None:
+        preflight_error = git_fixture_preflight_error()
+        if preflight_error is not None:
+            self.skipTest(preflight_error)
+        with TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "uv-project"
+            repo.mkdir()
+            (repo / "tracked.txt").write_text("base\n", encoding="utf-8")
+            init_git(repo)
+            (repo / "pyproject.toml").write_text(
+                "[project]\nname='fixture'\nversion='0.0.0'\n", encoding="utf-8"
+            )
+            (repo / "uv.lock").write_text("version = 1\n", encoding="utf-8")
+            (repo / "tests").mkdir()
+            runtime = Runtime(
+                repo, policy_profile="balanced", project_roots=[Path(tmp)]
+            )
+            try:
+                checks = runtime.project_checks({})["checks"]
+                test_check = next(check for check in checks if check["id"] == "test")
+                self.assertEqual(test_check["environment"], "uv")
+                self.assertEqual(
+                    test_check["argv"][:5],
+                    ["uv", "run", "--offline", "--frozen", "--no-sync"],
+                )
+                self.assertNotEqual(test_check["argv"][0], "pytest")
+            finally:
+                runtime.close()
+
+    def test_broken_generic_git_tasks_are_not_advertised(self) -> None:
+        with TemporaryDirectory() as tmp:
+            runtime = Runtime(Path(tmp), policy_profile="balanced")
+            try:
+                self.assertEqual(runtime.list_tasks({"category": "git"})["tasks"], [])
+                with self.assertRaises(ToolFailure) as missing:
+                    runtime.run_task({"task_id": "git.status"})
+                self.assertEqual(missing.exception.code, "NOT_FOUND")
+            finally:
+                runtime.close()
+
 
 class FakeReadonlyAnnotationTests(unittest.TestCase):
     """The tools/list annotation override exists for clients that gate on
@@ -1830,16 +2202,14 @@ class FakeReadonlyAnnotationTests(unittest.TestCase):
             )
             result = runtime.exec_command(
                 {
-                    "cmd": "echo ran > ran.txt",
+                    "cmd": "echo ran > ran.txt && cat ran.txt",
                     "timeout_ms": 30000,
                     "yield_time_ms": 30000,
                 }
             )
             self.assertEqual(result.get("status"), "exited", result)
-            self.assertTrue(
-                (runtime.sandbox.sandbox_dir / "ran.txt").exists(),
-                "read-only annotation must not stop execution",
-            )
+            self.assertEqual(result.get("stdout"), "ran\n")
+            self.assertIsNone(runtime.sandbox)
 
     def test_override_is_reported_by_check_exec_environment(self) -> None:
         with TemporaryDirectory() as tmp:
