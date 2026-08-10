@@ -20,7 +20,7 @@ from typing import Any
 
 import tomllib
 
-from .policy import CAPABILITIES, DEFAULT_PROFILE, effective_rules
+from .policy import CAPABILITIES, DEFAULT_PROFILE, PROFILE_NAMES, effective_rules
 
 CONFIG_SCHEMA_VERSION = 1
 PUBLIC_CONFIG_ENV = "DEVMCP_CONFIG_DIR"
@@ -200,8 +200,8 @@ def validate_config(config: dict[str, Any]) -> None:
     ):
         raise ValueError("workspaces must be a list of absolute paths")
     profile = str(config.get("profile", DEFAULT_PROFILE)).lower()
-    if profile not in {"safe", "balanced", "power", "custom"}:
-        raise ValueError("profile must be safe, balanced, power, or custom")
+    if profile not in PROFILE_NAMES:
+        raise ValueError(f"profile must be one of: {', '.join(PROFILE_NAMES)}")
     patch = config.get("patch", {})
     if (
         int(patch.get("max_removed_lines", 0)) < 0
