@@ -53,6 +53,7 @@ REQUIRED_TOOLS = (
     "git_switch_branch",
     "git_fetch",
     "git_pull",
+    "git_merge_remote_branch",
     "git_delete_branch",
     "git_delete_remote_branch",
     "git_commit",

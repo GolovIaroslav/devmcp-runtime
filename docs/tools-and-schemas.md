@@ -11,7 +11,7 @@ app remains a draft.
 
 ## Fixed inventory
 
-The default catalog contains exactly 52 tools:
+The default catalog contains exactly 53 tools:
 
 - `server_info`: Server info.
 - `health`: Health check.
@@ -44,6 +44,7 @@ The default catalog contains exactly 52 tools:
 - `git_switch_branch`: Switch to an existing local branch in the selected repository.
 - `git_fetch`: Fetch and prune one configured remote.
 - `git_pull`: Fast-forward only the current branch from one configured remote.
+- `git_merge_remote_branch`: Merge a fetched configured-remote branch into the current clean branch and abort automatically on conflicts.
 - `git_delete_branch`: Safely delete one merged local branch.
 - `git_delete_remote_branch`: Delete one branch from a configured remote.
 - `git_commit`: Commit only explicitly named paths.
@@ -66,7 +67,7 @@ The default catalog contains exactly 52 tools:
 - `get_default_cwd`: Get default cwd.
 - `set_default_cwd`: Set default cwd.
 `view_image` may be disabled when an installation cannot accept binary image
-content. That capability gate is not a tool profile. The other 51 tools are
+content. That capability gate is not a tool profile. The other 52 tools are
 always advertised, and `listChanged` is `false`.
 
 `service_status` and `service_doctor` execute only fixed DevMCP operator
@@ -147,8 +148,10 @@ rejects force push, withholds raw push output on failure, and remains controlled
 by the `git.push` policy capability.
 
 `git_fetch` always uses `--prune`; `git_pull` always uses `--ff-only` and refuses
-to run with tracked or staged worktree changes. Both are controlled by
-`git.sync`. Local branch deletion uses only `git branch -d`, never `-D`. Remote
+to run with tracked or staged worktree changes. `git_merge_remote_branch` also
+requires a clean tracked/staged worktree, accepts only a fetched branch from a
+configured remote, and runs `git merge --abort` on failure. These operations are
+controlled by `git.sync`. Local branch deletion uses only `git branch -d`, never `-D`. Remote
 branch deletion accepts only a configured remote and is controlled by
 `git.push`.
 

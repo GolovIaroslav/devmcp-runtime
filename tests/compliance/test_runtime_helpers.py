@@ -2498,6 +2498,10 @@ Maven home: /usr/share/maven
                 ["git", "-C", str(repo), "remote", "add", "origin", str(remote)],
                 check=True,
             )
+            subprocess.run(
+                ["git", "-C", str(repo), "push", "-q", "origin", "HEAD:main"],
+                check=True,
+            )
             with patch.dict(
                 os.environ,
                 {"DEVMCP_CONFIG_DIR": str(root / "config")},
@@ -2573,6 +2577,19 @@ Maven home: /usr/share/maven
                     )
                     self.assertEqual(pulled["result"], "fast_forwarded")
                     self.assertEqual(pulled["branch"], "feature/p0")
+
+                    pending_merge = runtime.git_merge_remote_branch({"branch": "main"})
+                    self.assertEqual(pending_merge["status"], "approval_required")
+                    ApprovalEngine().approve(pending_merge["approval_id"])
+                    merged = runtime.git_merge_remote_branch(
+                        {
+                            "branch": "main",
+                            "approval_id": pending_merge["approval_id"],
+                        }
+                    )
+                    self.assertEqual(merged["result"], "merged")
+                    self.assertEqual(merged["merged_branch"], "main")
+                    self.assertEqual(merged["branch"], "feature/p0")
 
                     runtime.git_create_branch({"name": "scratch/delete-me"})
                     runtime.git_switch_branch({"name": "feature/p0"})

@@ -829,6 +829,12 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         destructive=True,
         open_world=True,
     ),
+    "git_merge_remote_branch": ToolSpec(
+        title="Merge remote Git branch",
+        description="Merge one branch from a configured remote into the current clean branch; abort automatically if conflicts occur.",
+        destructive=True,
+        open_world=True,
+    ),
     "git_delete_branch": ToolSpec(
         title="Delete local Git branch",
         description="Safely delete one merged local branch; force deletion is not supported.",
@@ -5818,6 +5824,75 @@ class Runtime:
             "result": "fast_forwarded",
         }
 
+    def git_merge_remote_branch(self, args: dict[str, Any]) -> dict[str, Any]:
+        git, git_env = self._require_selected_git_repo()
+        current = self._git_current_branch(git, git_env)
+        remote = self._configured_git_remote(git, git_env, args.get("remote", "origin"))
+        branch = self._validate_branch_name(
+            str(args.get("branch", "")).strip(), git, git_env
+        )
+        dirty = self._run_git_text(
+            [
+                git,
+                "-C",
+                str(self.workspace.root),
+                "status",
+                "--porcelain=v1",
+                "--untracked-files=no",
+            ],
+            timeout=10,
+            env=git_env,
+        )
+        if dirty.returncode != 0:
+            raise ToolFailure(
+                "GIT_ERROR", "Unable to inspect Git worktree state.", category="runtime"
+            )
+        if dirty.stdout.strip():
+            raise ToolFailure(
+                "INVALID_STATE",
+                "Tracked or staged changes must be clean before git_merge_remote_branch.",
+                category="conflict",
+            )
+        remote_ref = f"refs/remotes/{remote}/{branch}"
+        if not self._git_rev_parse(self.workspace.root, remote_ref, env=git_env):
+            raise ToolFailure(
+                "NOT_FOUND",
+                "Remote branch ref is not available locally; run git_fetch first.",
+                category="not_found",
+                details={"remote": remote, "branch": branch},
+            )
+        pending = self._profile_authorize_operation(
+            "git.sync", args, f"git merge --no-edit {remote}/{branch} into {current}"
+        )
+        if pending is not None:
+            return pending
+        before = self._git_rev_parse(self.workspace.root, "HEAD", env=git_env)
+        completed = self._run_git_text(
+            [git, "-C", str(self.workspace.root), "merge", "--no-edit", remote_ref],
+            timeout=120,
+            env=git_env,
+        )
+        if completed.returncode != 0:
+            self._run_git_text(
+                [git, "-C", str(self.workspace.root), "merge", "--abort"],
+                timeout=30,
+                env=git_env,
+            )
+            raise ToolFailure(
+                "GIT_CONFLICT",
+                "Git merge failed and was aborted; the pre-merge branch state was restored.",
+                category="conflict",
+                details={"remote": remote, "branch": branch, "before": before},
+            )
+        return {
+            "branch": current,
+            "remote": remote,
+            "merged_branch": branch,
+            "before": before,
+            "sha": self._git_rev_parse(self.workspace.root, "HEAD", env=git_env),
+            "result": "merged",
+        }
+
     def git_delete_branch(self, args: dict[str, Any]) -> dict[str, Any]:
         git, git_env = self._require_selected_git_repo()
         name = self._validate_branch_name(
@@ -8551,6 +8626,14 @@ def input_schemas() -> dict[str, dict[str, Any]]:
         ),
         "git_pull": object_schema(
             {"remote": {**string, "default": "origin"}, "approval_id": string}
+        ),
+        "git_merge_remote_branch": object_schema(
+            {
+                "remote": {**string, "default": "origin"},
+                "branch": {**string, "minLength": 1},
+                "approval_id": string,
+            },
+            ["branch"],
         ),
         "git_delete_branch": object_schema(
             {"name": {**string, "minLength": 1}, "approval_id": string}, ["name"]

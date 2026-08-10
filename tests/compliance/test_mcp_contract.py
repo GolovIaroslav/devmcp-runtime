@@ -158,6 +158,7 @@ class MCPContractTests(ComplianceTestCase):
             "git_switch_branch": (False, True, False, False),
             "git_fetch": (False, True, False, True),
             "git_pull": (False, True, False, True),
+            "git_merge_remote_branch": (False, True, False, True),
             "git_delete_branch": (False, True, False, False),
             "git_delete_remote_branch": (False, True, False, True),
             "git_commit": (False, True, False, False),
