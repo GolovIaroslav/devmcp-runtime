@@ -147,6 +147,22 @@ class HTTPSessionManager:
         for record in records:
             _close_runtime(record.runtime)
 
+    def stats(self) -> dict[str, int]:
+        """Return bounded session-capacity telemetry without exposing session IDs."""
+
+        with self._lock:
+            records = list(self._sessions.values())
+            return {
+                "capacity": MAX_HTTP_SESSIONS,
+                "total": len(records),
+                "creating": self._creating,
+                "active_sessions": sum(
+                    1 for record in records if record.active_requests > 0
+                ),
+                "active_requests": sum(record.active_requests for record in records),
+                "closing": sum(1 for record in records if record.closing),
+            }
+
     def close(self) -> None:
         with self._lock:
             self._closed = True

@@ -24,6 +24,9 @@ returns.
 - Streamable HTTP uses `POST /mcp`. `DELETE /mcp` terminates the selected
   `Mcp-Session-Id`. Because this server does not provide an SSE stream,
   `GET /mcp` and `HEAD /mcp` return `405`.
+- `/healthz` and `/readyz` include bounded `http_sessions` capacity telemetry:
+  capacity, total records, sessions/requests currently active, records being
+  created, and records closing. Session identifiers are never exposed there.
 - Each successful HTTP `initialize` creates an independent runtime. Its cwd,
   process sessions, retained output, and runtime directories are not shared
   with other MCP sessions.
@@ -184,7 +187,7 @@ survive tunnel churn. Forwarded headers are ignored unless
 
 ## Stable tool inventory
 
-The default catalog has 41 tools, including `view_image`. Setting
+The default catalog has 48 tools, including `view_image`. Setting
 `CODING_TOOLS_MCP_ENABLE_VIEW_IMAGE=0` is the sole installation capability gate
 and removes only that optional binary-content tool. It is not a tool profile.
 
@@ -203,6 +206,35 @@ Annotations: `{"title":"Server info","readOnlyHint":true,"destructiveHint":false
 Returns server version, protocol, workspace, cwd, fixed tool count, auth state,
 permission mode, runtime directories, project-context metadata, exec policy,
 and the auto-allow/approval/deny permission policy.
+
+### service_status
+
+Inputs: none.
+
+Annotations: `{"title":"DevMCP service status","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}`.
+
+Runs the fixed host-side `devmcp status` diagnostic outside the execution
+sandbox and returns its bounded stdout/stderr and exit code.
+
+### service_doctor
+
+Inputs: none.
+
+Annotations: `{"title":"DevMCP service doctor","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}`.
+
+Runs the fixed host-side `devmcp doctor` diagnostic outside the execution
+sandbox and returns its bounded stdout/stderr and exit code.
+
+### service_restart
+
+Inputs: `"approval_id"`.
+
+Annotations: `{"title":"Restart DevMCP services","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":false}`.
+
+Controlled by `service.manage`. Schedules a delayed trusted `devmcp restart` in
+a separate user-systemd transient unit so the current tool response can complete
+before the serving process is replaced. The CLI restarts MCP first, waits for a
+successful MCP health probe, then restarts the tunnel if its unit is installed.
 
 ### check_exec_environment
 
@@ -427,6 +459,45 @@ Annotations: `{"title":"Switch Git branch","readOnlyHint":false,"destructiveHint
 
 Switches only to an existing validated local branch in the selected repository.
 
+### git_fetch
+
+Inputs: `"remote"`, `"approval_id"`.
+
+Annotations: `{"title":"Fetch Git remote","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
+
+Fetches one configured remote using `--prune`. Arbitrary remote URLs are not
+accepted. Controlled by `git.sync`; failed fetch output is withheld to avoid
+credential disclosure.
+
+### git_pull
+
+Inputs: `"remote"`, `"approval_id"`.
+
+Annotations: `{"title":"Pull Git branch","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
+
+Pulls the current branch from one configured remote using `--ff-only` only.
+Tracked or staged worktree changes cause `INVALID_STATE` before network access.
+Controlled by `git.sync`.
+
+### git_delete_branch
+
+Inputs: `"name"`, `"approval_id"`.
+
+Annotations: `{"title":"Delete local Git branch","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":false}`.
+
+Deletes only a non-current validated local branch using `git branch -d`; force
+deletion is not exposed. Controlled by `git.branch`.
+
+### git_delete_remote_branch
+
+Inputs: `"name"`, `"remote"`, `"approval_id"`.
+
+Annotations: `{"title":"Delete remote Git branch","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
+
+Deletes one validated branch from a configured remote. Arbitrary remote URLs are
+rejected. Controlled by `git.push`; failure output is withheld to avoid
+credential disclosure.
+
 ### git_commit
 
 Inputs: `"message"`, `"paths"`, `"approval_id"`.
@@ -444,8 +515,8 @@ Inputs: `"remote"`, `"force"`, `"approval_id"`.
 Annotations: `{"title":"Git push","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
 
 Pushes the current branch only to a configured remote name, normally `origin`.
-Arbitrary URL remotes and force push are rejected. `git.push` remains
-approval-gated by policy, and failed push output is withheld to avoid credential
+Arbitrary URL remotes and force push are rejected. `git.push` is controlled by
+the active policy profile, and failed push output is withheld to avoid credential
 disclosure.
 
 ### view_image

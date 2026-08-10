@@ -16,6 +16,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -101,8 +102,27 @@ def _mcp_call(
         )
 
 
+def _mcp_delete(url: str, token_file: Path, session_id: str) -> None:
+    token = token_file.read_text(encoding="utf-8").strip()
+    if not token:
+        return
+    request = urllib.request.Request(
+        url,
+        headers={
+            "Accept": "application/json, text/event-stream",
+            "MCP-Protocol-Version": PROTOCOL_VERSION,
+            "Mcp-Session-Id": session_id,
+            "Authorization": f"Bearer {token}",
+        },
+        method="DELETE",
+    )
+    with urllib.request.urlopen(request, timeout=3):
+        pass
+
+
 def _mcp_health(config: dict[str, Any], selected: ConfigPaths) -> bool:
     url = f"http://{config.get('mcp_host', '127.0.0.1')}:{int(config.get('mcp_port', 47157))}/mcp"
+    session_id: str | None = None
     try:
         initialize, session_id = _mcp_call(
             url,
@@ -151,6 +171,27 @@ def _mcp_health(config: dict[str, Any], selected: ConfigPaths) -> bool:
         urllib.error.URLError,
     ):
         return False
+    finally:
+        if session_id:
+            try:
+                _mcp_delete(url, selected.mcp_token, session_id)
+            except (OSError, RuntimeError, urllib.error.URLError):
+                pass
+
+
+def _unit_loaded(unit: str) -> bool:
+    result = _systemctl("show", "--property=LoadState", "--value", unit)
+    return result.returncode == 0 and result.stdout.strip() != "not-found"
+
+
+def _wait_for_mcp_health(timeout_seconds: float = 30.0) -> bool:
+    selected, config = _config()
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        if _active(MCP_SERVICE) and _mcp_health(config, selected):
+            return True
+        time.sleep(0.25)
+    return False
 
 
 def _tunnel_status(selected: ConfigPaths) -> dict[str, Any]:
@@ -224,9 +265,24 @@ def _status(_: argparse.Namespace) -> int:
 
 
 def _service_action(action: str) -> int:
-    units = [MCP_SERVICE, TUNNEL_SERVICE]
+    tunnel_loaded = _unit_loaded(TUNNEL_SERVICE)
+    units = [MCP_SERVICE, *([TUNNEL_SERVICE] if tunnel_loaded else [])]
     if action == "stop":
         units.reverse()
+    if action == "restart":
+        result = _systemctl("restart", MCP_SERVICE)
+        if result.returncode != 0:
+            sys.stderr.write(result.stderr)
+            return result.returncode
+        if not _wait_for_mcp_health():
+            print("MCP health did not recover after restart", file=sys.stderr)
+            return 1
+        if tunnel_loaded:
+            result = _systemctl("restart", TUNNEL_SERVICE)
+            if result.returncode != 0:
+                sys.stderr.write(result.stderr)
+                return result.returncode
+        return 0
     for unit in units:
         result = _systemctl(action, unit)
         if result.returncode != 0:
@@ -368,7 +424,9 @@ def _policy_command(args: argparse.Namespace) -> int:
     if args.policy_action == "profile":
         profile = args.profile.lower()
         if profile not in PROFILE_NAMES:
-            print("profile must be safe, balanced, power, or custom", file=sys.stderr)
+            print(
+                f"profile must be one of: {', '.join(PROFILE_NAMES)}", file=sys.stderr
+            )
             return 2
         config["profile"] = profile
         save_config(config, selected)

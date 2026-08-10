@@ -126,6 +126,9 @@ class MCPContractTests(ComplianceTestCase):
     def test_tool_annotations_match_mcp_sdk_hint_shape(self) -> None:
         expected = {
             "server_info": (True, False, True, False),
+            "service_status": (True, False, True, False),
+            "service_doctor": (True, False, True, False),
+            "service_restart": (False, True, False, False),
             "list_projects": (True, False, True, False),
             "select_project": (False, False, True, False),
             "current_project": (True, False, True, False),
@@ -150,6 +153,10 @@ class MCPContractTests(ComplianceTestCase):
             "git_blame": (True, False, True, False),
             "git_create_branch": (False, True, False, False),
             "git_switch_branch": (False, True, False, False),
+            "git_fetch": (False, True, False, True),
+            "git_pull": (False, True, False, True),
+            "git_delete_branch": (False, True, False, False),
+            "git_delete_remote_branch": (False, True, False, True),
             "git_commit": (False, True, False, False),
             "git_push": (False, True, False, True),
             "view_image": (True, False, True, False),

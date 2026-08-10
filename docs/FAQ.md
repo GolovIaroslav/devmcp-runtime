@@ -8,6 +8,11 @@
 capability matrix inside the selected sandbox; bwrap, path validation,
 authentication, and loopback defaults still apply.
 
+**What is Autonomous?** It is an explicit unattended-development profile. It
+auto-authorizes every implemented DevMCP capability and adds first-class
+host-side service diagnostics/restart, while keeping privilege escalation and
+the runtime's hard workspace/sandbox boundaries denied.
+
 **Where are secrets?** Outside the workspace under
 `~/.config/devmcp-runtime/secrets/`, with `0600` permissions.
 

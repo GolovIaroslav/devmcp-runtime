@@ -2346,6 +2346,47 @@ Maven home: /usr/share/maven
                     self.assertEqual(pushed["branch"], "feature/p0")
                     self.assertEqual(pushed["remote"], "origin")
                     self.assertEqual(pushed["upstream"], "origin/feature/p0")
+
+                    pending_fetch = runtime.git_fetch({})
+                    self.assertEqual(pending_fetch["status"], "approval_required")
+                    ApprovalEngine().approve(pending_fetch["approval_id"])
+                    fetched = runtime.git_fetch(
+                        {"approval_id": pending_fetch["approval_id"]}
+                    )
+                    self.assertEqual(fetched["result"], "fetched_and_pruned")
+
+                    pending_pull = runtime.git_pull({})
+                    self.assertEqual(pending_pull["status"], "approval_required")
+                    ApprovalEngine().approve(pending_pull["approval_id"])
+                    pulled = runtime.git_pull(
+                        {"approval_id": pending_pull["approval_id"]}
+                    )
+                    self.assertEqual(pulled["result"], "fast_forwarded")
+                    self.assertEqual(pulled["branch"], "feature/p0")
+
+                    runtime.git_create_branch({"name": "scratch/delete-me"})
+                    runtime.git_switch_branch({"name": "feature/p0"})
+                    deleted_local = runtime.git_delete_branch(
+                        {"name": "scratch/delete-me"}
+                    )
+                    self.assertEqual(deleted_local["result"], "deleted_local")
+                    with self.assertRaises(ToolFailure):
+                        runtime.git_delete_branch({"name": "feature/p0"})
+
+                    pending_remote_delete = runtime.git_delete_remote_branch(
+                        {"name": "feature/p0"}
+                    )
+                    self.assertEqual(
+                        pending_remote_delete["status"], "approval_required"
+                    )
+                    ApprovalEngine().approve(pending_remote_delete["approval_id"])
+                    deleted_remote = runtime.git_delete_remote_branch(
+                        {
+                            "name": "feature/p0",
+                            "approval_id": pending_remote_delete["approval_id"],
+                        }
+                    )
+                    self.assertEqual(deleted_remote["result"], "deleted_remote")
                     with self.assertRaises(ToolFailure):
                         runtime.git_push({"remote": "https://example.invalid/repo.git"})
                     with self.assertRaises(ToolFailure):

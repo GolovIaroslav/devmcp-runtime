@@ -11,7 +11,7 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 
-PROFILE_NAMES = ("safe", "balanced", "power", "custom")
+PROFILE_NAMES = ("safe", "balanced", "power", "autonomous", "custom")
 DECISIONS = ("auto", "ask", "deny")
 DEFAULT_PROFILE = "balanced"
 UNIMPLEMENTED_CAPABILITIES = frozenset({"agent.delegate"})
@@ -33,8 +33,10 @@ CAPABILITIES = (
     "server.public",
     "git.branch",
     "git.commit",
+    "git.sync",
     "git.push",
     "env.sensitive",
+    "service.manage",
     "agent.delegate",
 )
 
@@ -77,9 +79,11 @@ _SAFE_ASK = {
     "server.public",
     "git.branch",
     "git.commit",
+    "git.sync",
     "git.push",
     "workspace.patch_destructive",
     "env.sensitive",
+    "service.manage",
 }
 
 _PROFILES: dict[str, dict[str, str]] = {
@@ -105,10 +109,17 @@ _PROFILES: dict[str, dict[str, str]] = {
             "server.loopback",
             "git.branch",
             "git.commit",
+            "git.sync",
             "workspace.patch_destructive",
+            "service.manage",
         },
         {"git.push", "server.public", "env.sensitive"},
         _FLOOR_DENY,
+    ),
+    "autonomous": _profile(
+        set(CAPABILITIES) - set(UNIMPLEMENTED_CAPABILITIES),
+        set(),
+        set(UNIMPLEMENTED_CAPABILITIES),
     ),
 }
 

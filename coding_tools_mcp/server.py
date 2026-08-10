@@ -96,6 +96,9 @@ SERVER_NAME = "devmcp-runtime"
 SERVER_TITLE = "DevMCP Runtime"
 TOOL_SCHEMA_VERSION = "1.0"
 MCP_ENDPOINT_PATH = "/mcp"
+DEVMCP_MCP_SERVICE = "devmcp-runtime.service"
+DEVMCP_TUNNEL_SERVICE = "devmcp-tunnel.service"
+DEVMCP_SOURCE_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_EXCLUDED_NAMES = {
     ".git",
     ".reference",
@@ -690,6 +693,23 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         read_only=True,
         idempotent=True,
     ),
+    "service_status": ToolSpec(
+        title="DevMCP service status",
+        description="Run the host-side DevMCP status diagnostic without entering the execution sandbox.",
+        read_only=True,
+        idempotent=True,
+    ),
+    "service_doctor": ToolSpec(
+        title="DevMCP service doctor",
+        description="Run the host-side DevMCP doctor diagnostic without entering the execution sandbox.",
+        read_only=True,
+        idempotent=True,
+    ),
+    "service_restart": ToolSpec(
+        title="Restart DevMCP services",
+        description="Schedule a host-side restart of the DevMCP MCP and tunnel user services after this tool response is returned.",
+        destructive=True,
+    ),
     "list_projects": ToolSpec(
         title="List projects",
         description="Discover Git repositories under operator-approved project roots.",
@@ -778,6 +798,29 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         title="Switch Git branch",
         description="Switch to an existing local branch in the selected repository.",
         destructive=True,
+    ),
+    "git_fetch": ToolSpec(
+        title="Fetch Git remote",
+        description="Fetch and prune one configured remote for the selected repository.",
+        destructive=True,
+        open_world=True,
+    ),
+    "git_pull": ToolSpec(
+        title="Pull Git branch",
+        description="Fast-forward only the current branch from one configured remote.",
+        destructive=True,
+        open_world=True,
+    ),
+    "git_delete_branch": ToolSpec(
+        title="Delete local Git branch",
+        description="Safely delete one merged local branch; force deletion is not supported.",
+        destructive=True,
+    ),
+    "git_delete_remote_branch": ToolSpec(
+        title="Delete remote Git branch",
+        description="Delete one branch from a configured remote; arbitrary remote URLs are rejected.",
+        destructive=True,
+        open_world=True,
     ),
     "git_commit": ToolSpec(
         title="Git commit",
@@ -1740,13 +1783,26 @@ class Runtime:
             shutil.rmtree(self.runtime_dir, ignore_errors=True)
 
     def http_session_evictable(self) -> bool:
-        """Return whether pressure eviction can close this Runtime safely."""
+        """Return whether pressure eviction can close this Runtime safely.
+
+        HTTPSessionManager calls this only for records with zero active HTTP
+        requests. With no starting/live exec sessions, a remaining sandbox lease
+        is therefore orphaned bookkeeping rather than live work. Reclaim it so a
+        stale counter cannot permanently consume one HTTP-session capacity slot.
+        """
         self._prune_sessions()
         with self.sessions_lock:
-            if self._closed or self.starting_sessions or self.sessions:
+            if self.starting_sessions or self.sessions:
                 return False
+        cleanup = None
         with self.sandbox_lock:
-            return self.sandbox_users == 0
+            if self.sandbox_users > 0:
+                cleanup = self.sandbox
+                self.sandbox = None
+                self.sandbox_users = 0
+        if cleanup is not None:
+            cleanup.cleanup()
+        return True
 
     def _ensure_runtime_dirs(self) -> None:
         candidates = [self.runtime_dir]
@@ -3561,6 +3617,8 @@ class Runtime:
             required.add("git.branch")
         if re.search(r"\bgit\s+commit\b", compact):
             required.add("git.commit")
+        if re.search(r"\bgit\s+(?:fetch|pull|remote\s+prune)\b", compact):
+            required.add("git.sync")
         if re.search(r"\bgit\s+push\b", compact):
             required.add("git.push")
         return required
@@ -5546,6 +5604,163 @@ class Runtime:
             "sha": self._git_rev_parse(self.workspace.root, "HEAD", env=git_env),
         }
 
+    def _configured_git_remote(
+        self, git: str, git_env: dict[str, str], raw_remote: Any
+    ) -> str:
+        remote = str(raw_remote or "origin").strip() or "origin"
+        if len(remote) > 256 or "\x00" in remote or remote.startswith("-"):
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                "Git remote must be a bounded configured remote name.",
+                category="validation",
+            )
+        remotes = self._run_git_text(
+            [git, "-C", str(self.workspace.root), "remote"], timeout=10, env=git_env
+        )
+        configured = set(remotes.stdout.split()) if remotes.returncode == 0 else set()
+        if remote not in configured:
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                "Git remote must be the name of a configured repository remote.",
+                category="validation",
+            )
+        return remote
+
+    def git_fetch(self, args: dict[str, Any]) -> dict[str, Any]:
+        git, git_env = self._require_selected_git_repo()
+        remote = self._configured_git_remote(git, git_env, args.get("remote", "origin"))
+        pending = self._profile_authorize_operation(
+            "git.sync", args, f"git fetch --prune {remote}"
+        )
+        if pending is not None:
+            return pending
+        completed = self._run_git_text(
+            [git, "-C", str(self.workspace.root), "fetch", "--prune", remote],
+            timeout=120,
+            env=git_env,
+        )
+        if completed.returncode != 0:
+            raise ToolFailure(
+                "GIT_ERROR",
+                "git fetch failed; output is withheld to avoid exposing credentials.",
+                category="runtime",
+                details={"remote": remote},
+            )
+        return {"remote": remote, "result": "fetched_and_pruned"}
+
+    def git_pull(self, args: dict[str, Any]) -> dict[str, Any]:
+        git, git_env = self._require_selected_git_repo()
+        branch = self._git_current_branch(git, git_env)
+        remote = self._configured_git_remote(git, git_env, args.get("remote", "origin"))
+        dirty = self._run_git_text(
+            [
+                git,
+                "-C",
+                str(self.workspace.root),
+                "status",
+                "--porcelain=v1",
+                "--untracked-files=no",
+            ],
+            timeout=10,
+            env=git_env,
+        )
+        if dirty.returncode != 0:
+            raise ToolFailure(
+                "GIT_ERROR", "Unable to inspect Git worktree state.", category="runtime"
+            )
+        if dirty.stdout.strip():
+            raise ToolFailure(
+                "INVALID_STATE",
+                "Tracked or staged changes must be clean before git_pull.",
+                category="conflict",
+            )
+        pending = self._profile_authorize_operation(
+            "git.sync", args, f"git pull --ff-only {remote} {branch}"
+        )
+        if pending is not None:
+            return pending
+        completed = self._run_git_text(
+            [
+                git,
+                "-C",
+                str(self.workspace.root),
+                "pull",
+                "--ff-only",
+                remote,
+                branch,
+            ],
+            timeout=120,
+            env=git_env,
+        )
+        if completed.returncode != 0:
+            raise ToolFailure(
+                "GIT_ERROR",
+                "git pull --ff-only failed; output is withheld to avoid exposing credentials.",
+                category="runtime",
+                details={"remote": remote, "branch": branch},
+            )
+        return {
+            "branch": branch,
+            "remote": remote,
+            "sha": self._git_rev_parse(self.workspace.root, "HEAD", env=git_env),
+            "result": "fast_forwarded",
+        }
+
+    def git_delete_branch(self, args: dict[str, Any]) -> dict[str, Any]:
+        git, git_env = self._require_selected_git_repo()
+        name = self._validate_branch_name(
+            str(args.get("name", "")).strip(), git, git_env
+        )
+        current = self._git_current_branch(git, git_env)
+        if name == current:
+            raise ToolFailure(
+                "INVALID_STATE",
+                "Cannot delete the currently checked out branch.",
+                category="conflict",
+            )
+        pending = self._profile_authorize_operation(
+            "git.branch", args, f"git delete local branch {name}"
+        )
+        if pending is not None:
+            return pending
+        completed = self._run_git_text(
+            [git, "-C", str(self.workspace.root), "branch", "-d", name],
+            timeout=30,
+            env=git_env,
+        )
+        if completed.returncode != 0:
+            raise ToolFailure(
+                "GIT_ERROR",
+                completed.stderr.strip() or "git branch -d failed",
+                category="runtime",
+            )
+        return {"branch": name, "result": "deleted_local"}
+
+    def git_delete_remote_branch(self, args: dict[str, Any]) -> dict[str, Any]:
+        git, git_env = self._require_selected_git_repo()
+        name = self._validate_branch_name(
+            str(args.get("name", "")).strip(), git, git_env
+        )
+        remote = self._configured_git_remote(git, git_env, args.get("remote", "origin"))
+        pending = self._profile_authorize_operation(
+            "git.push", args, f"git push {remote} --delete {name}"
+        )
+        if pending is not None:
+            return pending
+        completed = self._run_git_text(
+            [git, "-C", str(self.workspace.root), "push", remote, "--delete", name],
+            timeout=120,
+            env=git_env,
+        )
+        if completed.returncode != 0:
+            raise ToolFailure(
+                "GIT_ERROR",
+                "remote branch deletion failed; output is withheld to avoid exposing credentials.",
+                category="runtime",
+                details={"remote": remote, "branch": name},
+            )
+        return {"branch": name, "remote": remote, "result": "deleted_remote"}
+
     def _explicit_git_paths(self, raw_paths: Any) -> list[str]:
         if not isinstance(raw_paths, list) or not raw_paths or len(raw_paths) > 100:
             raise ToolFailure(
@@ -5686,17 +5901,7 @@ class Runtime:
             )
         git, git_env = self._require_selected_git_repo()
         branch = self._git_current_branch(git, git_env)
-        remote = str(args.get("remote", "origin")).strip() or "origin"
-        remotes = self._run_git_text(
-            [git, "-C", str(self.workspace.root), "remote"], timeout=10, env=git_env
-        )
-        configured = set(remotes.stdout.split()) if remotes.returncode == 0 else set()
-        if remote not in configured:
-            raise ToolFailure(
-                "INVALID_ARGUMENT",
-                "Push remote must be the name of a configured repository remote.",
-                category="validation",
-            )
+        remote = self._configured_git_remote(git, git_env, args.get("remote", "origin"))
         pending = self._profile_authorize_operation(
             "git.push", args, f"git push {remote} {branch}"
         )
@@ -5794,6 +5999,98 @@ class Runtime:
 
     def health(self, args: dict[str, Any]) -> dict[str, Any]:
         return {"status": "ok"}
+
+    def _run_devmcp_operator_command(self, command: str) -> dict[str, Any]:
+        """Run one fixed DevMCP operator diagnostic on the host, not in bwrap."""
+
+        if command not in {"status", "doctor"}:
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                "Unsupported DevMCP operator diagnostic.",
+                category="validation",
+            )
+        argv = [sys.executable, "-m", "apps.devmcp.cli", command]
+        result = subprocess.run(
+            argv,
+            cwd=str(DEVMCP_SOURCE_ROOT),
+            env=os.environ.copy(),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=30,
+        )
+        payload = {
+            "command": command,
+            "exit_code": result.returncode,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+        }
+        if result.returncode != 0:
+            raise ToolFailure(
+                "SERVICE_COMMAND_FAILED",
+                f"devmcp {command} exited with code {result.returncode}.",
+                category="internal",
+                details=payload,
+            )
+        return payload
+
+    def service_status(self, args: dict[str, Any]) -> dict[str, Any]:
+        return self._run_devmcp_operator_command("status")
+
+    def service_doctor(self, args: dict[str, Any]) -> dict[str, Any]:
+        return self._run_devmcp_operator_command("doctor")
+
+    def service_restart(self, args: dict[str, Any]) -> dict[str, Any]:
+        action = "restart DevMCP user services"
+        pending = self._profile_authorize_operation("service.manage", args, action)
+        if pending is not None:
+            return pending
+
+        systemd_run = shutil.which("systemd-run")
+        if systemd_run is None:
+            raise ToolFailure(
+                "SERVICE_UNAVAILABLE",
+                "systemd-run is required for a reliable self-restart.",
+                category="environment",
+            )
+
+        unit = f"devmcp-self-restart-{os.getpid()}-{secrets.token_hex(4)}"
+        result = subprocess.run(
+            [
+                systemd_run,
+                "--user",
+                "--quiet",
+                "--collect",
+                f"--unit={unit}",
+                "--on-active=1s",
+                f"--working-directory={DEVMCP_SOURCE_ROOT}",
+                sys.executable,
+                "-m",
+                "apps.devmcp.cli",
+                "restart",
+            ],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=10,
+        )
+        if result.returncode != 0:
+            raise ToolFailure(
+                "SERVICE_COMMAND_FAILED",
+                "Failed to schedule DevMCP service restart.",
+                category="internal",
+                details={
+                    "exit_code": result.returncode,
+                    "stdout": result.stdout,
+                    "stderr": result.stderr,
+                },
+            )
+        return {
+            "status": "scheduled",
+            "unit": unit,
+            "delay_seconds": 1,
+            "services": [DEVMCP_MCP_SERVICE, DEVMCP_TUNNEL_SERVICE],
+        }
 
     def workspace_info(self, args: dict[str, Any]) -> dict[str, Any]:
         return {
@@ -7290,6 +7587,9 @@ def input_schemas() -> dict[str, dict[str, Any]]:
         "server_info": object_schema(),
         "health": object_schema(),
         "workspace_info": object_schema(),
+        "service_status": object_schema(),
+        "service_doctor": object_schema(),
+        "service_restart": object_schema({"approval_id": string}),
         "list_projects": object_schema(),
         "select_project": object_schema(
             {"project": {**string, "minLength": 1}}, ["project"]
@@ -7483,6 +7783,23 @@ def input_schemas() -> dict[str, dict[str, Any]]:
         ),
         "git_switch_branch": object_schema(
             {"name": {**string, "minLength": 1}, "approval_id": string}, ["name"]
+        ),
+        "git_fetch": object_schema(
+            {"remote": {**string, "default": "origin"}, "approval_id": string}
+        ),
+        "git_pull": object_schema(
+            {"remote": {**string, "default": "origin"}, "approval_id": string}
+        ),
+        "git_delete_branch": object_schema(
+            {"name": {**string, "minLength": 1}, "approval_id": string}, ["name"]
+        ),
+        "git_delete_remote_branch": object_schema(
+            {
+                "name": {**string, "minLength": 1},
+                "remote": {**string, "default": "origin"},
+                "approval_id": string,
+            },
+            ["name"],
         ),
         "git_commit": object_schema(
             {
@@ -7817,8 +8134,14 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             self.handle_oauth_as_metadata(head_only=head_only)
             return
         if normalized in {"/healthz", "/readyz"}:
+            session_stats = self.server.sessions.stats()  # type: ignore[attr-defined]
             self.send_json(
-                {"status": "ok", "ready": True, "version": __version__},
+                {
+                    "status": "ok",
+                    "ready": True,
+                    "version": __version__,
+                    "http_sessions": session_stats,
+                },
                 head_only=head_only,
             )
             return
