@@ -602,6 +602,16 @@ def _auth_command(args: argparse.Namespace) -> int:
         generate_mcp_token(selected)
         print(f"Rotated MCP token at {selected.mcp_token}")
         return 0
+    if args.auth_action == "import-git-credentials":
+        source = Path(args.from_file).expanduser()
+        try:
+            value = source.read_text(encoding="utf-8")
+        except OSError as exc:
+            print(f"Unable to read Git credential store: {exc}", file=sys.stderr)
+            return 1
+        write_secret(selected.git_credentials, value)
+        print(f"Imported Git credentials to {selected.git_credentials}")
+        return 0
     return 2
 
 
@@ -744,6 +754,8 @@ def _serve(_: argparse.Namespace) -> int:
     from coding_tools_mcp.server import main as server_main
 
     os.environ["DEVMCP_POLICY_CONFIG_FILE"] = str(selected.config_file)
+    if secret_status(selected)["git_credentials_configured"]:
+        os.environ["DEVMCP_GIT_CREDENTIALS_FILE"] = str(selected.git_credentials)
     server_args = [
         "--workspace",
         str(config["workspace"]),
@@ -867,6 +879,11 @@ def build_parser() -> argparse.ArgumentParser:
     auth_sub = auth.add_subparsers(dest="auth_action", required=True)
     auth_sub.add_parser("status")
     auth_sub.add_parser("rotate-mcp-token")
+    import_git_credentials = auth_sub.add_parser(
+        "import-git-credentials",
+        help="import a Git credential-store file into DevMCP's private secrets",
+    )
+    import_git_credentials.add_argument("--from-file", required=True)
 
     tunnel = sub.add_parser("tunnel", help="inspect the optional Secure MCP Tunnel")
     tunnel_sub = tunnel.add_subparsers(dest="tunnel_action", required=True)

@@ -36,6 +36,7 @@ class ConfigPaths:
     mcp_token: Path
     mcp_authorization_header: Path
     control_plane_key: Path
+    git_credentials: Path
     tunnel_health_url: Path
     approvals_db: Path
     audit_log: Path
@@ -58,6 +59,7 @@ def paths() -> ConfigPaths:
         mcp_token=secrets_dir / "mcp-token",
         mcp_authorization_header=secrets_dir / "mcp-authorization-header",
         control_plane_key=secrets_dir / "control-plane-api-key",
+        git_credentials=secrets_dir / "git-credentials",
         tunnel_health_url=root / "tunnel-health.url",
         approvals_db=root / "approvals.db",
         audit_log=root / "audit.jsonl",
@@ -318,6 +320,8 @@ def secret_status(target: ConfigPaths | None = None) -> dict[str, Any]:
         "mcp_token_path": str(selected.mcp_token),
         "control_plane_key_configured": bool(read_secret(selected.control_plane_key)),
         "control_plane_key_path": str(selected.control_plane_key),
+        "git_credentials_configured": bool(read_secret(selected.git_credentials)),
+        "git_credentials_path": str(selected.git_credentials),
     }
 
 

@@ -1595,6 +1595,7 @@ class Runtime:
         max_removed_percent: float = 30.0,
         policy_rules: dict[str, Any] | None = None,
         project_roots: list[Path] | None = None,
+        git_credentials_file: Path | None = None,
     ) -> None:
         from .sandbox import ExecutionSandbox, detect_sandbox_backend
         from .tasks import TaskRegistry
@@ -1644,6 +1645,11 @@ class Runtime:
         self.policy_profile = policy_profile
         self.policy_rules = (
             validate_rules(policy_rules or {}) if policy_profile == "custom" else None
+        )
+        self.git_credentials_file = (
+            git_credentials_file.expanduser().resolve()
+            if git_credentials_file is not None and git_credentials_file.is_file()
+            else None
         )
         self.sandbox_backend = detect_sandbox_backend(sandbox_backend)
         if max_removed_lines < 0 or max_removed_percent < 0:
@@ -4573,7 +4579,28 @@ class Runtime:
         return env
 
     def _git_env(self) -> dict[str, str]:
-        return self._command_env({})
+        env = self._command_env({})
+        # Git commands run outside the general exec sandbox so they can manage
+        # the selected repository.  Keep their credentials in the DevMCP
+        # secret directory rather than exposing the operator's HOME, and turn
+        # off repository hooks so an untrusted checkout cannot inspect it.
+        entries = [("core.hooksPath", "/dev/null")]
+        if self.git_credentials_file is not None:
+            entries.extend(
+                [
+                    ("credential.helper", ""),
+                    (
+                        "credential.helper",
+                        f"store --file={self.git_credentials_file}",
+                    ),
+                ]
+            )
+        env["GIT_CONFIG_COUNT"] = str(len(entries))
+        for index, (key, value) in enumerate(entries):
+            env[f"GIT_CONFIG_KEY_{index}"] = key
+            env[f"GIT_CONFIG_VALUE_{index}"] = value
+        env["GIT_TERMINAL_PROMPT"] = "0"
+        return env
 
     def _run_git_text(
         self,
@@ -8980,6 +9007,11 @@ def build_runtime(
         max_removed_percent=float(getattr(args, "max_removed_percent", 30.0)),
         policy_rules=policy_rules,
         project_roots=project_roots,
+        git_credentials_file=(
+            Path(os.environ["DEVMCP_GIT_CREDENTIALS_FILE"])
+            if os.environ.get("DEVMCP_GIT_CREDENTIALS_FILE")
+            else None
+        ),
     )
     if emit_warning and runtime.capabilities.skip_all_permissions:
         print(
