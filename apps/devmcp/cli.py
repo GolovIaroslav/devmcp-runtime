@@ -17,6 +17,7 @@ import shutil
 import subprocess
 import sys
 import time
+import tomllib
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -744,6 +745,122 @@ WantedBy=default.target
     return 0
 
 
+def _validated_runtime_source(raw_source: str) -> Path:
+    try:
+        source = Path(raw_source).expanduser().resolve(strict=True)
+    except OSError as exc:
+        raise ValueError(
+            f"DevMCP source checkout does not exist: {raw_source}"
+        ) from exc
+    if not source.is_dir() or not (
+        (source / ".git").is_dir() or (source / ".git").is_file()
+    ):
+        raise ValueError("DevMCP update source must be a Git checkout")
+    pyproject = source / "pyproject.toml"
+    cli_module = source / "apps" / "devmcp" / "cli.py"
+    if not pyproject.is_file() or not cli_module.is_file():
+        raise ValueError("DevMCP update source is missing required runtime files")
+    try:
+        with pyproject.open("rb") as handle:
+            project = tomllib.load(handle).get("project", {})
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        raise ValueError("Unable to read DevMCP source pyproject.toml") from exc
+    if str(project.get("name", "")).strip() != "devmcp-runtime":
+        raise ValueError("Update source is not the devmcp-runtime project")
+    return source
+
+
+def _service_update(args: argparse.Namespace) -> int:
+    try:
+        source = _validated_runtime_source(args.source)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    expected_sha = str(args.expected_sha).strip().lower()
+    if len(expected_sha) != 40 or any(
+        ch not in "0123456789abcdef" for ch in expected_sha
+    ):
+        print("--expected-sha must be a full 40-character Git SHA", file=sys.stderr)
+        return 2
+    git = shutil.which("git")
+    if git is None:
+        print("git is required to update the installed DevMCP runtime", file=sys.stderr)
+        return 1
+    for command, expected in (
+        ([git, "-C", str(source), "rev-parse", "HEAD"], expected_sha),
+        ([git, "-C", str(source), "branch", "--show-current"], "main"),
+    ):
+        check_result = subprocess.run(
+            command,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=30,
+        )
+        if check_result.returncode != 0 or check_result.stdout.strip() != expected:
+            print(
+                "DevMCP update source changed after scheduling; refusing stale update",
+                file=sys.stderr,
+            )
+            return 1
+    for diff_args in (("diff", "--quiet"), ("diff", "--cached", "--quiet")):
+        dirty_result = subprocess.run(
+            [git, "-C", str(source), *diff_args],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=30,
+        )
+        if dirty_result.returncode != 0:
+            print(
+                "DevMCP update source has tracked or staged changes; refusing update",
+                file=sys.stderr,
+            )
+            return 1
+    uv = shutil.which("uv")
+    if uv is None:
+        fallback = Path.home() / ".local" / "bin" / "uv"
+        if fallback.is_file() and os.access(fallback, os.X_OK):
+            uv = str(fallback)
+    if uv is None:
+        print("uv is required to update the installed DevMCP runtime", file=sys.stderr)
+        return 1
+
+    install = subprocess.run(
+        [uv, "tool", "install", "--force", str(source)],
+        cwd=str(source),
+        env=os.environ.copy(),
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=300,
+    )
+    if install.returncode != 0:
+        sys.stderr.write(install.stdout)
+        return install.returncode
+
+    refreshed_python = Path(sys.executable)
+    if not refreshed_python.is_file():
+        print(
+            "DevMCP tool installation did not restore its Python runtime",
+            file=sys.stderr,
+        )
+        return 1
+    for service_command in (("service", "install"), ("restart",)):
+        completed = subprocess.run(
+            [str(refreshed_python), "-m", "apps.devmcp.cli", *service_command],
+            env=os.environ.copy(),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=120,
+        )
+        if completed.returncode != 0:
+            sys.stderr.write(completed.stdout)
+            return completed.returncode
+    print(f"Updated DevMCP runtime from {source}")
+    return 0
+
+
 def _serve(_: argparse.Namespace) -> int:
     """Stable service launcher: resolve every runtime option from config.toml."""
 
@@ -894,10 +1011,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     service = sub.add_parser(
-        "service", help="install or remove Linux systemd user services"
+        "service", help="install, update, or remove Linux systemd user services"
     )
     service_sub = service.add_subparsers(dest="service_action", required=True)
     service_sub.add_parser("install")
+    service_update = service_sub.add_parser(
+        "update",
+        help="update the installed DevMCP runtime from a validated local source checkout",
+    )
+    service_update.add_argument("--source", required=True)
+    service_update.add_argument("--expected-sha", required=True)
     service_sub.add_parser("uninstall")
     return parser
 
@@ -935,11 +1058,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "tunnel":
         return _tunnel_command(args)
     if args.command == "service":
-        return (
-            _service_install(args)
-            if args.service_action == "install"
-            else _service_uninstall(args)
-        )
+        if args.service_action == "install":
+            return _service_install(args)
+        if args.service_action == "update":
+            return _service_update(args)
+        return _service_uninstall(args)
     return 2
 
 

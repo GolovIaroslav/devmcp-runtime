@@ -35,6 +35,9 @@ and Docker/Podman socket exposure remain denied. `service_status` and
 `service_restart` schedules a delayed trusted CLI restart so the MCP response
 can complete before the current service is replaced. The restart waits for MCP
 health before restarting the tunnel, avoiding listener/tunnel startup races.
+`service_update` uses the same `service.manage` decision but accepts only a
+clean local `devmcp-runtime` checkout on `main` with `HEAD == origin/main`; it
+revalidates the pinned SHA before a user-level reinstall and safe restart.
 
 Git synchronization has its own `git.sync` capability for fetch/prune and
 fast-forward-only pull. Safe/Balanced ask, Power and Autonomous auto-authorize

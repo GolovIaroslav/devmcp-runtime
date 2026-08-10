@@ -11,7 +11,7 @@ app remains a draft.
 
 ## Fixed inventory
 
-The default catalog contains exactly 50 tools:
+The default catalog contains exactly 51 tools:
 
 - `server_info`: Server info.
 - `health`: Health check.
@@ -19,6 +19,7 @@ The default catalog contains exactly 50 tools:
 - `service_status`: Run host-side DevMCP status diagnostics.
 - `service_doctor`: Run host-side DevMCP doctor diagnostics.
 - `service_restart`: Schedule a delayed restart of the DevMCP user services.
+- `service_update`: Update the installed DevMCP runtime from a clean, synced local source checkout, reinstall user services, and safely restart.
 - `activate_policy_profile`: Persist a policy profile and schedule a safe restart.
 - `list_projects`: Discover Git repositories under operator-approved project roots.
 - `select_project`: Select one writable repository for the current MCP session.
@@ -64,7 +65,7 @@ The default catalog contains exactly 50 tools:
 - `get_default_cwd`: Get default cwd.
 - `set_default_cwd`: Set default cwd.
 `view_image` may be disabled when an installation cannot accept binary image
-content. That capability gate is not a tool profile. The other 49 tools are
+content. That capability gate is not a tool profile. The other 50 tools are
 always advertised, and `listChanged` is `false`.
 
 `service_status` and `service_doctor` execute only fixed DevMCP operator
@@ -72,6 +73,16 @@ commands on the host; they do not accept arbitrary command text. `service_restar
 is controlled by the `service.manage` policy capability and uses a delayed
 user-systemd transient unit so the current MCP response can complete before the
 running service is replaced.
+
+`service_update` uses the same `service.manage` capability. It accepts an
+optional `source_project` selector and only considers discovered local Git
+checkouts that identify themselves as the `devmcp-runtime` package. The source
+must be on `main`, have no tracked or staged changes, and exactly match
+`origin/main`; untracked files do not block it. A delayed updater revalidates the
+full expected SHA, performs a user-level `uv tool install --force` from the local
+checkout, refreshes the user systemd units from the newly installed runtime, and
+then performs the safe MCP-health-before-tunnel restart sequence. This makes
+future merged DevMCP releases self-updatable without an external bootstrap agent.
 
 `activate_policy_profile` is the first-class bootstrap path for changing the
 persistent host policy without arbitrary shell access. It is controlled by the

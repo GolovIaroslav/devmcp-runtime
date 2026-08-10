@@ -197,7 +197,7 @@ survive tunnel churn. Forwarded headers are ignored unless
 
 ## Stable tool inventory
 
-The default catalog has 50 tools, including `view_image`. Setting
+The default catalog has 51 tools, including `view_image`. Setting
 `CODING_TOOLS_MCP_ENABLE_VIEW_IMAGE=0` is the sole installation capability gate
 and removes only that optional binary-content tool. It is not a tool profile.
 
@@ -245,6 +245,24 @@ Controlled by `service.manage`. Schedules a delayed trusted `devmcp restart` in
 a separate user-systemd transient unit so the current tool response can complete
 before the serving process is replaced. The CLI restarts MCP first, waits for a
 successful MCP health probe, then restarts the tunnel if its unit is installed.
+
+### service_update
+
+Inputs: `"source_project"`, `"approval_id"`.
+
+Annotations: `{"title":"Update DevMCP service runtime","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
+
+Controlled by `service.manage`. Resolves exactly one discovered local Git
+checkout whose `pyproject.toml` declares `project.name = "devmcp-runtime"`.
+The source must be on `main`, have no tracked or staged changes, and satisfy
+`HEAD == origin/main`; untracked files do not block the update. DevMCP records
+the full source SHA and schedules a delayed user-systemd transient unit so the
+current MCP response can complete first. The trusted CLI revalidates the source
+path, branch, cleanliness, and expected SHA to close the scheduling race, then
+runs a user-level `uv tool install --force` from that local checkout, reinstalls
+the user systemd units using the newly installed runtime, and performs the same
+MCP-health-before-tunnel restart sequence as `service_restart`. No sudo or
+system-level package/service mutation is used.
 
 ### activate_policy_profile
 
