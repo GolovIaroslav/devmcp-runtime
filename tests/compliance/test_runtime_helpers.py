@@ -26,6 +26,7 @@ from coding_tools_mcp.server import (
     LANDLOCK_ACCESS_FS_TRUNCATE,
     LANDLOCK_ACCESS_FS_WRITE_FILE,
     MAX_ACTIVE_EXEC_SESSIONS,
+    MAX_PATCH_BASELINE_BYTES,
     Runtime,
     ShellEnvPolicy,
     ToolFailure,
@@ -35,6 +36,7 @@ from coding_tools_mcp.server import (
     permission_failure_diagnostics,
     runtime_parent_root,
 )
+from coding_tools_mcp.processes import ExecSession
 from coding_tools_mcp.textutils import truncate_text_head, truncate_text_tail
 from coding_tools_mcp.tool_results import (
     MODEL_TEXT_SAFETY_LIMIT_BYTES,
@@ -151,6 +153,44 @@ class RuntimeHelperTests(unittest.TestCase):
         self.assertEqual(graceful.calls, [("send_signal", 999), ("wait", 1)])
         self.assertEqual(forced.calls, ["kill", ("wait", 1)])
 
+    def test_posix_process_termination_escalates_after_bounded_wait(self) -> None:
+        class FakeProcess:
+            pid = 123
+
+            def __init__(self) -> None:
+                self.wait_calls: list[float] = []
+
+            def wait(self, timeout: float) -> int:
+                self.wait_calls.append(timeout)
+                if len(self.wait_calls) == 1:
+                    raise subprocess.TimeoutExpired("fixture", timeout)
+                return 0
+
+            def poll(self) -> int:
+                return 0 if len(self.wait_calls) > 1 else None  # type: ignore[return-value]
+
+            def terminate(self) -> None:
+                raise AssertionError("fallback terminate should not be used")
+
+            def kill(self) -> None:
+                raise AssertionError("fallback kill should not be used")
+
+        process = FakeProcess()
+        with patch.object(processes_module.os, "killpg") as killpg:
+            processes_module.terminate_process_group(  # type: ignore[arg-type]
+                process,
+                signal.SIGTERM,
+            )
+
+        self.assertEqual(
+            killpg.call_args_list,
+            [
+                unittest.mock.call(123, signal.SIGTERM),
+                unittest.mock.call(123, processes_module.HARD_KILL_SIGNAL),
+            ],
+        )
+        self.assertEqual(process.wait_calls, [1, 1])
+
     def test_atomic_patch_commit_rolls_back_all_files_after_mid_commit_failure(
         self,
     ) -> None:
@@ -213,6 +253,29 @@ class RuntimeHelperTests(unittest.TestCase):
             self.assertEqual(raised.exception.code, "PATCH_CONFLICT")
             self.assertTrue(raised.exception.retryable)
             self.assertEqual(path.read_text(encoding="utf-8"), "external-change\n")
+
+    def test_patch_baselines_have_a_bounded_byte_budget(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "file.txt"
+            path.write_text("before\n", encoding="utf-8")
+            runtime = Runtime(root, permission_mode="trusted", sandbox_backend="unsafe")
+            runtime.patch_baseline_bytes = MAX_PATCH_BASELINE_BYTES
+            change = StagedFile(
+                "file.txt",
+                path,
+                "after\n",
+                FileBaseline.capture(path),
+                0o644,
+            )
+            try:
+                with self.assertRaises(ToolFailure) as raised:
+                    runtime._commit_staged_files([change])
+                self.assertEqual(raised.exception.code, "PATCH_BASELINE_LIMIT")
+                self.assertEqual(path.read_text(encoding="utf-8"), "before\n")
+                self.assertEqual(runtime.patch_baselines, {})
+            finally:
+                runtime.close()
 
     def test_atomic_patch_commit_preserves_backup_when_rollback_fails(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -952,6 +1015,203 @@ class RuntimeHelperTests(unittest.TestCase):
             finally:
                 server_module.spawn_process = original_spawn  # type: ignore[assignment]
                 runtime.close()
+
+    def test_translate_path_exception_releases_owned_sandbox(self) -> None:
+        with TemporaryDirectory() as tmp:
+            runtime = Runtime(
+                Path(tmp), permission_mode="trusted", sandbox_backend="unsafe"
+            )
+            with patch.object(
+                ExecutionSandbox,
+                "translate_path_for_exec",
+                side_effect=RuntimeError("translate failed"),
+            ):
+                with self.assertRaises(RuntimeError):
+                    runtime.exec_command({"cmd": "printf unreachable"})
+            self.assertIsNone(runtime.sandbox)
+            self.assertEqual(runtime.sandbox_users, 0)
+            runtime.close()
+
+    def test_command_env_base_exception_releases_owned_sandbox(self) -> None:
+        with TemporaryDirectory() as tmp:
+            runtime = Runtime(
+                Path(tmp), permission_mode="trusted", sandbox_backend="unsafe"
+            )
+            with patch.object(
+                runtime,
+                "_command_env",
+                side_effect=KeyboardInterrupt(),
+            ):
+                with self.assertRaises(KeyboardInterrupt):
+                    runtime.exec_command({"cmd": "printf unreachable"})
+            self.assertIsNone(runtime.sandbox)
+            self.assertEqual(runtime.sandbox_users, 0)
+            runtime.close()
+
+    def test_make_session_exception_reaps_process_and_closes_pty(self) -> None:
+        with TemporaryDirectory() as tmp:
+            runtime = Runtime(
+                Path(tmp), permission_mode="trusted", sandbox_backend="unsafe"
+            )
+            original_spawn = server_module.spawn_process
+            captured: dict[str, object] = {}
+
+            def capture_spawn(*args: object, **kwargs: object) -> object:
+                result = original_spawn(*args, **kwargs)
+                captured["process"], captured["pty_master_fd"] = result
+                return result
+
+            server_module.spawn_process = capture_spawn  # type: ignore[assignment]
+            try:
+                with patch.object(
+                    runtime,
+                    "_make_session",
+                    side_effect=RuntimeError("session construction failed"),
+                ):
+                    with self.assertRaises(RuntimeError):
+                        runtime.exec_command(
+                            {"cmd": "sleep 30", "tty": True, "yield_time_ms": 0}
+                        )
+                process = captured["process"]
+                pty_master_fd = captured["pty_master_fd"]
+                assert isinstance(process, subprocess.Popen)
+                assert isinstance(pty_master_fd, int)
+                self.assertIsNotNone(process.poll())
+                with self.assertRaises(OSError):
+                    os.fstat(pty_master_fd)
+                self.assertIsNone(runtime.sandbox)
+                self.assertEqual(runtime.sandbox_users, 0)
+            finally:
+                server_module.spawn_process = original_spawn  # type: ignore[assignment]
+                runtime.close()
+
+    def test_reader_startup_exception_reaps_process_and_releases_sandbox(self) -> None:
+        with TemporaryDirectory() as tmp:
+            runtime = Runtime(
+                Path(tmp), permission_mode="trusted", sandbox_backend="unsafe"
+            )
+            with patch.object(
+                server_module,
+                "start_reader_threads",
+                side_effect=RuntimeError("reader startup failed"),
+            ):
+                with self.assertRaises(RuntimeError):
+                    runtime.exec_command({"cmd": "sleep 30", "yield_time_ms": 0})
+            self.assertEqual(runtime.sessions, {})
+            self.assertIsNone(runtime.sandbox)
+            self.assertEqual(runtime.sandbox_users, 0)
+            runtime.close()
+
+    def test_http_session_evictability_accounts_for_background_exec(self) -> None:
+        with TemporaryDirectory() as tmp:
+            runtime = Runtime(
+                Path(tmp), permission_mode="trusted", sandbox_backend="unsafe"
+            )
+            try:
+                started = runtime.exec_command(
+                    {"cmd": "sleep 30", "timeout_ms": 30000, "yield_time_ms": 0}
+                )
+                self.assertEqual(started.get("status"), "running", started)
+                self.assertFalse(runtime.http_session_evictable())
+                runtime.cancel_session(str(started["session_id"]))
+                self.assertTrue(runtime.http_session_evictable())
+            finally:
+                runtime.close()
+
+    def test_pty_master_is_closed_once_when_reader_and_cleanup_race(self) -> None:
+        fd = 12345
+        read_started = threading.Event()
+        allow_reader_exit = threading.Event()
+        close_calls: list[int] = []
+
+        class FakeProcess:
+            stdin = None
+            stdout = None
+            stderr = None
+
+            def poll(self) -> int:
+                return 0
+
+        session = ExecSession("pty-race", FakeProcess(), pty_master_fd=fd)  # type: ignore[arg-type]
+
+        def fake_read(_fd: int, _size: int) -> bytes:
+            read_started.set()
+            allow_reader_exit.wait(timeout=2)
+            raise OSError("closed")
+
+        def fake_close(value: int) -> None:
+            close_calls.append(value)
+
+        with (
+            patch.object(processes_module.os, "read", side_effect=fake_read),
+            patch.object(processes_module.os, "close", side_effect=fake_close),
+        ):
+            processes_module.start_reader_threads(session)
+            self.assertTrue(read_started.wait(timeout=2))
+            session.release_owned_resources()
+            allow_reader_exit.set()
+            for thread in session.reader_threads:
+                thread.join(timeout=2)
+
+        self.assertEqual(close_calls, [fd])
+        session.release_owned_resources()
+
+    def test_cancel_session_reaps_after_bounded_termination_fails(self) -> None:
+        with TemporaryDirectory() as tmp:
+            runtime = Runtime(
+                Path(tmp), permission_mode="trusted", sandbox_backend="unsafe"
+            )
+            finished = threading.Event()
+            cleanup_calls = 0
+
+            class StubbornProcess:
+                stdin = None
+                stdout = None
+                stderr = None
+                pid = 123
+
+                def poll(self) -> int | None:
+                    return 0 if finished.is_set() else None
+
+                def wait(self, timeout: float | None = None) -> int:
+                    if timeout is not None and not finished.wait(timeout):
+                        raise subprocess.TimeoutExpired("fixture", timeout)
+                    finished.wait(timeout=2)
+                    if not finished.is_set():
+                        raise subprocess.TimeoutExpired("fixture", timeout)
+                    return 0
+
+            def cleanup() -> None:
+                nonlocal cleanup_calls
+                cleanup_calls += 1
+
+            session = ExecSession(
+                "stubborn",
+                StubbornProcess(),  # type: ignore[arg-type]
+                resource_cleanup=cleanup,
+            )
+            with runtime.sessions_lock:
+                runtime.sessions[session.session_id] = session
+            with (
+                patch.object(server_module, "terminate_process_group"),
+                patch.object(
+                    runtime,
+                    "_wait_for_session_exit",
+                    side_effect=[False, False],
+                ),
+            ):
+                runtime.cancel_session(session.session_id)
+
+            self.assertIn(session.session_id, runtime.sessions)
+            self.assertEqual(cleanup_calls, 0)
+            finished.set()
+            deadline = time.time() + 2
+            while time.time() < deadline and cleanup_calls == 0:
+                time.sleep(0.01)
+            self.assertEqual(cleanup_calls, 1)
+            self.assertNotIn(session.session_id, runtime.sessions)
+            runtime.cancel_session(session.session_id)
+            runtime.close()
 
     def test_cancelled_execution_releases_owned_sandbox(self) -> None:
         with TemporaryDirectory() as tmp:

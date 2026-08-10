@@ -201,6 +201,8 @@ MAX_ACTIVE_EXEC_SESSIONS = 16
 MAX_RETAINED_OUTPUT_SESSIONS = 32
 COMPLETED_SESSION_TTL_SECONDS = 300
 MAX_RUNTIME_OUTPUT_BYTES = 16 * 1024 * 1024
+MAX_PATCH_BASELINE_BYTES = 64 * 1024 * 1024
+MAX_PATCH_BASELINE_FILES = 4096
 SHELL_CONTROL_TOKENS = {"|", "||", "&", "&&", ";", "(", ")"}
 REDIRECTION_TOKENS = {">", ">>", "<", "<>", ">&", "<&", "&>", "&>>"}
 HEREDOC_TOKENS = {"<<", "<<<"}
@@ -1650,6 +1652,7 @@ class Runtime:
         self.http_session_id = secrets.token_urlsafe(24)
         self.protocol_version = PROTOCOL_VERSION
         self.patch_baselines: dict[str, str | None] = {}
+        self.patch_baseline_bytes = 0
         self.patch_lock = threading.Lock()
         self.patch_committer = AtomicPatchCommitter()
         # ProjectContext is frozen and derived only from the workspace tree, so
@@ -1686,18 +1689,64 @@ class Runtime:
             self.output_sessions.clear()
         still_running = False
         for session in sessions:
-            session.refresh_status()
-            if session.process.poll() is None:
-                terminate_process_group(session.process, signal.SIGTERM)
-                session.refresh_status()
-            session.drain_readers()
-            if session.process.poll() is None:
+            if not self._terminate_session(session):
                 still_running = True
+                self._schedule_session_reaper(session)
             else:
                 session.release_owned_resources()
         if not still_running and self._discard_execution_sandbox():
             shutil.rmtree(self.runtime_dir, ignore_errors=True)
         self.telemetry.finish()
+
+    def _terminate_session(self, session: ExecSession) -> bool:
+        session.refresh_status()
+        if session.process.poll() is None:
+            session.terminating = True
+            terminate_process_group(session.process, signal.SIGTERM)
+        exited = self._wait_for_session_exit(session, 1.0)
+        if not exited:
+            terminate_process_group(session.process, HARD_KILL_SIGNAL, force=True)
+            exited = self._wait_for_session_exit(session, 1.0)
+        return exited
+
+    def _schedule_session_reaper(self, session: ExecSession) -> None:
+        if not session.mark_reaper_started():
+            return
+        threading.Thread(
+            target=self._reap_closed_session,
+            args=(session,),
+            name=f"devmcp-reaper-{session.session_id[:8]}",
+            daemon=True,
+        ).start()
+
+    def _reap_closed_session(self, session: ExecSession) -> None:
+        while True:
+            try:
+                session.process.wait()
+                break
+            except Exception:
+                if session.process.poll() is not None:
+                    break
+                time.sleep(0.1)
+        session.refresh_status()
+        session.drain_readers()
+        session.close_process_streams()
+        session.release_owned_resources()
+        with self.sessions_lock:
+            if self.sessions.get(session.session_id) is session:
+                self.sessions.pop(session.session_id, None)
+            self.output_sessions.pop(session.session_id, None)
+        if self._closed and self._discard_execution_sandbox():
+            shutil.rmtree(self.runtime_dir, ignore_errors=True)
+
+    def http_session_evictable(self) -> bool:
+        """Return whether pressure eviction can close this Runtime safely."""
+        self._prune_sessions()
+        with self.sessions_lock:
+            if self._closed or self.starting_sessions or self.sessions:
+                return False
+        with self.sandbox_lock:
+            return self.sandbox_users == 0
 
     def _ensure_runtime_dirs(self) -> None:
         candidates = [self.runtime_dir]
@@ -2206,6 +2255,7 @@ class Runtime:
         self.workspace = Workspace(selected_path)
         self.default_cwd = self.workspace.root
         self.patch_baselines.clear()
+        self.patch_baseline_bytes = 0
         self.project_context = load_project_context(self.workspace.root)
         self.active_project = selected
         return dict(selected)
@@ -3374,15 +3424,43 @@ class Runtime:
             self.workspace.resolve_for_write(raw_path)
 
     def _commit_staged_files(self, staged: list[StagedFile]) -> None:
-        self.patch_committer.commit(staged)
+        new_baselines: list[tuple[str, str | None, int]] = []
         for change in staged:
             if change.display in self.patch_baselines:
                 continue
-            self.patch_baselines[change.display] = (
+            baseline = (
                 None
                 if change.baseline.data is None
                 else change.baseline.data.decode("utf-8", errors="replace")
             )
+            baseline_bytes = len(baseline.encode("utf-8")) if baseline else 0
+            new_baselines.append((change.display, baseline, baseline_bytes))
+        projected_bytes = self.patch_baseline_bytes + sum(
+            item[2] for item in new_baselines
+        )
+        projected_files = len(self.patch_baselines) + len(new_baselines)
+        if (
+            projected_bytes > MAX_PATCH_BASELINE_BYTES
+            or projected_files > MAX_PATCH_BASELINE_FILES
+        ):
+            raise ToolFailure(
+                "PATCH_BASELINE_LIMIT",
+                "Patch baseline memory limit reached; split the patch into smaller changes.",
+                category="runtime",
+                retryable=True,
+                details={
+                    "max_bytes": MAX_PATCH_BASELINE_BYTES,
+                    "current_bytes": self.patch_baseline_bytes,
+                    "requested_bytes": projected_bytes,
+                    "max_files": MAX_PATCH_BASELINE_FILES,
+                    "current_files": len(self.patch_baselines),
+                    "requested_files": projected_files,
+                },
+            )
+        self.patch_committer.commit(staged)
+        for display, baseline, baseline_bytes in new_baselines:
+            self.patch_baselines[display] = baseline
+            self.patch_baseline_bytes += baseline_bytes
 
         with self.sandbox_lock:
             sandbox = self.sandbox
@@ -3896,14 +3974,18 @@ class Runtime:
             )
 
         sandbox = self._acquire_execution_sandbox()
-        sandbox_workdir = sandbox.translate_path_for_exec(workdir.path)
-        if self.sandbox_backend.name == "unsafe" or (
-            not bwrap_available and os.name == "nt"
-        ):
-            # Unsafe mode and the explicit Windows trusted fallback execute in
-            # the caller-owned checkout. The snapshot lease is still created
-            # so ownership/cleanup semantics stay identical across backends.
-            sandbox_workdir = workdir.path
+        try:
+            sandbox_workdir = sandbox.translate_path_for_exec(workdir.path)
+            if self.sandbox_backend.name == "unsafe" or (
+                not bwrap_available and os.name == "nt"
+            ):
+                # Unsafe mode and the explicit Windows trusted fallback execute in
+                # the caller-owned checkout. The snapshot lease is still created
+                # so ownership/cleanup semantics stay identical across backends.
+                sandbox_workdir = workdir.path
+        except BaseException:
+            self._release_execution_sandbox(sandbox)
+            raise
 
         try:
             env = self._command_env(
@@ -3919,7 +4001,7 @@ class Runtime:
                     )
                 ),
             )
-        except Exception:
+        except BaseException:
             self._release_execution_sandbox(sandbox)
             raise
 
@@ -3959,7 +4041,7 @@ class Runtime:
             else:
                 actual_cmd = cmd
                 popen_shell = False
-        except Exception:
+        except BaseException:
             self._release_execution_sandbox(sandbox)
             raise
 
@@ -3977,10 +4059,16 @@ class Runtime:
                 popen_extra["pass_fds"] = (landlock_fd,)
             except ToolFailure as exc:
                 if exc.code != "SANDBOX_UNAVAILABLE":
+                    if landlock_fd is not None:
+                        try:
+                            os.close(landlock_fd)
+                        except OSError:
+                            pass
+                        landlock_fd = None
                     self._release_execution_sandbox(sandbox)
                     raise
                 landlock_warning = landlock_unavailable_warning(exc)
-            except Exception:
+            except BaseException:
                 if landlock_fd is not None:
                     try:
                         os.close(landlock_fd)
@@ -3994,7 +4082,10 @@ class Runtime:
         with self.sessions_lock:
             if self._closed:
                 if landlock_fd is not None:
-                    os.close(landlock_fd)
+                    try:
+                        os.close(landlock_fd)
+                    except OSError:
+                        pass
                     landlock_fd = None
                 self._release_execution_sandbox(sandbox)
                 raise ToolFailure(
@@ -4002,7 +4093,10 @@ class Runtime:
                 )
             if len(self.sessions) + self.starting_sessions >= MAX_ACTIVE_EXEC_SESSIONS:
                 if landlock_fd is not None:
-                    os.close(landlock_fd)
+                    try:
+                        os.close(landlock_fd)
+                    except OSError:
+                        pass
                     landlock_fd = None
                 self._release_execution_sandbox(sandbox)
                 raise ToolFailure(
@@ -4015,6 +4109,7 @@ class Runtime:
             self.starting_sessions += 1
         process: subprocess.Popen[bytes] | None = None
         session: ExecSession | None = None
+        pty_master_fd: int | None = None
         registered = False
         slot_released = False
 
@@ -4046,13 +4141,32 @@ class Runtime:
                     "Runtime closed while the command was starting.",
                     category="runtime",
                 )
-        except Exception:
+        except BaseException:
             with self.sessions_lock:
                 if not registered and not slot_released:
                     self.starting_sessions -= 1
-            if process is not None and process.poll() is None:
-                terminate_process_group(process, signal.SIGTERM)
-            if not registered:
+            if process is not None:
+                if session is None:
+                    session = ExecSession(
+                        session_id=secrets.token_urlsafe(18),
+                        process=process,
+                        timeout_at=deadline,
+                        warnings=[landlock_warning] if landlock_warning else [],
+                        pty_master_fd=pty_master_fd,
+                        resource_cleanup=lambda: self._release_execution_sandbox(
+                            sandbox
+                        ),
+                    )
+                try:
+                    exited = self._terminate_session(session)
+                except BaseException:
+                    self._schedule_session_reaper(session)
+                    raise
+                if exited:
+                    session.release_owned_resources()
+                else:
+                    self._schedule_session_reaper(session)
+            elif not registered:
                 self._release_execution_sandbox(sandbox)
             raise
         finally:
@@ -4069,18 +4183,14 @@ class Runtime:
         try:
             start_reader_threads(session)
             start_session_watchdog(session)
-        except Exception:
-            if process.poll() is None:
-                terminate_process_group(process, signal.SIGTERM)
-            session.refresh_status()
+        except BaseException:
+            self.cancel_session(session.session_id)
             raise
         try:
             if stdin_text:
                 session.write_input(stdin_text.encode("utf-8"))
-        except ToolFailure:
-            if process.poll() is None:
-                terminate_process_group(process, signal.SIGTERM)
-                session.refresh_status()
+        except BaseException:
+            self.cancel_session(session.session_id)
             raise
         finally:
             if not tty:
@@ -4551,10 +4661,6 @@ class Runtime:
     def _get_output_session(self, session_id: str) -> ExecSession:
         self._prune_sessions()
         with self.sessions_lock:
-            with open("/tmp/debug_sessions.txt", "a") as f:
-                f.write(
-                    f"LOOKING FOR {session_id} IN SESSIONS: {list(self.sessions.keys())} OUTPUT: {list(self.output_sessions.keys())}\n"
-                )
             session = self.sessions.get(session_id) or self.output_sessions.get(
                 session_id
             )
@@ -4826,7 +4932,10 @@ class Runtime:
             pass
         session.refresh_status()
         session.drain_readers()
-        return session.process.poll() is not None
+        exited = session.process.poll() is not None
+        if exited:
+            session.close_process_streams()
+        return exited
 
     def kill_session(self, args: dict[str, Any]) -> dict[str, Any]:
         session_id = str(args.get("session_id", ""))
@@ -4894,15 +5003,14 @@ class Runtime:
             session = self.sessions.get(session_id)
         if session is None:
             return
-        session.refresh_status()
-        if session.process.poll() is None:
-            terminate_process_group(session.process, signal.SIGTERM)
-            session.refresh_status()
-        session.drain_readers()
-        if session.process.poll() is not None:
+        exited = self._terminate_session(session)
+        if exited:
+            session.release_owned_resources()
             with self.sessions_lock:
                 if self.sessions.get(session_id) is session:
                     self.sessions.pop(session_id, None)
+        else:
+            self._schedule_session_reaper(session)
 
     def cancel_request(self, request_id: str | int) -> None:
         with self.request_sessions_lock:
@@ -7833,6 +7941,7 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         method = request.get("method")
         session_id = self.headers.get("Mcp-Session-Id")
         created_session = False
+        managed_session_id: str | None = None
         if method == "initialize":
             if session_id:
                 self.send_rpc_error(
@@ -7850,6 +7959,7 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
                 return
             self._send_session_header = True
             created_session = True
+            managed_session_id = self.runtime.http_session_id
         elif session_id:
             runtime = self.server.sessions.get(session_id)  # type: ignore[attr-defined]
             if runtime is None:
@@ -7862,17 +7972,7 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
                 return
             self._runtime = runtime
             self._send_session_header = True
-            if protocol_version != runtime.protocol_version:
-                self.send_rpc_error(
-                    -32600,
-                    "MCP-Protocol-Version does not match the initialized session",
-                    request_id=request.get("id"),
-                    data={
-                        "expected": runtime.protocol_version,
-                        "received": protocol_version,
-                    },
-                )
-                return
+            managed_session_id = session_id
         elif method == "ping":
             self._runtime = self.server.control_runtime  # type: ignore[attr-defined]
         else:
@@ -7880,18 +7980,37 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
                 -32002, "Server not initialized", request_id=request.get("id")
             )
             return
-        response = self.handle_rpc(request)
-        if created_session and response is not None and "error" in response:
-            self.server.sessions.delete(self.runtime.http_session_id)  # type: ignore[attr-defined]
-            self._send_session_header = False
-        if response is None:
-            self.send_response(202)
-            if getattr(self, "_send_session_header", False):
-                self.send_header("Mcp-Session-Id", self.runtime.http_session_id)
-            self.send_cors_headers()
-            self.end_headers()
-            return
-        self.send_json(response)
+        try:
+            if (
+                managed_session_id is not None
+                and not created_session
+                and protocol_version != self.runtime.protocol_version
+            ):
+                self.send_rpc_error(
+                    -32600,
+                    "MCP-Protocol-Version does not match the initialized session",
+                    request_id=request.get("id"),
+                    data={
+                        "expected": self.runtime.protocol_version,
+                        "received": protocol_version,
+                    },
+                )
+                return
+            response = self.handle_rpc(request)
+            if created_session and response is not None and "error" in response:
+                self.server.sessions.delete(self.runtime.http_session_id)  # type: ignore[attr-defined]
+                self._send_session_header = False
+            if response is None:
+                self.send_response(202)
+                if getattr(self, "_send_session_header", False):
+                    self.send_header("Mcp-Session-Id", self.runtime.http_session_id)
+                self.send_cors_headers()
+                self.end_headers()
+                return
+            self.send_json(response)
+        finally:
+            if managed_session_id is not None:
+                self.server.sessions.release(managed_session_id)  # type: ignore[attr-defined]
 
     def handle_rpc(self, request: dict[str, Any]) -> dict[str, Any] | None:
         try:
