@@ -4474,7 +4474,19 @@ class Runtime:
             tokens = shlex_split(strip_heredoc_payloads(cmd))
         except ValueError:
             tokens = cmd.split()
-        denied = {"sudo", "su", "doas", "mount", "umount", "docker", "podman"}
+        denied = {
+            "sudo",
+            "su",
+            "doas",
+            "mount",
+            "umount",
+            "docker",
+            "podman",
+            "bwrap",
+            "unshare",
+            "nsenter",
+            "chroot",
+        }
         return any(
             PurePosixPath(token.replace("\\", "/")).name in denied for token in tokens
         )

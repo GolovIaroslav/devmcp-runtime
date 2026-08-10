@@ -491,6 +491,8 @@ class ReleaseLifecycleTests(unittest.TestCase):
                 )
                 with self.assertRaisesRegex(ToolFailure, "denied"):
                     runtime.exec_command({"cmd": "sudo true"})
+                with self.assertRaisesRegex(ToolFailure, "denied"):
+                    runtime.exec_command({"cmd": "bwrap --bind / / true"})
             finally:
                 runtime.close()
 
