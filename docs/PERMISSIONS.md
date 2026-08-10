@@ -40,6 +40,12 @@ Git synchronization has its own `git.sync` capability for fetch/prune and
 fast-forward-only pull. Safe/Balanced ask, Power and Autonomous auto-authorize
 it. Remote branch deletion remains governed by `git.push`.
 
+Persistent profile changes use a separate `policy.manage` capability. Safe,
+Balanced, and Power always ask; Autonomous auto-authorizes. The
+`activate_policy_profile` tool persists the selected profile and schedules a
+safe restart, so initial Autonomous activation never requires arbitrary shell
+or direct config-file editing.
+
 ## ChatGPT app permissions are a separate layer
 
 When DevMCP is connected through ChatGPT, there are two independent permission

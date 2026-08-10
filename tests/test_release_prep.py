@@ -62,6 +62,8 @@ class ReleaseConfigTests(unittest.TestCase):
         self.assertEqual(decision("power", "server.public"), "ask")
         self.assertEqual(decision("power", "workspace.delete"), "auto")
         self.assertEqual(decision("power", "service.manage"), "auto")
+        self.assertEqual(decision("balanced", "policy.manage"), "ask")
+        self.assertEqual(decision("power", "policy.manage"), "ask")
         self.assertEqual(decision("balanced", "workspace.delete"), "ask")
         for capability in set(CAPABILITIES) - set(UNIMPLEMENTED_CAPABILITIES):
             with self.subTest(profile="autonomous", capability=capability):
@@ -537,6 +539,35 @@ class ReleaseLifecycleTests(unittest.TestCase):
                 self.assertEqual(runtime.sandbox_users, 0)
                 self.assertIsNone(runtime.sandbox)
                 self.assertFalse(sandbox.sandbox_dir.exists())
+            finally:
+                runtime.close()
+
+    def test_autonomous_profile_can_activate_policy_profile_and_schedule_restart(
+        self,
+    ) -> None:
+        completed = subprocess.CompletedProcess([], 0, "Policy profile: power\n", "")
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = Runtime(Path(tmp), policy_profile="autonomous")
+            try:
+                with (
+                    patch(
+                        "coding_tools_mcp.server.subprocess.run", return_value=completed
+                    ) as run,
+                    patch.object(
+                        runtime,
+                        "_schedule_devmcp_restart",
+                        return_value={"status": "scheduled", "unit": "fixture"},
+                    ) as schedule,
+                ):
+                    result = runtime.activate_policy_profile({"profile": "power"})
+
+                self.assertEqual(result["profile"], "power")
+                self.assertEqual(result["previous_profile"], "autonomous")
+                self.assertEqual(result["status"], "scheduled")
+                self.assertEqual(
+                    run.call_args.args[0][-3:], ["policy", "profile", "power"]
+                )
+                schedule.assert_called_once_with()
             finally:
                 runtime.close()
 

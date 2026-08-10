@@ -187,7 +187,7 @@ survive tunnel churn. Forwarded headers are ignored unless
 
 ## Stable tool inventory
 
-The default catalog has 48 tools, including `view_image`. Setting
+The default catalog has 49 tools, including `view_image`. Setting
 `CODING_TOOLS_MCP_ENABLE_VIEW_IMAGE=0` is the sole installation capability gate
 and removes only that optional binary-content tool. It is not a tool profile.
 
@@ -235,6 +235,19 @@ Controlled by `service.manage`. Schedules a delayed trusted `devmcp restart` in
 a separate user-systemd transient unit so the current tool response can complete
 before the serving process is replaced. The CLI restarts MCP first, waits for a
 successful MCP health probe, then restarts the tunnel if its unit is installed.
+
+### activate_policy_profile
+
+Inputs: `"profile"`, `"approval_id"`.
+
+Annotations: `{"title":"Activate policy profile","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":false}`.
+
+Persists one supported host policy profile using the trusted DevMCP CLI and then
+schedules the same safe restart path as `service_restart`. Controlled by the
+dedicated `policy.manage` capability: Safe, Balanced, and Power ask; Autonomous
+auto-authorizes. This prevents a less-privileged profile from silently
+self-escalating. If restart scheduling fails after persistence, the runtime
+attempts to restore the previous profile before returning the failure.
 
 ### check_exec_environment
 

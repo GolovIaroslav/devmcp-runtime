@@ -11,7 +11,7 @@ app remains a draft.
 
 ## Fixed inventory
 
-The default catalog contains exactly 48 tools:
+The default catalog contains exactly 49 tools:
 
 - `server_info`: Server info.
 - `health`: Health check.
@@ -19,6 +19,7 @@ The default catalog contains exactly 48 tools:
 - `service_status`: Run host-side DevMCP status diagnostics.
 - `service_doctor`: Run host-side DevMCP doctor diagnostics.
 - `service_restart`: Schedule a delayed restart of the DevMCP user services.
+- `activate_policy_profile`: Persist a policy profile and schedule a safe restart.
 - `list_projects`: Discover Git repositories under operator-approved project roots.
 - `select_project`: Select one writable repository for the current MCP session.
 - `current_project`: Show the repository selected for the current MCP session.
@@ -62,7 +63,7 @@ The default catalog contains exactly 48 tools:
 - `get_default_cwd`: Get default cwd.
 - `set_default_cwd`: Set default cwd.
 `view_image` may be disabled when an installation cannot accept binary image
-content. That capability gate is not a tool profile. The other 47 tools are
+content. That capability gate is not a tool profile. The other 48 tools are
 always advertised, and `listChanged` is `false`.
 
 `service_status` and `service_doctor` execute only fixed DevMCP operator
@@ -70,6 +71,13 @@ commands on the host; they do not accept arbitrary command text. `service_restar
 is controlled by the `service.manage` policy capability and uses a delayed
 user-systemd transient unit so the current MCP response can complete before the
 running service is replaced.
+
+`activate_policy_profile` is the first-class bootstrap path for changing the
+persistent host policy without arbitrary shell access. It is controlled by the
+separate `policy.manage` capability, which asks in Safe, Balanced, and Power and
+is automatic only in Autonomous. A successful change schedules the same safe
+restart path; a restart-scheduling failure attempts to restore the previous
+profile.
 
 ## Project selection boundary
 

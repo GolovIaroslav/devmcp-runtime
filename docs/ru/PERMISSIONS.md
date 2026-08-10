@@ -23,6 +23,11 @@ health перед рестартом tunnel, чтобы не ловить race �
 только fast-forward pull. Safe/Balanced требуют approval, Power/Autonomous
 разрешают автоматически. Удаление remote branch контролируется `git.push`.
 
+Изменение persistent policy вынесено в отдельную `policy.manage`: Safe,
+Balanced и Power всегда требуют approval, Autonomous выполняет автоматически.
+`activate_policy_profile` сохраняет выбранный профиль и сам планирует безопасный
+restart, без arbitrary shell и ручного редактирования config.
+
 Разрешения приложения ChatGPT и локальная policy DevMCP — независимые слои:
 первый определяет диалоги подтверждения ChatGPT, второй — allow/ask/deny внутри
 runtime. `Never ask` отключает обычные подтверждения только для приложения и

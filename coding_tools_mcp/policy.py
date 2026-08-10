@@ -37,6 +37,7 @@ CAPABILITIES = (
     "git.push",
     "env.sensitive",
     "service.manage",
+    "policy.manage",
     "agent.delegate",
 )
 
@@ -84,6 +85,7 @@ _SAFE_ASK = {
     "workspace.patch_destructive",
     "env.sensitive",
     "service.manage",
+    "policy.manage",
 }
 
 _PROFILES: dict[str, dict[str, str]] = {
@@ -113,7 +115,7 @@ _PROFILES: dict[str, dict[str, str]] = {
             "workspace.patch_destructive",
             "service.manage",
         },
-        {"git.push", "server.public", "env.sensitive"},
+        {"git.push", "server.public", "env.sensitive", "policy.manage"},
         _FLOOR_DENY,
     ),
     "autonomous": _profile(

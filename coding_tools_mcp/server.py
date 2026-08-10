@@ -710,6 +710,11 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         description="Schedule a host-side restart of the DevMCP MCP and tunnel user services after this tool response is returned.",
         destructive=True,
     ),
+    "activate_policy_profile": ToolSpec(
+        title="Activate policy profile",
+        description="Persist one DevMCP policy profile on the host and schedule a safe service restart.",
+        destructive=True,
+    ),
     "list_projects": ToolSpec(
         title="List projects",
         description="Discover Git repositories under operator-approved project roots.",
@@ -6040,12 +6045,7 @@ class Runtime:
     def service_doctor(self, args: dict[str, Any]) -> dict[str, Any]:
         return self._run_devmcp_operator_command("doctor")
 
-    def service_restart(self, args: dict[str, Any]) -> dict[str, Any]:
-        action = "restart DevMCP user services"
-        pending = self._profile_authorize_operation("service.manage", args, action)
-        if pending is not None:
-            return pending
-
+    def _schedule_devmcp_restart(self) -> dict[str, Any]:
         systemd_run = shutil.which("systemd-run")
         if systemd_run is None:
             raise ToolFailure(
@@ -6090,6 +6090,75 @@ class Runtime:
             "unit": unit,
             "delay_seconds": 1,
             "services": [DEVMCP_MCP_SERVICE, DEVMCP_TUNNEL_SERVICE],
+        }
+
+    def service_restart(self, args: dict[str, Any]) -> dict[str, Any]:
+        action = "restart DevMCP user services"
+        pending = self._profile_authorize_operation("service.manage", args, action)
+        if pending is not None:
+            return pending
+        return self._schedule_devmcp_restart()
+
+    def activate_policy_profile(self, args: dict[str, Any]) -> dict[str, Any]:
+        profile = str(args.get("profile", "")).strip().lower()
+        if profile not in PROFILE_NAMES:
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                f"Unknown policy profile: {profile}",
+                category="validation",
+                details={"supported": list(PROFILE_NAMES)},
+            )
+        action = f"activate DevMCP policy profile {profile} and restart services"
+        pending = self._profile_authorize_operation("policy.manage", args, action)
+        if pending is not None:
+            return pending
+
+        previous = self.policy_profile
+        completed = subprocess.run(
+            [sys.executable, "-m", "apps.devmcp.cli", "policy", "profile", profile],
+            cwd=str(DEVMCP_SOURCE_ROOT),
+            env=os.environ.copy(),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=30,
+        )
+        if completed.returncode != 0:
+            raise ToolFailure(
+                "SERVICE_COMMAND_FAILED",
+                "Failed to persist the requested DevMCP policy profile.",
+                category="internal",
+                details={
+                    "profile": profile,
+                    "exit_code": completed.returncode,
+                    "stderr": completed.stderr,
+                },
+            )
+        try:
+            restart = self._schedule_devmcp_restart()
+        except BaseException:
+            subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "apps.devmcp.cli",
+                    "policy",
+                    "profile",
+                    previous,
+                ],
+                cwd=str(DEVMCP_SOURCE_ROOT),
+                env=os.environ.copy(),
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=30,
+            )
+            raise
+        return {
+            "profile": profile,
+            "previous_profile": previous,
+            "status": restart["status"],
+            "restart": restart,
         }
 
     def workspace_info(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -7590,6 +7659,13 @@ def input_schemas() -> dict[str, dict[str, Any]]:
         "service_status": object_schema(),
         "service_doctor": object_schema(),
         "service_restart": object_schema({"approval_id": string}),
+        "activate_policy_profile": object_schema(
+            {
+                "profile": {**string, "enum": list(PROFILE_NAMES)},
+                "approval_id": string,
+            },
+            ["profile"],
+        ),
         "list_projects": object_schema(),
         "select_project": object_schema(
             {"project": {**string, "minLength": 1}}, ["project"]
