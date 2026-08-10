@@ -11,13 +11,14 @@ app remains a draft.
 
 ## Fixed inventory
 
-The default catalog contains exactly 51 tools:
+The default catalog contains exactly 52 tools:
 
 - `server_info`: Server info.
 - `health`: Health check.
 - `workspace_info`: Workspace info.
 - `service_status`: Run host-side DevMCP status diagnostics.
 - `service_doctor`: Run host-side DevMCP doctor diagnostics.
+- `host_cli_probe`: Run bounded host-side `path`, `--version`, or `--help` discovery for an executable inside the selected project using a sanitized environment.
 - `service_restart`: Schedule a delayed restart of the DevMCP user services.
 - `service_update`: Update the installed DevMCP runtime from a clean, synced local source checkout, reinstall user services, and safely restart.
 - `activate_policy_profile`: Persist a policy profile and schedule a safe restart.
@@ -65,7 +66,7 @@ The default catalog contains exactly 51 tools:
 - `get_default_cwd`: Get default cwd.
 - `set_default_cwd`: Set default cwd.
 `view_image` may be disabled when an installation cannot accept binary image
-content. That capability gate is not a tool profile. The other 50 tools are
+content. That capability gate is not a tool profile. The other 51 tools are
 always advertised, and `listChanged` is `false`.
 
 `service_status` and `service_doctor` execute only fixed DevMCP operator

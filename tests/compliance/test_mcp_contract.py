@@ -128,6 +128,7 @@ class MCPContractTests(ComplianceTestCase):
             "server_info": (True, False, True, False),
             "service_status": (True, False, True, False),
             "service_doctor": (True, False, True, False),
+            "host_cli_probe": (True, False, True, True),
             "service_restart": (False, True, False, False),
             "service_update": (False, True, False, True),
             "activate_policy_profile": (False, True, False, False),

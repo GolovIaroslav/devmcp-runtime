@@ -18,10 +18,10 @@ no dynamic `tools/list_changed`, and no required `open_workspace` call.
 `apply_patch` is the only direct file-write tool. `safe`, `trusted`, and
 `dangerous` are command permission policies and never alter `tools/list`.
 
-The default catalog contains 51 tools:
+The default catalog contains 52 tools:
 
 - runtime/context: `server_info`, `health`, `workspace_info`, `service_status`,
-  `service_doctor`, `service_restart`, `service_update`, `activate_policy_profile`,
+  `service_doctor`, `host_cli_probe`, `service_restart`, `service_update`, `activate_policy_profile`,
   `check_exec_environment`, `get_default_cwd`, `set_default_cwd`
 - project/session: `list_projects`, `select_project`, `current_project`,
   `project_checks`, `run_project_check`

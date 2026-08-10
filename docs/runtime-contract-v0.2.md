@@ -197,7 +197,7 @@ survive tunnel churn. Forwarded headers are ignored unless
 
 ## Stable tool inventory
 
-The default catalog has 51 tools, including `view_image`. Setting
+The default catalog has 52 tools, including `view_image`. Setting
 `CODING_TOOLS_MCP_ENABLE_VIEW_IMAGE=0` is the sole installation capability gate
 and removes only that optional binary-content tool. It is not a tool profile.
 

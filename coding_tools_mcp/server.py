@@ -705,6 +705,13 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         read_only=True,
         idempotent=True,
     ),
+    "host_cli_probe": ToolSpec(
+        title="Probe host CLI capability",
+        description="Resolve one executable inside the selected project and run only bounded --version or --help discovery on the host with a sanitized environment.",
+        read_only=True,
+        idempotent=True,
+        open_world=True,
+    ),
     "service_restart": ToolSpec(
         title="Restart DevMCP services",
         description="Schedule a host-side restart of the DevMCP MCP and tunnel user services after this tool response is returned.",
@@ -6488,6 +6495,90 @@ class Runtime:
     def service_doctor(self, args: dict[str, Any]) -> dict[str, Any]:
         return self._run_devmcp_operator_command("doctor")
 
+    def host_cli_probe(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Run bounded capability discovery for a selected-project CLI on the host."""
+
+        raw_path = str(args.get("path", "")).strip()
+        probe = str(args.get("probe", "")).strip().lower()
+        if not raw_path:
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                "path is required.",
+                category="validation",
+            )
+        if probe not in {"path", "version", "help"}:
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                "probe must be one of: path, version, help.",
+                category="validation",
+            )
+
+        resolved = self.workspace.resolve_existing(raw_path)
+        if not resolved.path.is_file() or not os.access(resolved.path, os.X_OK):
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                "host_cli_probe path must name an executable file inside the selected project.",
+                category="validation",
+                details={"path": resolved.display},
+            )
+        if probe == "path":
+            return {
+                "path": resolved.display,
+                "executable": True,
+                "probe": probe,
+            }
+
+        argument = "--version" if probe == "version" else "--help"
+        safe_env_keys = (
+            "PATH",
+            "HOME",
+            "LANG",
+            "LC_ALL",
+            "TERM",
+            "CAVENDISH_CLI_PATH",
+            "CAVENDISH_CWD",
+        )
+        safe_env = {key: os.environ[key] for key in safe_env_keys if key in os.environ}
+        argv = [str(resolved.path), argument]
+        try:
+            result = subprocess.run(
+                argv,
+                cwd=str(self.workspace.root),
+                env=safe_env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=30,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise ToolFailure(
+                "TIMEOUT",
+                f"host_cli_probe {probe} timed out after 30 seconds.",
+                category="runtime",
+                details={"path": resolved.display, "probe": probe},
+            ) from exc
+
+        output_limit = 65_536
+        stdout = result.stdout[:output_limit]
+        stderr = result.stderr[:output_limit]
+        payload = {
+            "path": resolved.display,
+            "probe": probe,
+            "exit_code": result.returncode,
+            "stdout": stdout,
+            "stderr": stderr,
+            "truncated": len(result.stdout) > output_limit
+            or len(result.stderr) > output_limit,
+        }
+        if result.returncode != 0:
+            raise ToolFailure(
+                "HOST_CLI_PROBE_FAILED",
+                f"host_cli_probe {probe} exited with code {result.returncode}.",
+                category="runtime",
+                details=payload,
+            )
+        return payload
+
     def _schedule_devmcp_restart(self) -> dict[str, Any]:
         systemd_run = shutil.which("systemd-run")
         if systemd_run is None:
@@ -8240,6 +8331,13 @@ def input_schemas() -> dict[str, dict[str, Any]]:
         "workspace_info": object_schema(),
         "service_status": object_schema(),
         "service_doctor": object_schema(),
+        "host_cli_probe": object_schema(
+            {
+                "path": {**string, "minLength": 1},
+                "probe": {**string, "enum": ["path", "version", "help"]},
+            },
+            ["path", "probe"],
+        ),
         "service_restart": object_schema({"approval_id": string}),
         "service_update": object_schema(
             {

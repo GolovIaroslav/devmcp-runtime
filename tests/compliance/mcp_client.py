@@ -24,6 +24,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 REQUIRED_TOOLS = (
     "server_info",
+    "host_cli_probe",
     "service_update",
     "activate_policy_profile",
     "check_exec_environment",
