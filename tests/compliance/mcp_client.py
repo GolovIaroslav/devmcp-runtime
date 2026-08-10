@@ -55,6 +55,7 @@ REQUIRED_TOOLS = (
     "git_delete_remote_branch",
     "git_commit",
     "git_push",
+    "antigravity_delegate",
     "view_image",
 )
 

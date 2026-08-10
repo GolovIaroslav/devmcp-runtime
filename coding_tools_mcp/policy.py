@@ -14,7 +14,7 @@ from typing import Any
 PROFILE_NAMES = ("safe", "balanced", "power", "autonomous", "custom")
 DECISIONS = ("auto", "ask", "deny")
 DEFAULT_PROFILE = "balanced"
-UNIMPLEMENTED_CAPABILITIES = frozenset({"agent.delegate"})
+UNIMPLEMENTED_CAPABILITIES: frozenset[str] = frozenset()
 
 CAPABILITIES = (
     "workspace.read",

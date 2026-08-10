@@ -17,18 +17,18 @@ devmcp policy import policy.json
 Balanced is intended for ordinary development. It auto-allows read/search,
 small patches, and registered safe tasks. Network, dependency changes,
 migrations, public listeners, push, sensitive environment injection, and
-destructive patches ask. `agent.delegate` is displayed as an unavailable
-capability and is fixed to `deny`, because this release exposes no delegation
-tool. This is an availability constraint, not a hidden host-boundary policy.
+destructive patches ask. `agent.delegate` is implemented by the bounded
+`antigravity_delegate` tool but remains `deny` in Safe, Balanced, and Power.
+Autonomous auto-authorizes it, while Custom may explicitly choose its decision.
 Actual host-boundary controls (bwrap, authentication, and loopback defaults)
 apply independently of profile choice.
 
 Autonomous is the opt-in operator profile for unattended development. Every
 implemented capability, including arbitrary sandboxed exec, network, dependency
 changes, destructive workspace operations, Git push, sensitive environment
-injection, public binds, and DevMCP user-service management, resolves to
-`auto`. It removes DevMCP's local approval queue from those operations; it does
-not disable the hard runtime boundary. Privilege-escalation executables,
+injection, public binds, bounded Antigravity delegation, and DevMCP user-service
+management, resolves to `auto`. It removes DevMCP's local approval queue from
+those operations; it does not disable the hard runtime boundary. Privilege-escalation executables,
 setuid/setgid execution, paths outside the selected project, sandbox escapes,
 and Docker/Podman socket exposure remain denied. `service_status` and
 `service_doctor` inspect the host-side DevMCP service directly, while

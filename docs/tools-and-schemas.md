@@ -11,7 +11,7 @@ app remains a draft.
 
 ## Fixed inventory
 
-The default catalog contains exactly 49 tools:
+The default catalog contains exactly 50 tools:
 
 - `server_info`: Server info.
 - `health`: Health check.
@@ -46,6 +46,7 @@ The default catalog contains exactly 49 tools:
 - `git_delete_remote_branch`: Delete one branch from a configured remote.
 - `git_commit`: Commit only explicitly named paths.
 - `git_push`: Push the current branch to a configured remote; force is rejected.
+- `antigravity_delegate`: Run one bounded Antigravity coding task in an isolated worktree.
 - `list_tasks`: List tasks.
 - `describe_task`: Describe task.
 - `run_task`: Run task.
@@ -63,7 +64,7 @@ The default catalog contains exactly 49 tools:
 - `get_default_cwd`: Get default cwd.
 - `set_default_cwd`: Set default cwd.
 `view_image` may be disabled when an installation cannot accept binary image
-content. That capability gate is not a tool profile. The other 48 tools are
+content. That capability gate is not a tool profile. The other 49 tools are
 always advertised, and `listChanged` is `false`.
 
 `service_status` and `service_doctor` execute only fixed DevMCP operator
@@ -83,16 +84,45 @@ profile.
 
 Operator-configured `workspaces` are passed to the runtime as project discovery
 roots. `list_projects` recursively discovers Git repositories without following
-symlinks, and `select_project` changes only the current MCP session's active
-repository. It never persists a new root. Once selected, direct file tools,
-patches, sandboxed execution, project checks, and Git operations are all rooted
-at that one canonical repository. Absolute paths, `..`, and symlink escapes are
-rejected.
+symlinks. In service-managed mode, `select_project` atomically persists the
+selected canonical repository below the private DevMCP configuration directory,
+so later Streamable HTTP runtimes created for the same local service continue on
+that project. The persisted path must still be a Git checkout inside an
+operator-configured project root; stale, invalid, or escaped values are ignored.
+Direct `Runtime` instances that are not configured with an active-project state
+file retain per-runtime/session selection behavior.
 
-HTTP sessions own independent `Runtime` instances, so two ChatGPT sessions can
-select different repositories without a process-global mutable selector. The
-default mode works directly against the existing checkout; selecting a project
-does not create a worktree.
+Once selected, direct file tools, patches, sandboxed execution, project checks,
+Git operations, and bounded delegation are all rooted at that one canonical
+repository. Absolute paths, `..`, and symlink escapes are rejected. Selection
+works directly against the existing checkout and does not create a long-lived
+worktree.
+
+## Bounded Antigravity delegation
+
+`antigravity_delegate` is a fallback for a coding task that cannot be completed
+through a more specific DevMCP primitive. It is controlled by `agent.delegate`:
+Safe, Balanced, and Power deny it; Autonomous auto-authorizes it, and Custom may
+explicitly configure it. The tool runs the host `agy` binary in a temporary
+detached Git worktree at the selected project's current HEAD, not in the
+operator's live checkout. The live checkout must have no tracked or staged
+modifications before delegation; untracked files are not copied into the
+temporary worktree.
+
+The binary is discovered from `DEVMCP_ANTIGRAVITY_BIN`, the service `PATH`,
+`~/.local/bin/agy`, or `/usr/local/bin/agy`, in that order. The configured or
+discovered path must be an executable file.
+
+The delegated prompt explicitly treats repository content and tool output as
+untrusted data. The host wrapper independently rejects repositories with tracked
+sensitive paths, filters sensitive environment variables, disables the real Git
+remote through per-process Git configuration, and requests Antigravity's sandbox
+when the installed CLI advertises that option. The delegate may not commit,
+change Git history, delete or move files, or modify sensitive paths. Only `M`
+and `A` worktree changes survive validation; `read_only` and `verify` modes must
+produce no changes. In `workspace_edit` mode, DevMCP applies the isolated binary
+patch to the selected checkout only after all validations pass. Any rejected or
+failed delegation is discarded with the temporary worktree.
 
 ## First-class Git mutations
 
@@ -176,7 +206,10 @@ Mode bits, BOM, and newline style are preserved.
 
 ## Command and output behavior
 
-`exec_command` and `write_stdin` default `yield_time_ms` to `10000`. Short
+`exec_command` and `write_stdin` default `yield_time_ms` to `10000` and honor
+requested initial waits up to the schema maximum of 300 seconds. This matters
+for clients that create a fresh MCP runtime for each tool call and therefore
+cannot reliably poll a process session owned by a prior runtime. Short
 commands ordinarily return `status: "exited"` in one call. A still-running
 command returns a `session_id` and machine-readable `next_action` for
 `write_stdin` with empty `chars`.
