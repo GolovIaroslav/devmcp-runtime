@@ -705,6 +705,13 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         read_only=True,
         idempotent=True,
     ),
+    "host_cli_probe": ToolSpec(
+        title="Probe host CLI capability",
+        description="Resolve one executable inside the selected project and run only bounded --version or --help discovery on the host with a sanitized environment.",
+        read_only=True,
+        idempotent=True,
+        open_world=True,
+    ),
     "service_restart": ToolSpec(
         title="Restart DevMCP services",
         description="Schedule a host-side restart of the DevMCP MCP and tunnel user services after this tool response is returned.",
@@ -819,6 +826,12 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     "git_pull": ToolSpec(
         title="Pull Git branch",
         description="Fast-forward only the current branch from one configured remote.",
+        destructive=True,
+        open_world=True,
+    ),
+    "git_merge_remote_branch": ToolSpec(
+        title="Merge remote Git branch",
+        description="Merge one branch from a configured remote into the current clean branch; abort automatically if conflicts occur.",
         destructive=True,
         open_world=True,
     ),
@@ -5811,6 +5824,75 @@ class Runtime:
             "result": "fast_forwarded",
         }
 
+    def git_merge_remote_branch(self, args: dict[str, Any]) -> dict[str, Any]:
+        git, git_env = self._require_selected_git_repo()
+        current = self._git_current_branch(git, git_env)
+        remote = self._configured_git_remote(git, git_env, args.get("remote", "origin"))
+        branch = self._validate_branch_name(
+            str(args.get("branch", "")).strip(), git, git_env
+        )
+        dirty = self._run_git_text(
+            [
+                git,
+                "-C",
+                str(self.workspace.root),
+                "status",
+                "--porcelain=v1",
+                "--untracked-files=no",
+            ],
+            timeout=10,
+            env=git_env,
+        )
+        if dirty.returncode != 0:
+            raise ToolFailure(
+                "GIT_ERROR", "Unable to inspect Git worktree state.", category="runtime"
+            )
+        if dirty.stdout.strip():
+            raise ToolFailure(
+                "INVALID_STATE",
+                "Tracked or staged changes must be clean before git_merge_remote_branch.",
+                category="conflict",
+            )
+        remote_ref = f"refs/remotes/{remote}/{branch}"
+        if not self._git_rev_parse(self.workspace.root, remote_ref, env=git_env):
+            raise ToolFailure(
+                "NOT_FOUND",
+                "Remote branch ref is not available locally; run git_fetch first.",
+                category="not_found",
+                details={"remote": remote, "branch": branch},
+            )
+        pending = self._profile_authorize_operation(
+            "git.sync", args, f"git merge --no-edit {remote}/{branch} into {current}"
+        )
+        if pending is not None:
+            return pending
+        before = self._git_rev_parse(self.workspace.root, "HEAD", env=git_env)
+        completed = self._run_git_text(
+            [git, "-C", str(self.workspace.root), "merge", "--no-edit", remote_ref],
+            timeout=120,
+            env=git_env,
+        )
+        if completed.returncode != 0:
+            self._run_git_text(
+                [git, "-C", str(self.workspace.root), "merge", "--abort"],
+                timeout=30,
+                env=git_env,
+            )
+            raise ToolFailure(
+                "GIT_CONFLICT",
+                "Git merge failed and was aborted; the pre-merge branch state was restored.",
+                category="conflict",
+                details={"remote": remote, "branch": branch, "before": before},
+            )
+        return {
+            "branch": current,
+            "remote": remote,
+            "merged_branch": branch,
+            "before": before,
+            "sha": self._git_rev_parse(self.workspace.root, "HEAD", env=git_env),
+            "result": "merged",
+        }
+
     def git_delete_branch(self, args: dict[str, Any]) -> dict[str, Any]:
         git, git_env = self._require_selected_git_repo()
         name = self._validate_branch_name(
@@ -6487,6 +6569,90 @@ class Runtime:
 
     def service_doctor(self, args: dict[str, Any]) -> dict[str, Any]:
         return self._run_devmcp_operator_command("doctor")
+
+    def host_cli_probe(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Run bounded capability discovery for a selected-project CLI on the host."""
+
+        raw_path = str(args.get("path", "")).strip()
+        probe = str(args.get("probe", "")).strip().lower()
+        if not raw_path:
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                "path is required.",
+                category="validation",
+            )
+        if probe not in {"path", "version", "help"}:
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                "probe must be one of: path, version, help.",
+                category="validation",
+            )
+
+        resolved = self.workspace.resolve_existing(raw_path)
+        if not resolved.path.is_file() or not os.access(resolved.path, os.X_OK):
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                "host_cli_probe path must name an executable file inside the selected project.",
+                category="validation",
+                details={"path": resolved.display},
+            )
+        if probe == "path":
+            return {
+                "path": resolved.display,
+                "executable": True,
+                "probe": probe,
+            }
+
+        argument = "--version" if probe == "version" else "--help"
+        safe_env_keys = (
+            "PATH",
+            "HOME",
+            "LANG",
+            "LC_ALL",
+            "TERM",
+            "CAVENDISH_CLI_PATH",
+            "CAVENDISH_CWD",
+        )
+        safe_env = {key: os.environ[key] for key in safe_env_keys if key in os.environ}
+        argv = [str(resolved.path), argument]
+        try:
+            result = subprocess.run(
+                argv,
+                cwd=str(self.workspace.root),
+                env=safe_env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=30,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise ToolFailure(
+                "TIMEOUT",
+                f"host_cli_probe {probe} timed out after 30 seconds.",
+                category="runtime",
+                details={"path": resolved.display, "probe": probe},
+            ) from exc
+
+        output_limit = 65_536
+        stdout = result.stdout[:output_limit]
+        stderr = result.stderr[:output_limit]
+        payload = {
+            "path": resolved.display,
+            "probe": probe,
+            "exit_code": result.returncode,
+            "stdout": stdout,
+            "stderr": stderr,
+            "truncated": len(result.stdout) > output_limit
+            or len(result.stderr) > output_limit,
+        }
+        if result.returncode != 0:
+            raise ToolFailure(
+                "HOST_CLI_PROBE_FAILED",
+                f"host_cli_probe {probe} exited with code {result.returncode}.",
+                category="runtime",
+                details=payload,
+            )
+        return payload
 
     def _schedule_devmcp_restart(self) -> dict[str, Any]:
         systemd_run = shutil.which("systemd-run")
@@ -8240,6 +8406,13 @@ def input_schemas() -> dict[str, dict[str, Any]]:
         "workspace_info": object_schema(),
         "service_status": object_schema(),
         "service_doctor": object_schema(),
+        "host_cli_probe": object_schema(
+            {
+                "path": {**string, "minLength": 1},
+                "probe": {**string, "enum": ["path", "version", "help"]},
+            },
+            ["path", "probe"],
+        ),
         "service_restart": object_schema({"approval_id": string}),
         "service_update": object_schema(
             {
@@ -8453,6 +8626,14 @@ def input_schemas() -> dict[str, dict[str, Any]]:
         ),
         "git_pull": object_schema(
             {"remote": {**string, "default": "origin"}, "approval_id": string}
+        ),
+        "git_merge_remote_branch": object_schema(
+            {
+                "remote": {**string, "default": "origin"},
+                "branch": {**string, "minLength": 1},
+                "approval_id": string,
+            },
+            ["branch"],
         ),
         "git_delete_branch": object_schema(
             {"name": {**string, "minLength": 1}, "approval_id": string}, ["name"]

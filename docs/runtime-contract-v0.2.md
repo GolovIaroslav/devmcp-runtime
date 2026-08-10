@@ -128,7 +128,7 @@ Tool failures keep the same envelope with `isError: true`, a readable error in
 Known tool error codes include:
 
 ```json
-["ABSOLUTE_PATH_DENIED", "ACCESS_DENIED", "BINARY_FILE", "GIT_ERROR", "INTERNAL_ERROR", "INVALID_ARGUMENT", "INVALID_STATE", "IS_DIRECTORY", "NOT_A_DIRECTORY", "NOT_FOUND", "NOT_IMPLEMENTED", "OUTPUT_TOO_LARGE", "PATCH_BASELINE_LIMIT", "PATCH_CONFLICT", "PATCH_CONTEXT_AMBIGUOUS", "PATCH_CONTEXT_NOT_FOUND", "PATCH_FAILED", "PATCH_HUNKS_OVERLAP", "PATCH_ROLLBACK_FAILED", "PATH_OUTSIDE_WORKSPACE", "PERMISSION_REQUIRED", "RUNTIME_DIR_UNWRITABLE", "SANDBOX_FAILED", "SANDBOX_UNAVAILABLE", "SERVICE_COMMAND_FAILED", "SERVICE_UNAVAILABLE", "SESSION_CLOSED", "SESSION_LIMIT_REACHED", "SESSION_NOT_FOUND", "SYMLINK_ESCAPE", "TTY_UNSUPPORTED", "UNSUPPORTED_ENCODING"]
+["ABSOLUTE_PATH_DENIED", "ACCESS_DENIED", "BINARY_FILE", "GIT_CONFLICT", "GIT_ERROR", "HOST_CLI_PROBE_FAILED", "INTERNAL_ERROR", "INVALID_ARGUMENT", "INVALID_STATE", "IS_DIRECTORY", "NOT_A_DIRECTORY", "NOT_FOUND", "NOT_IMPLEMENTED", "OUTPUT_TOO_LARGE", "PATCH_BASELINE_LIMIT", "PATCH_CONFLICT", "PATCH_CONTEXT_AMBIGUOUS", "PATCH_CONTEXT_NOT_FOUND", "PATCH_FAILED", "PATCH_HUNKS_OVERLAP", "PATCH_ROLLBACK_FAILED", "PATH_OUTSIDE_WORKSPACE", "PERMISSION_REQUIRED", "RUNTIME_DIR_UNWRITABLE", "SANDBOX_FAILED", "SANDBOX_UNAVAILABLE", "SERVICE_COMMAND_FAILED", "SERVICE_UNAVAILABLE", "SESSION_CLOSED", "SESSION_LIMIT_REACHED", "SESSION_NOT_FOUND", "SYMLINK_ESCAPE", "TIMEOUT", "TTY_UNSUPPORTED", "UNSUPPORTED_ENCODING"]
 ```
 
 Error categories are `validation`, `security`, `permission`, `runtime`,
@@ -197,7 +197,7 @@ survive tunnel churn. Forwarded headers are ignored unless
 
 ## Stable tool inventory
 
-The default catalog has 51 tools, including `view_image`. Setting
+The default catalog has 53 tools, including `view_image`. Setting
 `CODING_TOOLS_MCP_ENABLE_VIEW_IMAGE=0` is the sole installation capability gate
 and removes only that optional binary-content tool. It is not a tool profile.
 
@@ -234,6 +234,19 @@ Annotations: `{"title":"DevMCP service doctor","readOnlyHint":true,"destructiveH
 
 Runs the fixed host-side `devmcp doctor` diagnostic outside the execution
 sandbox and returns its bounded stdout/stderr and exit code.
+
+### host_cli_probe
+
+Inputs: `"path"`, `"probe"`.
+
+Annotations: `{"title":"Probe host CLI capability","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":true}`.
+
+Resolves one executable file inside the selected project and performs only a
+bounded capability probe. `probe=path` returns the resolved executable without
+running it; `probe=version` runs only `--version`; `probe=help` runs only
+`--help`. Host execution uses the selected project root as cwd, a small
+sanitized environment allowlist, a 30-second timeout, and bounded stdout/stderr.
+Arbitrary argv and arbitrary environment injection are not exposed.
 
 ### service_restart
 
@@ -521,6 +534,19 @@ Annotations: `{"title":"Pull Git branch","readOnlyHint":false,"destructiveHint":
 Pulls the current branch from one configured remote using `--ff-only` only.
 Tracked or staged worktree changes cause `INVALID_STATE` before network access.
 Controlled by `git.sync`.
+
+### git_merge_remote_branch
+
+Inputs: `"remote"`, `"branch"`, `"approval_id"`.
+
+Annotations: `{"title":"Merge remote Git branch","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
+
+Merges one already-fetched branch from a configured remote into the current
+branch. Tracked or staged worktree changes are rejected before mutation. The
+remote and branch names are validated, arbitrary URLs/options are not accepted,
+and a failed merge is immediately followed by `git merge --abort` before the
+tool returns `GIT_CONFLICT`, restoring the pre-merge branch state. Controlled by
+`git.sync`.
 
 ### git_delete_branch
 

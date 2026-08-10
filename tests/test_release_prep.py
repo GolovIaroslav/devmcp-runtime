@@ -507,6 +507,20 @@ class ReleaseLifecycleTests(unittest.TestCase):
                     self.assertEqual(status["stdout"], "operator-ok\n")
                     self.assertIn("status", run.call_args.args[0])
 
+                cli = Path(tmp) / "probe-cli"
+                cli.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+                cli.chmod(0o755)
+                with patch(
+                    "coding_tools_mcp.server.subprocess.run", return_value=completed
+                ) as run:
+                    probe = runtime.host_cli_probe(
+                        {"path": "probe-cli", "probe": "help"}
+                    )
+                    self.assertEqual(probe["stdout"], "operator-ok\n")
+                    self.assertEqual(run.call_args.args[0], [str(cli), "--help"])
+                    self.assertEqual(run.call_args.kwargs["cwd"], str(Path(tmp)))
+                    self.assertNotIn("OPENAI_API_KEY", run.call_args.kwargs["env"])
+
                 with (
                     patch(
                         "coding_tools_mcp.server.shutil.which",
