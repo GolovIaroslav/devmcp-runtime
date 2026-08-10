@@ -612,6 +612,48 @@ class ReleaseLifecycleTests(unittest.TestCase):
                 args.host = "0.0.0.0"
                 self.assertEqual(run_http(args), 2)
 
+    def test_legacy_trusted_authenticated_public_bind_remains_compatible(self) -> None:
+        class FakeServer:
+            def __init__(self) -> None:
+                self.served = False
+                self.closed = False
+
+            def serve_forever(self) -> None:
+                self.served = True
+
+            def server_close(self) -> None:
+                self.closed = True
+
+        args = SimpleNamespace(
+            auth_token="smoke-token",
+            auth_token_file=None,
+            host="0.0.0.0",
+            port=8765,
+            policy_profile=None,
+            permission_mode="trusted",
+            allow_network=True,
+            shell_env_inherit=None,
+            oauth_mode=False,
+        )
+        fake_runtime = SimpleNamespace(
+            auth_token="smoke-token", project_context=object()
+        )
+        fake_server = FakeServer()
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch(
+                "coding_tools_mcp.server.build_runtime", return_value=fake_runtime
+            ) as build_runtime,
+            patch(
+                "coding_tools_mcp.server.RuntimeHTTPServer", return_value=fake_server
+            ),
+        ):
+            self.assertEqual(run_http(args), 0)
+
+        self.assertEqual(build_runtime.call_count, 1)
+        self.assertTrue(fake_server.served)
+        self.assertTrue(fake_server.closed)
+
     def test_foreground_tunnel_status_uses_tunnel_client_health(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             with patch.dict(os.environ, {"DEVMCP_CONFIG_DIR": tmp}, clear=False):

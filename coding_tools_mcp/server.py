@@ -8630,26 +8630,32 @@ def run_http(args: argparse.Namespace) -> int:
     except ValueError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
-    active_profile = runtime_policy.policy_profile or legacy_profile(
-        runtime_policy.permission_mode
-    )
-    server_capability = (
-        "server.loopback" if is_loopback_bind_host(str(args.host)) else "server.public"
-    )
-    server_decision = policy_decision(
-        active_profile,
-        server_capability,
-        policy_rules_from_config_file(
-            os.environ.get("DEVMCP_POLICY_CONFIG_FILE"), active_profile
-        ),
-    )
-    if server_decision != "auto":
-        print(
-            f"ERROR: {server_capability} is {server_decision} in the active policy profile. "
-            "Select a profile or Custom rule that auto-allows this server bind.",
-            file=sys.stderr,
+    # Server bind capabilities belong to the explicitly selected profile. The
+    # retired safe/trusted/dangerous switches predate that profile matrix and
+    # remain compatibility presets for Runtime operations; applying their
+    # legacy profile mapping here would break authenticated legacy HTTP
+    # launches such as the Docker image's trusted + 0.0.0.0 configuration.
+    if runtime_policy.policy_profile is not None:
+        active_profile = runtime_policy.policy_profile
+        server_capability = (
+            "server.loopback"
+            if is_loopback_bind_host(str(args.host))
+            else "server.public"
         )
-        return 2
+        server_decision = policy_decision(
+            active_profile,
+            server_capability,
+            policy_rules_from_config_file(
+                os.environ.get("DEVMCP_POLICY_CONFIG_FILE"), active_profile
+            ),
+        )
+        if server_decision != "auto":
+            print(
+                f"ERROR: {server_capability} is {server_decision} in the active policy profile. "
+                "Select a profile or Custom rule that auto-allows this server bind.",
+                file=sys.stderr,
+            )
+            return 2
 
     oauth_config: OAuthConfig | None = None
     oauth_mode = (
