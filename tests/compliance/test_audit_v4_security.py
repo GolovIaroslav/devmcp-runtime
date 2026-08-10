@@ -27,19 +27,29 @@ class AuditV4SecurityTests(ComplianceTestCase):
         sentinel.write_text("must remain byte-identical\n", encoding="utf-8")
         link_script = self.workspace.root / "make_link.py"
         link_script.write_text(
-            f"import os\nos.symlink({str(sentinel)!r}, 'future-file.txt')\n",
+            "import os\n"
+            "import time\n"
+            f"os.symlink({str(sentinel)!r}, 'future-file.txt')\n"
+            "print('READY', flush=True)\n"
+            "time.sleep(30)\n",
             encoding="utf-8",
         )
         runtime = Runtime(self.workspace.root)
+        session_id = ""
         try:
             result = runtime.exec_command(
                 {
                     "cmd": "python3 make_link.py",
-                    "timeout_ms": 5000,
-                    "yield_time_ms": 5000,
+                    "timeout_ms": 30000,
+                    "yield_time_ms": 1000,
                 }
             )
-            self.assertEqual(result.get("exit_code"), 0, result)
+            self.assertEqual(result.get("status"), "running", result)
+            self.assertIn("READY", result.get("stdout", ""))
+            session_id = str(result["session_id"])
+            sandbox = runtime.sandbox
+            self.assertIsNotNone(sandbox)
+            assert sandbox is not None
             patch = "*** Begin Patch\n*** Add File: future-file.txt\n+safe mirror content\n*** End Patch\n"
             applied = runtime.apply_patch({"patch": patch})
             self.assertEqual(applied.get("risk"), "ALLOW", applied)
@@ -47,15 +57,13 @@ class AuditV4SecurityTests(ComplianceTestCase):
                 sentinel.read_text(encoding="utf-8"), "must remain byte-identical\n"
             )
             self.assertEqual(
-                (runtime.sandbox.sandbox_dir / "future-file.txt").read_text(
-                    encoding="utf-8"
-                ),
+                (sandbox.sandbox_dir / "future-file.txt").read_text(encoding="utf-8"),
                 "safe mirror content\n",
             )
-            self.assertFalse(
-                (runtime.sandbox.sandbox_dir / "future-file.txt").is_symlink()
-            )
+            self.assertFalse((sandbox.sandbox_dir / "future-file.txt").is_symlink())
         finally:
+            if session_id:
+                runtime.cancel_session(session_id)
             runtime.close()
 
     def test_snapshot_hides_secrets_from_a_normal_script(self) -> None:
@@ -80,7 +88,8 @@ class AuditV4SecurityTests(ComplianceTestCase):
                 "from pathlib import Path\n"
                 "path = Path('.env')\n"
                 "print(path.exists())\n"
-                "print(path.read_text() if path.exists() else 'missing')\n",
+                "print(path.read_text() if path.exists() else 'missing')\n"
+                "print(Path('.env.example').exists())\n",
                 encoding="utf-8",
             )
             runtime = Runtime(root)
@@ -95,8 +104,8 @@ class AuditV4SecurityTests(ComplianceTestCase):
                 self.assertEqual(result.get("exit_code"), 0, result)
                 self.assertNotIn("AUDIT_V4_SECRET", result.get("stdout", ""))
                 self.assertNotIn("must-not-leak", result.get("stdout", ""))
-                self.assertFalse((runtime.sandbox.sandbox_dir / ".env").exists())
-                self.assertTrue((runtime.sandbox.sandbox_dir / ".env.example").exists())
+                self.assertEqual(result.get("stdout"), "False\nmissing\nTrue\n")
+                self.assertIsNone(runtime.sandbox)
             finally:
                 runtime.close()
 
@@ -243,7 +252,8 @@ class AuditV4SecurityTests(ComplianceTestCase):
                 payload = result["structuredContent"]
                 self.assertFalse(result.get("isError", False), result)
                 self.assertIn("$(touch escaped.txt)", payload.get("stdout", ""))
-                self.assertFalse((runtime.sandbox.sandbox_dir / "escaped.txt").exists())
+                self.assertFalse((root / "escaped.txt").exists())
+                self.assertIsNone(runtime.sandbox)
             finally:
                 runtime.close()
 

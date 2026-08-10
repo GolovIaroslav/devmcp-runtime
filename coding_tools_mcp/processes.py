@@ -7,7 +7,7 @@ import subprocess
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, BinaryIO
+from typing import Any, BinaryIO, Callable
 
 from .errors import ToolFailure
 from .textutils import DEFAULT_MAX_LINES, TextTruncation, truncate_text_tail
@@ -33,38 +33,60 @@ def terminate_process_group(
     *,
     force: bool = False,
 ) -> None:
+    def wait_for_exit(timeout: float) -> bool:
+        try:
+            process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return False
+        except Exception:
+            return process.poll() is not None
+        return True
+
     if not hasattr(os, "killpg"):
         if os.name == "nt" and not force:
             event = getattr(signal, "CTRL_BREAK_EVENT", None)
             if event is not None:
                 try:
                     process.send_signal(event)
-                    process.wait(timeout=1)
-                    return
                 except Exception:
                     pass
+                else:
+                    if wait_for_exit(1):
+                        return
         try:
             if force:
                 process.kill()
             else:
                 process.terminate()
-            process.wait(timeout=1)
         except Exception:
-            process.kill()
+            if not force:
+                try:
+                    process.kill()
+                except Exception:
+                    return
+        wait_for_exit(1)
         return
     try:
         os.killpg(process.pid, signum)
     except ProcessLookupError:
         return
     except Exception:
-        process.terminate()
-    try:
-        process.wait(timeout=1)
-    except subprocess.TimeoutExpired:
         try:
-            os.killpg(process.pid, HARD_KILL_SIGNAL)
+            process.kill() if force else process.terminate()
         except Exception:
+            return
+    if wait_for_exit(1):
+        return
+    try:
+        os.killpg(process.pid, HARD_KILL_SIGNAL)
+    except ProcessLookupError:
+        return
+    except Exception:
+        try:
             process.kill()
+        except Exception:
+            return
+    wait_for_exit(1)
 
 
 def spawn_process(
@@ -123,11 +145,17 @@ def spawn_process(
             env=env,
             **popen_kwargs,
         ).result()
-    except Exception:
-        os.close(master_fd)
+    except BaseException:
+        try:
+            os.close(master_fd)
+        except OSError:
+            pass
         raise
     finally:
-        os.close(slave_fd)
+        try:
+            os.close(slave_fd)
+        except OSError:
+            pass
     return process, master_fd
 
 
@@ -158,7 +186,13 @@ class ExecSession:
     timed_out: bool = False
     terminating: bool = False
     pty_master_fd: int | None = None
+    resource_cleanup: Callable[[], None] | None = field(default=None, repr=False)
     _stdin_closed: bool = False
+    _resource_cleanup_done: bool = field(default=False, repr=False)
+    _reaper_started: bool = field(default=False, repr=False)
+    _resource_cleanup_lock: threading.Lock = field(
+        default_factory=threading.Lock, repr=False
+    )
 
     @property
     def retained_bytes(self) -> int:
@@ -216,6 +250,50 @@ class ExecSession:
                 self.process.stdin.close()
             except OSError:
                 pass
+
+    def _close_pty_master_fd_locked(self, fd: int) -> None:
+        if self.pty_master_fd != fd:
+            return
+        self.pty_master_fd = None
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+    def close_pty_master_fd(self, fd: int) -> None:
+        with self._resource_cleanup_lock:
+            self._close_pty_master_fd_locked(fd)
+
+    def mark_reaper_started(self) -> bool:
+        with self._resource_cleanup_lock:
+            if self._reaper_started:
+                return False
+            self._reaper_started = True
+            return True
+
+    def close_process_streams(self) -> None:
+        for stream in (
+            getattr(self.process, "stdin", None),
+            getattr(self.process, "stdout", None),
+            getattr(self.process, "stderr", None),
+        ):
+            if stream is not None:
+                try:
+                    stream.close()
+                except OSError:
+                    pass
+
+    def release_owned_resources(self) -> None:
+        with self._resource_cleanup_lock:
+            if self._resource_cleanup_done:
+                return
+            if self.pty_master_fd is not None:
+                self._close_pty_master_fd_locked(self.pty_master_fd)
+            cleanup = self.resource_cleanup
+            self.resource_cleanup = None
+            self._resource_cleanup_done = True
+            if cleanup is not None:
+                cleanup()
 
     def snapshot_since_cursor(self, max_output_bytes: int) -> dict[str, Any]:
         self.refresh_status()
@@ -314,6 +392,7 @@ class ExecSession:
         self.closed = True
         if self.completed_at is None:
             self.completed_at = time.time()
+        self.release_owned_resources()
 
     def drain_readers(self, timeout: float = 0.2) -> None:
         deadline = time.time() + timeout
@@ -382,11 +461,9 @@ def start_reader_threads(session: ExecSession) -> None:
             return
         finally:
             try:
-                os.close(fd)
+                session.close_pty_master_fd(fd)
             except OSError:
                 pass
-            if session.pty_master_fd == fd:
-                session.pty_master_fd = None
 
     if session.pty_master_fd is not None:
         thread = threading.Thread(

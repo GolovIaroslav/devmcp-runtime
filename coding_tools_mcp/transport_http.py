@@ -17,10 +17,22 @@ def _close_runtime(runtime: Any) -> None:
         close()
 
 
+def _runtime_evictable(runtime: Any) -> bool:
+    evictable = getattr(runtime, "http_session_evictable", None)
+    if callable(evictable):
+        try:
+            return bool(evictable())
+        except BaseException:
+            return False
+    return True
+
+
 @dataclass
 class HTTPSessionRecord:
     runtime: Any
     last_seen: float
+    active_requests: int = 0
+    closing: bool = False
 
 
 class HTTPSessionManager:
@@ -35,17 +47,36 @@ class HTTPSessionManager:
 
     def create(self) -> Any:
         self.prune()
+        evicted: HTTPSessionRecord | None = None
         with self._lock:
             if self._closed:
                 raise RuntimeError("HTTP session manager is closed")
             if len(self._sessions) + self._creating >= MAX_HTTP_SESSIONS:
-                raise RuntimeError("maximum HTTP session count reached")
+                idle = [
+                    (session_id, record)
+                    for session_id, record in self._sessions.items()
+                    if (
+                        record.active_requests == 0
+                        and not record.closing
+                        and _runtime_evictable(record.runtime)
+                    )
+                ]
+                if not idle:
+                    raise RuntimeError("maximum HTTP session count reached")
+                session_id, evicted = min(idle, key=lambda item: item[1].last_seen)
+                self._sessions.pop(session_id, None)
             self._creating += 1
         runtime: Any | None = None
         installed = False
         try:
+            if evicted is not None:
+                _close_runtime(evicted.runtime)
             runtime = self._factory()
-            record = HTTPSessionRecord(runtime=runtime, last_seen=time.time())
+            record = HTTPSessionRecord(
+                runtime=runtime,
+                last_seen=time.monotonic(),
+                active_requests=1,
+            )
             with self._lock:
                 if self._closed:
                     raise RuntimeError("HTTP session manager is closed")
@@ -66,26 +97,51 @@ class HTTPSessionManager:
             if self._closed:
                 return None
             record = self._sessions.get(session_id)
-            if record is None:
+            if record is None or record.closing:
                 return None
-            record.last_seen = time.time()
+            record.last_seen = time.monotonic()
+            record.active_requests += 1
             return record.runtime
 
-    def delete(self, session_id: str) -> bool:
+    def release(self, session_id: str) -> None:
+        close_record: HTTPSessionRecord | None = None
         with self._lock:
-            record = self._sessions.pop(session_id, None)
-        if record is None:
-            return False
-        _close_runtime(record.runtime)
+            record = self._sessions.get(session_id)
+            if record is None:
+                return
+            if record.active_requests > 0:
+                record.active_requests -= 1
+            record.last_seen = time.monotonic()
+            if record.closing and record.active_requests == 0:
+                close_record = self._sessions.pop(session_id, None)
+        if close_record is not None:
+            _close_runtime(close_record.runtime)
+
+    def delete(self, session_id: str) -> bool:
+        close_record: HTTPSessionRecord | None = None
+        with self._lock:
+            record = self._sessions.get(session_id)
+            if record is None:
+                return False
+            record.closing = True
+            if record.active_requests == 0:
+                close_record = self._sessions.pop(session_id, None)
+        if close_record is not None:
+            _close_runtime(close_record.runtime)
         return True
 
     def prune(self) -> None:
-        cutoff = time.time() - HTTP_SESSION_TTL_SECONDS
+        cutoff = time.monotonic() - HTTP_SESSION_TTL_SECONDS
         with self._lock:
             expired = [
                 session_id
                 for session_id, record in self._sessions.items()
-                if record.last_seen < cutoff
+                if (
+                    record.last_seen < cutoff
+                    and record.active_requests == 0
+                    and not record.closing
+                    and _runtime_evictable(record.runtime)
+                )
             ]
             records = [self._sessions.pop(session_id) for session_id in expired]
         for record in records:

@@ -101,22 +101,6 @@ TASK_REGISTRY = [
         "python3",
         ["-c", "import tomllib, sys; tomllib.load(open(sys.argv[1], 'rb'))"],
     ),
-    _task("git.status", "git", "Show git status.", "git", ["status"]),
-    _task("git.diff", "git", "Show git diff.", "git", ["diff"]),
-    _task(
-        "git.diff_cached", "git", "Show staged git diff.", "git", ["diff", "--cached"]
-    ),
-    _task("git.log", "git", "Show a recent git log.", "git", ["log", "-n", "10"]),
-    _task("git.show", "git", "Show a specific git commit.", "git", ["show"]),
-    _task("git.blame", "git", "Show git blame.", "git", ["blame"]),
-    _task(
-        "git.current_branch",
-        "git",
-        "Show current git branch.",
-        "git",
-        ["branch", "--show-current"],
-    ),
-    _task("git.ls_files", "git", "List tracked files.", "git", ["ls-files"]),
     _task("npm.test", "npm", "Run npm tests.", "npm", ["test"]),
     _task("npm.test_target", "npm", "Run a specific npm test.", "npm", ["test", "--"]),
     _task("npm.build", "npm", "Run npm build.", "npm", ["run", "build"]),
@@ -182,7 +166,10 @@ TASK_REGISTRY = [
         "python",
         "Run pytest on a file.",
         "pytest",
-        arguments={"path": {"type": "path", "required": True}},
+        arguments={
+            "args": {"type": "string_array", "required": False},
+            "path": {"type": "path", "required": True},
+        },
     ),
     _task(
         "unittest.all",

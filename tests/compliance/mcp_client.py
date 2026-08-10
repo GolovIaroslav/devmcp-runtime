@@ -27,6 +27,11 @@ REQUIRED_TOOLS = (
     "check_exec_environment",
     "get_default_cwd",
     "set_default_cwd",
+    "list_projects",
+    "select_project",
+    "current_project",
+    "project_checks",
+    "run_project_check",
     "read_file",
     "list_dir",
     "list_files",
@@ -41,6 +46,10 @@ REQUIRED_TOOLS = (
     "git_log",
     "git_show",
     "git_blame",
+    "git_create_branch",
+    "git_switch_branch",
+    "git_commit",
+    "git_push",
     "view_image",
 )
 

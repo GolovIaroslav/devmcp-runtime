@@ -2,12 +2,14 @@
 
 ## Sandboxing Strategy
 
-To protect the authoritative workspace, all `exec_command` calls are executed within an `ExecutionSandbox`. 
+To protect the authoritative workspace, sandboxed execution uses an `ExecutionSandbox` snapshot.
 
 The `ExecutionSandbox`:
-1. Copies the authoritative workspace to a `/tmp/chatgpt-dev-sandbox-*` path using `rsync`.
-2. Intercepts `exec_command` workdirs and translates them to the temporary location.
-3. Automatically deletes itself on server exit (`close()`).
+1. Copies the selected repository without following symlinks into a runtime-owned private `sandboxes/sandbox-*` directory.
+2. Uses an ownership marker outside the writable snapshot so cleanup can verify exactly which temporary tree DevMCP owns.
+3. Translates sandboxed command workdirs to the temporary location while the authoritative repository remains outside the execution namespace.
+4. Is leased by active command sessions and deleted when the final command using it terminates, fails, times out, or is cancelled; runtime shutdown is a final cleanup path rather than the normal lifetime.
+5. Is recreated from the authoritative repository for later sequential execution instead of accumulating one repository-sized copy per MCP session.
 
 ## Approval Engine
 

@@ -686,26 +686,27 @@ def _serve(_: argparse.Namespace) -> int:
     from coding_tools_mcp.server import main as server_main
 
     os.environ["DEVMCP_POLICY_CONFIG_FILE"] = str(selected.config_file)
-    return server_main(
-        [
-            "--workspace",
-            str(config["workspace"]),
-            "--host",
-            str(config.get("mcp_host", "127.0.0.1")),
-            "--port",
-            str(int(config.get("mcp_port", 47157))),
-            "--auth-token-file",
-            str(selected.mcp_token),
-            "--policy-profile",
-            str(config.get("profile", "balanced")),
-            "--sandbox-backend",
-            str(config.get("sandbox_backend", "bwrap")),
-            "--max-removed-lines",
-            str(int(config.get("patch", {}).get("max_removed_lines", 200))),
-            "--max-removed-percent",
-            str(float(config.get("patch", {}).get("max_removed_percent", 30.0))),
-        ]
-    )
+    server_args = [
+        "--workspace",
+        str(config["workspace"]),
+        "--host",
+        str(config.get("mcp_host", "127.0.0.1")),
+        "--port",
+        str(int(config.get("mcp_port", 47157))),
+        "--auth-token-file",
+        str(selected.mcp_token),
+        "--policy-profile",
+        str(config.get("profile", "balanced")),
+        "--sandbox-backend",
+        str(config.get("sandbox_backend", "bwrap")),
+        "--max-removed-lines",
+        str(int(config.get("patch", {}).get("max_removed_lines", 200))),
+        "--max-removed-percent",
+        str(float(config.get("patch", {}).get("max_removed_percent", 30.0))),
+    ]
+    for project_root in config.get("workspaces", [config["workspace"]]):
+        server_args.extend(["--project-root", str(project_root)])
+    return server_main(server_args)
 
 
 def _service_uninstall(_: argparse.Namespace) -> int:

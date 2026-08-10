@@ -201,6 +201,8 @@ MAX_ACTIVE_EXEC_SESSIONS = 16
 MAX_RETAINED_OUTPUT_SESSIONS = 32
 COMPLETED_SESSION_TTL_SECONDS = 300
 MAX_RUNTIME_OUTPUT_BYTES = 16 * 1024 * 1024
+MAX_PATCH_BASELINE_BYTES = 64 * 1024 * 1024
+MAX_PATCH_BASELINE_FILES = 4096
 SHELL_CONTROL_TOKENS = {"|", "||", "&", "&&", ";", "(", ")"}
 REDIRECTION_TOKENS = {">", ">>", "<", "<>", ">&", "<&", "&>", "&>>"}
 HEREDOC_TOKENS = {"<<", "<<<"}
@@ -688,6 +690,34 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         read_only=True,
         idempotent=True,
     ),
+    "list_projects": ToolSpec(
+        title="List projects",
+        description="Discover Git repositories under operator-approved project roots.",
+        read_only=True,
+        idempotent=True,
+    ),
+    "select_project": ToolSpec(
+        title="Select project",
+        description="Select one discovered repository as the writable project for this MCP session.",
+        idempotent=True,
+    ),
+    "current_project": ToolSpec(
+        title="Current project",
+        description="Show the repository selected for this MCP session.",
+        read_only=True,
+        idempotent=True,
+    ),
+    "project_checks": ToolSpec(
+        title="Project checks",
+        description="Discover bounded project-native verification commands for the selected repository.",
+        read_only=True,
+        idempotent=True,
+    ),
+    "run_project_check": ToolSpec(
+        title="Run project check",
+        description="Run one discovered project-native verification command in the selected repository sandbox.",
+        destructive=True,
+    ),
     "read_file": ToolSpec(
         title="Read file", description="Read file.", read_only=True, idempotent=True
     ),
@@ -738,6 +768,27 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     ),
     "git_blame": ToolSpec(
         title="Git blame", description="Git blame.", read_only=True, idempotent=True
+    ),
+    "git_create_branch": ToolSpec(
+        title="Create Git branch",
+        description="Create and switch to a local branch in the selected repository.",
+        destructive=True,
+    ),
+    "git_switch_branch": ToolSpec(
+        title="Switch Git branch",
+        description="Switch to an existing local branch in the selected repository.",
+        destructive=True,
+    ),
+    "git_commit": ToolSpec(
+        title="Git commit",
+        description="Commit only explicitly named paths in the selected repository.",
+        destructive=True,
+    ),
+    "git_push": ToolSpec(
+        title="Git push",
+        description="Push the current branch to a configured remote; force push and URL remotes are rejected.",
+        destructive=True,
+        open_world=True,
     ),
     "list_tasks": ToolSpec(
         title="List tasks", description="List tasks.", read_only=True, idempotent=True
@@ -1322,9 +1373,14 @@ class Workspace:
                 "NOT_FOUND", f"Path not found: {raw_path}", category="not_found"
             ) from exc
         if not is_relative_to(resolved, self.root):
-            code = (
-                "SYMLINK_ESCAPE" if candidate.is_symlink() else "PATH_OUTSIDE_WORKSPACE"
-            )
+            current = base
+            crossed_symlink = False
+            for part in pure.parts:
+                current = current / part
+                if current.is_symlink():
+                    crossed_symlink = True
+                    break
+            code = "SYMLINK_ESCAPE" if crossed_symlink else "PATH_OUTSIDE_WORKSPACE"
             raise ToolFailure(
                 code, "Path escapes the configured workspace.", category="security"
             )
@@ -1490,13 +1546,28 @@ class Runtime:
         max_removed_lines: int = 200,
         max_removed_percent: float = 30.0,
         policy_rules: dict[str, Any] | None = None,
+        project_roots: list[Path] | None = None,
     ) -> None:
         from .sandbox import ExecutionSandbox, detect_sandbox_backend
         from .tasks import TaskRegistry
 
         self.sandbox: ExecutionSandbox | None = None
+        self.sandbox_lock = threading.Lock()
+        self.sandbox_users = 0
         self.task_registry = TaskRegistry()
         self.workspace = Workspace(workspace)
+        configured_roots = list(project_roots or [self.workspace.root])
+        self.project_roots: tuple[Path, ...] = tuple(
+            dict.fromkeys(
+                root.expanduser().resolve(strict=True) for root in configured_roots
+            )
+        )
+        if not all(root.is_dir() for root in self.project_roots):
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                "Project roots must be existing directories.",
+                category="validation",
+            )
         self.enable_view_image = enable_view_image
         self._exposed_tool_names = [
             name
@@ -1581,6 +1652,7 @@ class Runtime:
         self.http_session_id = secrets.token_urlsafe(24)
         self.protocol_version = PROTOCOL_VERSION
         self.patch_baselines: dict[str, str | None] = {}
+        self.patch_baseline_bytes = 0
         self.patch_lock = threading.Lock()
         self.patch_committer = AtomicPatchCommitter()
         # ProjectContext is frozen and derived only from the workspace tree, so
@@ -1591,6 +1663,7 @@ class Runtime:
             if project_context is not None
             else load_project_context(self.workspace.root)
         )
+        self.active_project = self._project_record_for_path(self.workspace.root)
         self.request_sessions: dict[str | int, str] = {}
         self.request_sessions_lock = threading.Lock()
         self.request_context = threading.local()
@@ -1607,8 +1680,6 @@ class Runtime:
         self.cache_dir = self.runtime_dir / "cache"
 
     def close(self) -> None:
-        if self.sandbox:
-            self.sandbox.cleanup()
         with self.sessions_lock:
             if self._closed:
                 return
@@ -1616,13 +1687,66 @@ class Runtime:
             sessions = list(self.sessions.values())
             self.sessions.clear()
             self.output_sessions.clear()
+        still_running = False
         for session in sessions:
-            session.refresh_status()
-            if session.process.poll() is None:
-                terminate_process_group(session.process, signal.SIGTERM)
-            session.drain_readers()
-        shutil.rmtree(self.runtime_dir, ignore_errors=True)
+            if not self._terminate_session(session):
+                still_running = True
+                self._schedule_session_reaper(session)
+            else:
+                session.release_owned_resources()
+        if not still_running and self._discard_execution_sandbox():
+            shutil.rmtree(self.runtime_dir, ignore_errors=True)
         self.telemetry.finish()
+
+    def _terminate_session(self, session: ExecSession) -> bool:
+        session.refresh_status()
+        if session.process.poll() is None:
+            session.terminating = True
+            terminate_process_group(session.process, signal.SIGTERM)
+        exited = self._wait_for_session_exit(session, 1.0)
+        if not exited:
+            terminate_process_group(session.process, HARD_KILL_SIGNAL, force=True)
+            exited = self._wait_for_session_exit(session, 1.0)
+        return exited
+
+    def _schedule_session_reaper(self, session: ExecSession) -> None:
+        if not session.mark_reaper_started():
+            return
+        threading.Thread(
+            target=self._reap_closed_session,
+            args=(session,),
+            name=f"devmcp-reaper-{session.session_id[:8]}",
+            daemon=True,
+        ).start()
+
+    def _reap_closed_session(self, session: ExecSession) -> None:
+        while True:
+            try:
+                session.process.wait()
+                break
+            except Exception:
+                if session.process.poll() is not None:
+                    break
+                time.sleep(0.1)
+        session.refresh_status()
+        session.drain_readers()
+        session.close_process_streams()
+        session.release_owned_resources()
+        with self.sessions_lock:
+            if self.sessions.get(session.session_id) is session:
+                self.sessions.pop(session.session_id, None)
+            self.output_sessions.pop(session.session_id, None)
+        if self._closed and self._discard_execution_sandbox():
+            shutil.rmtree(self.runtime_dir, ignore_errors=True)
+
+    def http_session_evictable(self) -> bool:
+        """Return whether pressure eviction can close this Runtime safely."""
+        self._prune_sessions()
+        with self.sessions_lock:
+            if self._closed or self.starting_sessions or self.sessions:
+                return False
+        with self.sandbox_lock:
+            return self.sandbox_users == 0
 
     def _ensure_runtime_dirs(self) -> None:
         candidates = [self.runtime_dir]
@@ -1657,6 +1781,51 @@ class Runtime:
             category="runtime",
             details={"attempted": errors},
         )
+
+    def _acquire_execution_sandbox(self) -> Any:
+        from .sandbox import ExecutionSandbox
+
+        self._ensure_runtime_dirs()
+        with self.sandbox_lock:
+            if self._closed:
+                raise ToolFailure(
+                    "SESSION_CLOSED", "Runtime is closed.", category="runtime"
+                )
+            if self.sandbox is None:
+                self.sandbox = ExecutionSandbox.create(
+                    self.workspace.root,
+                    owner_root=self.runtime_dir / "sandboxes",
+                )
+            self.sandbox_users += 1
+            return self.sandbox
+
+    def _release_execution_sandbox(self, sandbox: Any) -> None:
+        cleanup = None
+        cleanup_runtime_dir = False
+        with self.sandbox_lock:
+            if self.sandbox is sandbox:
+                if self.sandbox_users > 0:
+                    self.sandbox_users -= 1
+                if self.sandbox_users == 0:
+                    self.sandbox = None
+                    cleanup = sandbox
+            else:
+                cleanup = sandbox
+            cleanup_runtime_dir = self._closed and self.sandbox_users == 0
+        if cleanup is not None:
+            cleanup.cleanup()
+        if cleanup_runtime_dir:
+            shutil.rmtree(self.runtime_dir, ignore_errors=True)
+
+    def _discard_execution_sandbox(self) -> bool:
+        with self.sandbox_lock:
+            if self.sandbox_users > 0:
+                return False
+            sandbox = self.sandbox
+            self.sandbox = None
+        if sandbox is not None:
+            sandbox.cleanup()
+        return True
 
     def command_home_dir(self) -> Path:
         return self.home_dir
@@ -1717,7 +1886,14 @@ class Runtime:
                 "version": __version__,
                 "schemaVersion": TOOL_SCHEMA_VERSION,
             },
-            "instructions": self.project_context.server_instructions(),
+            "instructions": (
+                "DevMCP can select one writable Git repository per MCP session. "
+                "When the user names or asks to continue a project, call list_projects, "
+                "select the matching repository with select_project, then read the returned "
+                "authority_files before changing code. All subsequent file, patch, exec, and "
+                "Git operations are confined to that selected repository.\n\n"
+                + self.project_context.server_instructions()
+            ),
         }
 
     def list_tools(self) -> dict[str, Any]:
@@ -1781,6 +1957,8 @@ class Runtime:
             "default_cwd": self.default_cwd_display(),
             "policy_profile": self.policy_profile,
             "policy_rules": effective_rules(self.policy_profile, self.policy_rules),
+            "project_roots": [str(root) for root in self.project_roots],
+            "active_project": self.active_project,
             "patch_risk_thresholds": {
                 "max_removed_lines": self.max_removed_lines,
                 "max_removed_percent": self.max_removed_percent,
@@ -1940,6 +2118,246 @@ class Runtime:
             "workspace": str(self.workspace.root),
             "default_cwd": resolved.display,
         }
+
+    def _project_record_for_path(self, path: Path) -> dict[str, Any]:
+        resolved = path.expanduser().resolve(strict=True)
+        matches: list[tuple[int, Path]] = []
+        for index, root in enumerate(self.project_roots):
+            if is_relative_to(resolved, root):
+                matches.append((index, root))
+        if not matches:
+            raise ToolFailure(
+                "PATH_OUTSIDE_WORKSPACE",
+                "Project is outside operator-approved project roots.",
+                category="security",
+            )
+        root_index, root = max(matches, key=lambda item: len(item[1].parts))
+        relative = resolved.relative_to(root).as_posix() or "."
+        authority_files = [
+            name
+            for name in (
+                "STATE.md",
+                "STATE.MD",
+                "AGENTS.md",
+                "AGENTS.MD",
+                "CLAUDE.md",
+                "CLAUDE.MD",
+            )
+            if (resolved / name).is_file()
+        ]
+        return {
+            "id": f"{root_index}:{relative}",
+            "name": resolved.name,
+            "relative_path": relative,
+            "root": str(root),
+            "path": str(resolved),
+            "authority_files": authority_files,
+        }
+
+    @staticmethod
+    def _is_git_checkout(path: Path) -> bool:
+        marker = path / ".git"
+        return marker.is_dir() or marker.is_file()
+
+    def _discover_projects(self) -> list[dict[str, Any]]:
+        projects: list[dict[str, Any]] = []
+        seen: set[Path] = set()
+        max_directories = 10000
+        visited = 0
+        for root in self.project_roots:
+            for current, dirs, _files in os.walk(root, followlinks=False):
+                visited += 1
+                if visited > max_directories:
+                    raise ToolFailure(
+                        "OUTPUT_TOO_LARGE",
+                        "Project discovery exceeded its directory scan limit.",
+                        category="runtime",
+                        details={"max_directories": max_directories},
+                    )
+                candidate = Path(current)
+                try:
+                    resolved = candidate.resolve(strict=True)
+                except OSError:
+                    dirs[:] = []
+                    continue
+                if not is_relative_to(resolved, root):
+                    dirs[:] = []
+                    continue
+                dirs[:] = [
+                    name
+                    for name in dirs
+                    if name != ".git" and not (candidate / name).is_symlink()
+                ]
+                if self._is_git_checkout(resolved):
+                    if resolved not in seen:
+                        projects.append(self._project_record_for_path(resolved))
+                        seen.add(resolved)
+                    dirs[:] = []
+        projects.sort(key=lambda item: (str(item["root"]), str(item["relative_path"])))
+        return projects
+
+    def list_projects(self, args: dict[str, Any]) -> dict[str, Any]:
+        projects = self._discover_projects()
+        return {
+            "projects": projects,
+            "active_project": self.active_project,
+            "project_roots": [str(root) for root in self.project_roots],
+        }
+
+    def current_project(self, args: dict[str, Any]) -> dict[str, Any]:
+        return dict(self.active_project)
+
+    def select_project(self, args: dict[str, Any]) -> dict[str, Any]:
+        requested = str(args.get("project", "")).strip()
+        if not requested:
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                "project is required.",
+                category="validation",
+            )
+        matches = [
+            item
+            for item in self._discover_projects()
+            if requested
+            in {
+                str(item["id"]),
+                str(item["relative_path"]),
+                str(item["name"]),
+            }
+        ]
+        if len(matches) != 1:
+            raise ToolFailure(
+                "NOT_FOUND" if not matches else "INVALID_ARGUMENT",
+                "Project was not found."
+                if not matches
+                else "Project selector is ambiguous.",
+                category="not_found" if not matches else "validation",
+                details={"matches": [item["id"] for item in matches]},
+            )
+        selected = matches[0]
+        selected_path = Path(str(selected["path"]))
+        with self.sessions_lock:
+            starting_processes = self.starting_sessions
+            active_processes = [
+                session
+                for session in self.sessions.values()
+                if session.process.poll() is None
+            ]
+        with self.sandbox_lock:
+            active_sandbox_users = self.sandbox_users
+        if starting_processes or active_processes or active_sandbox_users:
+            raise ToolFailure(
+                "INVALID_STATE",
+                "Cannot switch projects while command sessions are running.",
+                category="runtime",
+            )
+        self._discard_execution_sandbox()
+        self.workspace = Workspace(selected_path)
+        self.default_cwd = self.workspace.root
+        self.patch_baselines.clear()
+        self.patch_baseline_bytes = 0
+        self.project_context = load_project_context(self.workspace.root)
+        self.active_project = selected
+        return dict(selected)
+
+    def _discovered_project_checks(self) -> list[dict[str, Any]]:
+        root = self.workspace.root
+        checks: list[dict[str, Any]] = []
+        makefile = root / "Makefile"
+        if makefile.is_file():
+            try:
+                make_text = makefile.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                make_text = ""
+            targets = set(
+                re.findall(
+                    r"^([A-Za-z0-9_.-]+)\s*:(?!=)", make_text, flags=re.MULTILINE
+                )
+            )
+            for check_id in (
+                "ci",
+                "check",
+                "test",
+                "lint",
+                "format-check",
+                "typecheck",
+            ):
+                if check_id in targets:
+                    checks.append(
+                        {
+                            "id": check_id,
+                            "argv": ["make", check_id],
+                            "environment": "repository-make",
+                            "source": "Makefile",
+                        }
+                    )
+        pyproject = root / "pyproject.toml"
+        if pyproject.is_file() and not any(item["id"] == "test" for item in checks):
+            if (root / "uv.lock").is_file():
+                prefix = ["uv", "run", "--offline", "--frozen", "--no-sync"]
+                checks.append(
+                    {
+                        "id": "test",
+                        "argv": [*prefix, "python", "-m", "pytest"],
+                        "environment": "uv",
+                        "source": "uv.lock + pyproject.toml",
+                    }
+                )
+            elif (root / ".venv" / "bin" / "python").is_file():
+                checks.append(
+                    {
+                        "id": "test",
+                        "argv": [".venv/bin/python", "-m", "pytest"],
+                        "environment": "project-venv",
+                        "source": ".venv + pyproject.toml",
+                    }
+                )
+        return checks
+
+    def project_checks(self, args: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "project": self.active_project,
+            "checks": self._discovered_project_checks(),
+        }
+
+    def run_project_check(self, args: dict[str, Any]) -> dict[str, Any]:
+        check_id = str(args.get("check_id", "")).strip()
+        check = next(
+            (
+                item
+                for item in self._discovered_project_checks()
+                if item["id"] == check_id
+            ),
+            None,
+        )
+        if check is None:
+            raise ToolFailure(
+                "NOT_FOUND",
+                f"Project check '{check_id}' was not discovered.",
+                category="validation",
+            )
+        argv = [str(item) for item in check["argv"]]
+        exec_args = {
+            "cwd": ".",
+            "timeout_ms": args.get("timeout_ms", 120000),
+            "yield_time_ms": args.get("yield_time_ms", 10000),
+            "max_output_bytes": args.get("max_output_bytes", 262144),
+            "env": self._task_env({}),
+            "approval_id": args.get("approval_id"),
+            "network_required": False,
+        }
+        if self._profile_managed:
+            authorized = self._profile_authorize_command(
+                argv,
+                exec_args,
+                registered_task=check,
+                task_id=f"project.check:{check_id}",
+            )
+            if isinstance(authorized, dict):
+                return authorized
+        else:
+            authorized = set()
+        return self._execute_task_argv(argv, exec_args, set(authorized))
 
     def emit_tool_trace(
         self,
@@ -3006,24 +3424,54 @@ class Runtime:
             self.workspace.resolve_for_write(raw_path)
 
     def _commit_staged_files(self, staged: list[StagedFile]) -> None:
-        self.patch_committer.commit(staged)
+        new_baselines: list[tuple[str, str | None, int]] = []
         for change in staged:
             if change.display in self.patch_baselines:
                 continue
-            self.patch_baselines[change.display] = (
+            baseline = (
                 None
                 if change.baseline.data is None
                 else change.baseline.data.decode("utf-8", errors="replace")
             )
+            baseline_bytes = len(baseline.encode("utf-8")) if baseline else 0
+            new_baselines.append((change.display, baseline, baseline_bytes))
+        projected_bytes = self.patch_baseline_bytes + sum(
+            item[2] for item in new_baselines
+        )
+        projected_files = len(self.patch_baselines) + len(new_baselines)
+        if (
+            projected_bytes > MAX_PATCH_BASELINE_BYTES
+            or projected_files > MAX_PATCH_BASELINE_FILES
+        ):
+            raise ToolFailure(
+                "PATCH_BASELINE_LIMIT",
+                "Patch baseline memory limit reached; split the patch into smaller changes.",
+                category="runtime",
+                retryable=True,
+                details={
+                    "max_bytes": MAX_PATCH_BASELINE_BYTES,
+                    "current_bytes": self.patch_baseline_bytes,
+                    "requested_bytes": projected_bytes,
+                    "max_files": MAX_PATCH_BASELINE_FILES,
+                    "current_files": len(self.patch_baselines),
+                    "requested_files": projected_files,
+                },
+            )
+        self.patch_committer.commit(staged)
+        for display, baseline, baseline_bytes in new_baselines:
+            self.patch_baselines[display] = baseline
+            self.patch_baseline_bytes += baseline_bytes
 
-        if self.sandbox is not None:
-            for change in staged:
-                if change.content is None:
-                    self.sandbox.safe_delete_file(change.display)
-                else:
-                    self.sandbox.safe_write_file(
-                        change.display, change.content, change.mode
-                    )
+        with self.sandbox_lock:
+            sandbox = self.sandbox
+            if sandbox is not None:
+                for change in staged:
+                    if change.content is None:
+                        sandbox.safe_delete_file(change.display)
+                    else:
+                        sandbox.safe_write_file(
+                            change.display, change.content, change.mode
+                        )
 
     def _operation_workdir(self, args: dict[str, Any]) -> ResolvedPath:
         workdir_arg = args.get("workdir", args.get("cwd", "."))
@@ -3474,32 +3922,12 @@ class Runtime:
                 cmd_str, args, granted_capabilities=set(approved_caps)
             )
 
-        if self.sandbox is None:
-            from .sandbox import ExecutionSandbox
-
-            self.sandbox = ExecutionSandbox.create(self.workspace.root)
-
-        sandbox_workdir = self.sandbox.translate_path_for_exec(workdir.path)
-
         timeout_ms = int(args.get("timeout_ms", 30000))
         yield_ms = int(args.get("yield_time_ms", 10000))
         max_output_bytes = int(args.get("max_output_bytes", 65536))
         tty = bool(args.get("tty", False))
         stdin_text = str(args.get("stdin", ""))
         approved_capabilities = set(approved_caps)
-        env = self._command_env(
-            args.get("env", {}),
-            sandboxed=True,
-            allow_sensitive=(
-                "sensitive_env" in approved_capabilities
-                or "env.sensitive" in approved_capabilities
-                or (
-                    self._profile_managed
-                    and self._policy_decision_for_capabilities({"env.sensitive"})
-                    == "auto"
-                )
-            ),
-        )
         start = time.time()
         deadline = start + (timeout_ms / 1000.0)
         landlock_fd: int | None = None
@@ -3534,7 +3962,6 @@ class Runtime:
         )
         if self.sandbox_backend.name == "unsafe":
             bwrap_available = False
-            sandbox_workdir = workdir.path
         if (
             self.sandbox_backend.name != "unsafe"
             and not bwrap_available
@@ -3545,56 +3972,86 @@ class Runtime:
                 "bwrap is required for execution sandbox but not found.",
                 category="security",
             )
-        if not bwrap_available and os.name == "nt":
-            # Windows has no bwrap equivalent in this runtime. This path is
-            # intentionally available only in explicit trusted mode; use the
-            # requested workspace so compiler outputs and process semantics
-            # remain compatible with the trusted host execution contract.
-            sandbox_workdir = workdir.path
 
-        network_capability = args.get("_network_capability")
-        allow_network = (
-            "network" in approved_capabilities
-            or "network.public" in approved_capabilities
-            or "network.host_local" in approved_capabilities
-            or (
-                self._profile_managed
-                and isinstance(network_capability, str)
-                and self._policy_decision_for_capabilities({network_capability})
-                == "auto"
+        sandbox = self._acquire_execution_sandbox()
+        try:
+            sandbox_workdir = sandbox.translate_path_for_exec(workdir.path)
+            if self.sandbox_backend.name == "unsafe" or (
+                not bwrap_available and os.name == "nt"
+            ):
+                # Unsafe mode and the explicit Windows trusted fallback execute in
+                # the caller-owned checkout. The snapshot lease is still created
+                # so ownership/cleanup semantics stay identical across backends.
+                sandbox_workdir = workdir.path
+        except BaseException:
+            self._release_execution_sandbox(sandbox)
+            raise
+
+        try:
+            env = self._command_env(
+                args.get("env", {}),
+                sandboxed=True,
+                allow_sensitive=(
+                    "sensitive_env" in approved_capabilities
+                    or "env.sensitive" in approved_capabilities
+                    or (
+                        self._profile_managed
+                        and self._policy_decision_for_capabilities({"env.sensitive"})
+                        == "auto"
+                    )
+                ),
             )
-            or (not self._profile_managed and self.permission_mode == "trusted")
-        )
-        bwrap_args = (
-            self.sandbox.get_bwrap_args(allow_network=allow_network)
-            if bwrap_available
-            else []
-        )
-        if bwrap_available:
-            # Keep the namespace's temp/home contract explicit at the bwrap
-            # boundary as well as in Popen's inherited environment. This
-            # prevents a runner-specific environment handoff from dropping
-            # the private paths while retaining the fresh /tmp tmpfs.
-            for key in ("HOME", "TMPDIR", "TMP", "TEMP", "XDG_CACHE_HOME"):
-                bwrap_args.extend(["--setenv", key, env[key]])
-        if isinstance(cmd, str):
-            actual_cmd = (
-                ["cmd.exe", "/d", "/s", "/c", cmd]
-                if os.name == "nt"
-                else ["/bin/sh", "-c", cmd]
+        except BaseException:
+            self._release_execution_sandbox(sandbox)
+            raise
+
+        try:
+            network_capability = args.get("_network_capability")
+            allow_network = (
+                "network" in approved_capabilities
+                or "network.public" in approved_capabilities
+                or "network.host_local" in approved_capabilities
+                or (
+                    self._profile_managed
+                    and isinstance(network_capability, str)
+                    and self._policy_decision_for_capabilities({network_capability})
+                    == "auto"
+                )
+                or (not self._profile_managed and self.permission_mode == "trusted")
             )
-            popen_shell = False
-        else:
-            actual_cmd = cmd
-            popen_shell = False
+            bwrap_args = (
+                sandbox.get_bwrap_args(allow_network=allow_network)
+                if bwrap_available
+                else []
+            )
+            if bwrap_available:
+                # Keep the namespace's temp/home contract explicit at the bwrap
+                # boundary as well as in Popen's inherited environment. This
+                # prevents a runner-specific environment handoff from dropping
+                # the private paths while retaining the fresh /tmp tmpfs.
+                for key in ("HOME", "TMPDIR", "TMP", "TEMP", "XDG_CACHE_HOME"):
+                    bwrap_args.extend(["--setenv", key, env[key]])
+            if isinstance(cmd, str):
+                actual_cmd = (
+                    ["cmd.exe", "/d", "/s", "/c", cmd]
+                    if os.name == "nt"
+                    else ["/bin/sh", "-c", cmd]
+                )
+                popen_shell = False
+            else:
+                actual_cmd = cmd
+                popen_shell = False
+        except BaseException:
+            self._release_execution_sandbox(sandbox)
+            raise
 
         # We still initialize landlock as defense in depth if bwrap is missing somehow,
         # but bwrap provides the primary namespace isolation.
         if self.landlock_enabled():
             try:
-                write_roots = [self.sandbox.sandbox_dir, self.runtime_dir]
+                write_roots = [sandbox.sandbox_dir, self.runtime_dir]
                 landlock_fd = open_landlock_ruleset(
-                    self.sandbox.sandbox_dir,
+                    sandbox.sandbox_dir,
                     guard_allow_roots(),
                     write_roots=write_roots,
                 )
@@ -3602,20 +4059,46 @@ class Runtime:
                 popen_extra["pass_fds"] = (landlock_fd,)
             except ToolFailure as exc:
                 if exc.code != "SANDBOX_UNAVAILABLE":
+                    if landlock_fd is not None:
+                        try:
+                            os.close(landlock_fd)
+                        except OSError:
+                            pass
+                        landlock_fd = None
+                    self._release_execution_sandbox(sandbox)
                     raise
                 landlock_warning = landlock_unavailable_warning(exc)
+            except BaseException:
+                if landlock_fd is not None:
+                    try:
+                        os.close(landlock_fd)
+                    except OSError:
+                        pass
+                    landlock_fd = None
+                self._release_execution_sandbox(sandbox)
+                raise
         popen_cmd = bwrap_args + actual_cmd
         self._prune_sessions()
         with self.sessions_lock:
             if self._closed:
                 if landlock_fd is not None:
-                    os.close(landlock_fd)
+                    try:
+                        os.close(landlock_fd)
+                    except OSError:
+                        pass
+                    landlock_fd = None
+                self._release_execution_sandbox(sandbox)
                 raise ToolFailure(
                     "SESSION_CLOSED", "Runtime is closed.", category="runtime"
                 )
             if len(self.sessions) + self.starting_sessions >= MAX_ACTIVE_EXEC_SESSIONS:
                 if landlock_fd is not None:
-                    os.close(landlock_fd)
+                    try:
+                        os.close(landlock_fd)
+                    except OSError:
+                        pass
+                    landlock_fd = None
+                self._release_execution_sandbox(sandbox)
                 raise ToolFailure(
                     "SESSION_LIMIT_REACHED",
                     "Too many commands are already running or starting.",
@@ -3626,6 +4109,7 @@ class Runtime:
             self.starting_sessions += 1
         process: subprocess.Popen[bytes] | None = None
         session: ExecSession | None = None
+        pty_master_fd: int | None = None
         registered = False
         slot_released = False
 
@@ -3643,6 +4127,7 @@ class Runtime:
                 timeout_at=deadline,
                 warnings=[landlock_warning] if landlock_warning else None,
                 pty_master_fd=pty_master_fd,
+                resource_cleanup=lambda: self._release_execution_sandbox(sandbox),
             )
             with self.sessions_lock:
                 self.starting_sessions -= 1
@@ -3656,12 +4141,33 @@ class Runtime:
                     "Runtime closed while the command was starting.",
                     category="runtime",
                 )
-        except Exception:
+        except BaseException:
             with self.sessions_lock:
                 if not registered and not slot_released:
                     self.starting_sessions -= 1
-            if process is not None and process.poll() is None:
-                terminate_process_group(process, signal.SIGTERM)
+            if process is not None:
+                if session is None:
+                    session = ExecSession(
+                        session_id=secrets.token_urlsafe(18),
+                        process=process,
+                        timeout_at=deadline,
+                        warnings=[landlock_warning] if landlock_warning else [],
+                        pty_master_fd=pty_master_fd,
+                        resource_cleanup=lambda: self._release_execution_sandbox(
+                            sandbox
+                        ),
+                    )
+                try:
+                    exited = self._terminate_session(session)
+                except BaseException:
+                    self._schedule_session_reaper(session)
+                    raise
+                if exited:
+                    session.release_owned_resources()
+                else:
+                    self._schedule_session_reaper(session)
+            elif not registered:
+                self._release_execution_sandbox(sandbox)
             raise
         finally:
             if landlock_fd is not None:
@@ -3674,14 +4180,18 @@ class Runtime:
         if isinstance(request_id, (str, int)) and not isinstance(request_id, bool):
             with self.request_sessions_lock:
                 self.request_sessions[request_id] = session.session_id
-        start_reader_threads(session)
-        start_session_watchdog(session)
+        try:
+            start_reader_threads(session)
+            start_session_watchdog(session)
+        except BaseException:
+            self.cancel_session(session.session_id)
+            raise
         try:
             if stdin_text:
                 session.write_input(stdin_text.encode("utf-8"))
-        except ToolFailure:
-            if process.poll() is None:
-                raise
+        except BaseException:
+            self.cancel_session(session.session_id)
+            raise
         finally:
             if not tty:
                 session.close_stdin()
@@ -4090,6 +4600,7 @@ class Runtime:
         timeout_at: float | None = None,
         warnings: list[str] | None = None,
         pty_master_fd: int | None = None,
+        resource_cleanup: Callable[[], None] | None = None,
     ) -> ExecSession:
         return ExecSession(
             session_id=secrets.token_urlsafe(18),
@@ -4097,6 +4608,7 @@ class Runtime:
             timeout_at=timeout_at,
             warnings=warnings or [],
             pty_master_fd=pty_master_fd,
+            resource_cleanup=resource_cleanup,
         )
 
     def _remember_output_session(self, session: ExecSession) -> None:
@@ -4149,10 +4661,6 @@ class Runtime:
     def _get_output_session(self, session_id: str) -> ExecSession:
         self._prune_sessions()
         with self.sessions_lock:
-            with open("/tmp/debug_sessions.txt", "a") as f:
-                f.write(
-                    f"LOOKING FOR {session_id} IN SESSIONS: {list(self.sessions.keys())} OUTPUT: {list(self.output_sessions.keys())}\n"
-                )
             session = self.sessions.get(session_id) or self.output_sessions.get(
                 session_id
             )
@@ -4424,7 +4932,10 @@ class Runtime:
             pass
         session.refresh_status()
         session.drain_readers()
-        return session.process.poll() is not None
+        exited = session.process.poll() is not None
+        if exited:
+            session.close_process_streams()
+        return exited
 
     def kill_session(self, args: dict[str, Any]) -> dict[str, Any]:
         session_id = str(args.get("session_id", ""))
@@ -4489,12 +5000,17 @@ class Runtime:
 
     def cancel_session(self, session_id: str) -> None:
         with self.sessions_lock:
-            session = self.sessions.pop(session_id, None)
+            session = self.sessions.get(session_id)
         if session is None:
             return
-        session.refresh_status()
-        if session.process.poll() is None:
-            terminate_process_group(session.process, signal.SIGTERM)
+        exited = self._terminate_session(session)
+        if exited:
+            session.release_owned_resources()
+            with self.sessions_lock:
+                if self.sessions.get(session_id) is session:
+                    self.sessions.pop(session_id, None)
+        else:
+            self._schedule_session_reaper(session)
 
     def cancel_request(self, request_id: str | int) -> None:
         with self.request_sessions_lock:
@@ -4900,6 +5416,319 @@ class Runtime:
             }
         return result
 
+    def _require_selected_git_repo(self) -> tuple[str, dict[str, str]]:
+        git = require_git()
+        git_env = self._git_env()
+        if not self._is_git_repo(self.workspace.root, env=git_env):
+            raise ToolFailure(
+                "GIT_ERROR",
+                "The selected project is not a Git work tree.",
+                category="runtime",
+            )
+        return git, git_env
+
+    def _git_current_branch(self, git: str, git_env: dict[str, str]) -> str:
+        completed = self._run_git_text(
+            [git, "-C", str(self.workspace.root), "branch", "--show-current"],
+            timeout=10,
+            env=git_env,
+        )
+        branch = completed.stdout.strip() if completed.returncode == 0 else ""
+        if not branch:
+            raise ToolFailure(
+                "GIT_ERROR",
+                "Git mutation requires a named local branch.",
+                category="runtime",
+            )
+        return branch
+
+    def _validate_branch_name(
+        self, name: str, git: str, git_env: dict[str, str]
+    ) -> str:
+        if not name or len(name) > 255:
+            raise ToolFailure(
+                "INVALID_ARGUMENT", "Invalid branch name.", category="validation"
+            )
+        completed = self._run_git_text(
+            [git, "check-ref-format", "--branch", name], timeout=10, env=git_env
+        )
+        if completed.returncode != 0:
+            raise ToolFailure(
+                "INVALID_ARGUMENT", "Invalid branch name.", category="validation"
+            )
+        return name
+
+    def git_create_branch(self, args: dict[str, Any]) -> dict[str, Any]:
+        git, git_env = self._require_selected_git_repo()
+        name = self._validate_branch_name(
+            str(args.get("name", "")).strip(), git, git_env
+        )
+        pending = self._profile_authorize_operation(
+            "git.branch", args, f"git create branch {name}"
+        )
+        if pending is not None:
+            return pending
+        exists = self._run_git_text(
+            [
+                git,
+                "-C",
+                str(self.workspace.root),
+                "show-ref",
+                "--verify",
+                "--quiet",
+                f"refs/heads/{name}",
+            ],
+            timeout=10,
+            env=git_env,
+        )
+        if exists.returncode == 0:
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                f"Local branch already exists: {name}",
+                category="validation",
+            )
+        completed = self._run_git_text(
+            [git, "-C", str(self.workspace.root), "switch", "-c", name],
+            timeout=30,
+            env=git_env,
+        )
+        if completed.returncode != 0:
+            raise ToolFailure(
+                "GIT_ERROR",
+                completed.stderr.strip() or "git switch -c failed",
+                category="runtime",
+            )
+        return {
+            "branch": name,
+            "sha": self._git_rev_parse(self.workspace.root, "HEAD", env=git_env),
+        }
+
+    def git_switch_branch(self, args: dict[str, Any]) -> dict[str, Any]:
+        git, git_env = self._require_selected_git_repo()
+        name = self._validate_branch_name(
+            str(args.get("name", "")).strip(), git, git_env
+        )
+        pending = self._profile_authorize_operation(
+            "git.branch", args, f"git switch branch {name}"
+        )
+        if pending is not None:
+            return pending
+        exists = self._run_git_text(
+            [
+                git,
+                "-C",
+                str(self.workspace.root),
+                "show-ref",
+                "--verify",
+                "--quiet",
+                f"refs/heads/{name}",
+            ],
+            timeout=10,
+            env=git_env,
+        )
+        if exists.returncode != 0:
+            raise ToolFailure(
+                "NOT_FOUND", f"Local branch not found: {name}", category="not_found"
+            )
+        completed = self._run_git_text(
+            [git, "-C", str(self.workspace.root), "switch", name],
+            timeout=30,
+            env=git_env,
+        )
+        if completed.returncode != 0:
+            raise ToolFailure(
+                "GIT_ERROR",
+                completed.stderr.strip() or "git switch failed",
+                category="runtime",
+            )
+        return {
+            "branch": name,
+            "sha": self._git_rev_parse(self.workspace.root, "HEAD", env=git_env),
+        }
+
+    def _explicit_git_paths(self, raw_paths: Any) -> list[str]:
+        if not isinstance(raw_paths, list) or not raw_paths or len(raw_paths) > 100:
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                "paths must be a non-empty list of at most 100 explicit paths.",
+                category="validation",
+            )
+        paths: list[str] = []
+        for raw in raw_paths:
+            if not isinstance(raw, str) or not raw.strip():
+                raise ToolFailure(
+                    "INVALID_ARGUMENT",
+                    "Each commit path must be a string.",
+                    category="validation",
+                )
+            resolved = self.resolve_for_write(raw.strip())
+            if resolved.display in {"", "."}:
+                raise ToolFailure(
+                    "INVALID_ARGUMENT",
+                    "Repository-wide commit paths are not allowed.",
+                    category="validation",
+                )
+            if resolved.existed and resolved.path.is_dir():
+                raise ToolFailure(
+                    "INVALID_ARGUMENT",
+                    "Commit paths must name files, not directories.",
+                    category="validation",
+                    details={"path": resolved.display},
+                )
+            paths.append(resolved.display)
+        return list(dict.fromkeys(paths))
+
+    def _staged_git_paths(self, git: str, git_env: dict[str, str]) -> list[str]:
+        completed = self._run_git_bytes(
+            [
+                git,
+                "-C",
+                str(self.workspace.root),
+                "diff",
+                "--cached",
+                "--name-only",
+                "-z",
+            ],
+            timeout=10,
+            env=git_env,
+        )
+        if completed.returncode != 0:
+            raise ToolFailure(
+                "GIT_ERROR", "Unable to inspect staged paths.", category="runtime"
+            )
+        return [
+            part.decode("utf-8", errors="surrogateescape")
+            for part in completed.stdout.split(b"\0")
+            if part
+        ]
+
+    def git_commit(self, args: dict[str, Any]) -> dict[str, Any]:
+        git, git_env = self._require_selected_git_repo()
+        message = str(args.get("message", "")).strip()
+        if not message or len(message) > 4096 or "\x00" in message:
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                "Commit message is required and must be bounded.",
+                category="validation",
+            )
+        paths = self._explicit_git_paths(args.get("paths"))
+        pending = self._profile_authorize_operation(
+            "git.commit", args, f"git commit explicit paths: {', '.join(paths)}"
+        )
+        if pending is not None:
+            return pending
+        branch = self._git_current_branch(git, git_env)
+        already_staged = self._staged_git_paths(git, git_env)
+        unrelated = sorted(set(already_staged) - set(paths))
+        if unrelated:
+            raise ToolFailure(
+                "INVALID_STATE",
+                "Unrelated paths are already staged; refusing to include them in the commit.",
+                category="conflict",
+                details={"staged_outside_paths": unrelated},
+            )
+        staged = self._run_git_text(
+            [git, "-C", str(self.workspace.root), "add", "--", *paths],
+            timeout=30,
+            env=git_env,
+        )
+        if staged.returncode != 0:
+            raise ToolFailure(
+                "GIT_ERROR",
+                staged.stderr.strip() or "git add failed",
+                category="runtime",
+            )
+        staged_paths = self._staged_git_paths(git, git_env)
+        outside = sorted(set(staged_paths) - set(paths))
+        if outside:
+            raise ToolFailure(
+                "INVALID_STATE",
+                "Staged set escaped the explicitly requested commit paths.",
+                category="conflict",
+                details={"staged_outside_paths": outside},
+            )
+        if not staged_paths:
+            raise ToolFailure(
+                "INVALID_STATE",
+                "No staged changes for the requested paths.",
+                category="conflict",
+            )
+        committed = self._run_git_text(
+            [
+                git,
+                "-C",
+                str(self.workspace.root),
+                "commit",
+                "-m",
+                message,
+                "--",
+                *paths,
+            ],
+            timeout=60,
+            env=git_env,
+        )
+        if committed.returncode != 0:
+            raise ToolFailure(
+                "GIT_ERROR",
+                committed.stderr.strip() or "git commit failed",
+                category="runtime",
+            )
+        return {
+            "branch": branch,
+            "sha": self._git_rev_parse(self.workspace.root, "HEAD", env=git_env),
+            "paths": staged_paths,
+        }
+
+    def git_push(self, args: dict[str, Any]) -> dict[str, Any]:
+        if bool(args.get("force", False)):
+            raise ToolFailure(
+                "ACCESS_DENIED", "Force push is not allowed.", category="security"
+            )
+        git, git_env = self._require_selected_git_repo()
+        branch = self._git_current_branch(git, git_env)
+        remote = str(args.get("remote", "origin")).strip() or "origin"
+        remotes = self._run_git_text(
+            [git, "-C", str(self.workspace.root), "remote"], timeout=10, env=git_env
+        )
+        configured = set(remotes.stdout.split()) if remotes.returncode == 0 else set()
+        if remote not in configured:
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                "Push remote must be the name of a configured repository remote.",
+                category="validation",
+            )
+        pending = self._profile_authorize_operation(
+            "git.push", args, f"git push {remote} {branch}"
+        )
+        if pending is not None:
+            return pending
+        completed = self._run_git_text(
+            [
+                git,
+                "-C",
+                str(self.workspace.root),
+                "push",
+                "--set-upstream",
+                remote,
+                branch,
+            ],
+            timeout=120,
+            env=git_env,
+        )
+        if completed.returncode != 0:
+            raise ToolFailure(
+                "GIT_ERROR",
+                "git push failed; output is withheld to avoid exposing credentials.",
+                category="runtime",
+                details={"remote": remote, "branch": branch},
+            )
+        return {
+            "branch": branch,
+            "remote": remote,
+            "upstream": f"{remote}/{branch}",
+            "result": "pushed",
+        }
+
     def view_image(self, args: dict[str, Any]) -> dict[str, Any]:
         resolved = self.resolve_existing(str(args.get("path", "")))
         max_bytes = int(args.get("max_bytes", 5_242_880))
@@ -4967,7 +5796,11 @@ class Runtime:
         return {"status": "ok"}
 
     def workspace_info(self, args: dict[str, Any]) -> dict[str, Any]:
-        return {"workspace": str(self.workspace.root)}
+        return {
+            "workspace": str(self.workspace.root),
+            "active_project": self.active_project,
+            "project_roots": [str(root) for root in self.project_roots],
+        }
 
     def read_files(self, args: dict[str, Any]) -> dict[str, Any]:
         if self._profile_managed:
@@ -6457,6 +7290,32 @@ def input_schemas() -> dict[str, dict[str, Any]]:
         "server_info": object_schema(),
         "health": object_schema(),
         "workspace_info": object_schema(),
+        "list_projects": object_schema(),
+        "select_project": object_schema(
+            {"project": {**string, "minLength": 1}}, ["project"]
+        ),
+        "current_project": object_schema(),
+        "project_checks": object_schema(),
+        "run_project_check": object_schema(
+            {
+                "check_id": {**string, "minLength": 1},
+                "timeout_ms": {**integer, "minimum": 1, "default": 120000},
+                "yield_time_ms": {
+                    **integer,
+                    "minimum": 0,
+                    "maximum": 300000,
+                    "default": 10000,
+                },
+                "max_output_bytes": {
+                    **integer,
+                    "minimum": 1,
+                    "maximum": 1048576,
+                    "default": 262144,
+                },
+                "approval_id": string,
+            },
+            ["check_id"],
+        ),
         "read_file": object_schema(
             {
                 "path": {**string, "minLength": 1},
@@ -6618,6 +7477,27 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                 "max_lines": {**integer, "minimum": 1, "maximum": 1000, "default": 200},
             },
             ["path"],
+        ),
+        "git_create_branch": object_schema(
+            {"name": {**string, "minLength": 1}, "approval_id": string}, ["name"]
+        ),
+        "git_switch_branch": object_schema(
+            {"name": {**string, "minLength": 1}, "approval_id": string}, ["name"]
+        ),
+        "git_commit": object_schema(
+            {
+                "message": {**string, "minLength": 1, "maxLength": 4096},
+                "paths": {**string_array, "minItems": 1, "maxItems": 100},
+                "approval_id": string,
+            },
+            ["message", "paths"],
+        ),
+        "git_push": object_schema(
+            {
+                "remote": {**string, "default": "origin"},
+                "force": {**boolean, "default": False},
+                "approval_id": string,
+            }
         ),
         "list_tasks": object_schema(
             {
@@ -7061,6 +7941,7 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         method = request.get("method")
         session_id = self.headers.get("Mcp-Session-Id")
         created_session = False
+        managed_session_id: str | None = None
         if method == "initialize":
             if session_id:
                 self.send_rpc_error(
@@ -7078,6 +7959,7 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
                 return
             self._send_session_header = True
             created_session = True
+            managed_session_id = self.runtime.http_session_id
         elif session_id:
             runtime = self.server.sessions.get(session_id)  # type: ignore[attr-defined]
             if runtime is None:
@@ -7090,17 +7972,7 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
                 return
             self._runtime = runtime
             self._send_session_header = True
-            if protocol_version != runtime.protocol_version:
-                self.send_rpc_error(
-                    -32600,
-                    "MCP-Protocol-Version does not match the initialized session",
-                    request_id=request.get("id"),
-                    data={
-                        "expected": runtime.protocol_version,
-                        "received": protocol_version,
-                    },
-                )
-                return
+            managed_session_id = session_id
         elif method == "ping":
             self._runtime = self.server.control_runtime  # type: ignore[attr-defined]
         else:
@@ -7108,18 +7980,37 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
                 -32002, "Server not initialized", request_id=request.get("id")
             )
             return
-        response = self.handle_rpc(request)
-        if created_session and response is not None and "error" in response:
-            self.server.sessions.delete(self.runtime.http_session_id)  # type: ignore[attr-defined]
-            self._send_session_header = False
-        if response is None:
-            self.send_response(202)
-            if getattr(self, "_send_session_header", False):
-                self.send_header("Mcp-Session-Id", self.runtime.http_session_id)
-            self.send_cors_headers()
-            self.end_headers()
-            return
-        self.send_json(response)
+        try:
+            if (
+                managed_session_id is not None
+                and not created_session
+                and protocol_version != self.runtime.protocol_version
+            ):
+                self.send_rpc_error(
+                    -32600,
+                    "MCP-Protocol-Version does not match the initialized session",
+                    request_id=request.get("id"),
+                    data={
+                        "expected": self.runtime.protocol_version,
+                        "received": protocol_version,
+                    },
+                )
+                return
+            response = self.handle_rpc(request)
+            if created_session and response is not None and "error" in response:
+                self.server.sessions.delete(self.runtime.http_session_id)  # type: ignore[attr-defined]
+                self._send_session_header = False
+            if response is None:
+                self.send_response(202)
+                if getattr(self, "_send_session_header", False):
+                    self.send_header("Mcp-Session-Id", self.runtime.http_session_id)
+                self.send_cors_headers()
+                self.end_headers()
+                return
+            self.send_json(response)
+        finally:
+            if managed_session_id is not None:
+                self.server.sessions.release(managed_session_id)  # type: ignore[attr-defined]
 
     def handle_rpc(self, request: dict[str, Any]) -> dict[str, Any] | None:
         try:
@@ -7661,6 +8552,11 @@ def build_runtime(
     workspace = Path(
         args.workspace or os.environ.get(f"{ENV_PREFIX}_WORKSPACE") or os.getcwd()
     )
+    raw_project_roots = list(getattr(args, "project_root", None) or [])
+    if not raw_project_roots:
+        env_roots = os.environ.get("DEVMCP_PROJECT_ROOTS", "")
+        raw_project_roots = [item for item in env_roots.split(os.pathsep) if item]
+    project_roots = [Path(item) for item in raw_project_roots] or [workspace]
     policy_rules = policy_rules_from_config_file(
         os.environ.get("DEVMCP_POLICY_CONFIG_FILE"), runtime_policy.policy_profile
     )
@@ -7684,6 +8580,7 @@ def build_runtime(
         max_removed_lines=int(getattr(args, "max_removed_lines", 200)),
         max_removed_percent=float(getattr(args, "max_removed_percent", 30.0)),
         policy_rules=policy_rules,
+        project_roots=project_roots,
     )
     if emit_warning and runtime.capabilities.skip_all_permissions:
         print(
@@ -7733,26 +8630,32 @@ def run_http(args: argparse.Namespace) -> int:
     except ValueError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
-    active_profile = runtime_policy.policy_profile or legacy_profile(
-        runtime_policy.permission_mode
-    )
-    server_capability = (
-        "server.loopback" if is_loopback_bind_host(str(args.host)) else "server.public"
-    )
-    server_decision = policy_decision(
-        active_profile,
-        server_capability,
-        policy_rules_from_config_file(
-            os.environ.get("DEVMCP_POLICY_CONFIG_FILE"), active_profile
-        ),
-    )
-    if server_decision != "auto":
-        print(
-            f"ERROR: {server_capability} is {server_decision} in the active policy profile. "
-            "Select a profile or Custom rule that auto-allows this server bind.",
-            file=sys.stderr,
+    # Server bind capabilities belong to the explicitly selected profile. The
+    # retired safe/trusted/dangerous switches predate that profile matrix and
+    # remain compatibility presets for Runtime operations; applying their
+    # legacy profile mapping here would break authenticated legacy HTTP
+    # launches such as the Docker image's trusted + 0.0.0.0 configuration.
+    if runtime_policy.policy_profile is not None:
+        active_profile = runtime_policy.policy_profile
+        server_capability = (
+            "server.loopback"
+            if is_loopback_bind_host(str(args.host))
+            else "server.public"
         )
-        return 2
+        server_decision = policy_decision(
+            active_profile,
+            server_capability,
+            policy_rules_from_config_file(
+                os.environ.get("DEVMCP_POLICY_CONFIG_FILE"), active_profile
+            ),
+        )
+        if server_decision != "auto":
+            print(
+                f"ERROR: {server_capability} is {server_decision} in the active policy profile. "
+                "Select a profile or Custom rule that auto-allows this server bind.",
+                file=sys.stderr,
+            )
+            return 2
 
     oauth_config: OAuthConfig | None = None
     oauth_mode = (
@@ -7943,6 +8846,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--workspace",
         help="workspace root; defaults to CODING_TOOLS_MCP_WORKSPACE or cwd",
+    )
+    parser.add_argument(
+        "--project-root",
+        action="append",
+        default=None,
+        help="operator-approved root to scan recursively for selectable Git repositories; repeatable",
     )
     parser.add_argument(
         "--host",

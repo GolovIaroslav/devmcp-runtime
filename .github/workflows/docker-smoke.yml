@@ -29,13 +29,16 @@ jobs:
 
       - name: Start sandbox
         run: |
+          # GitHub-hosted Docker blocks the nested user namespaces used by bwrap.
+          # This smoke uses Docker as the outer sandbox; the image default remains bwrap.
           docker run -d --rm \
             --name coding-tools-mcp-smoke \
             -p "$MCP_PORT:$MCP_PORT" \
             -e CODING_TOOLS_MCP_PORT="$MCP_PORT" \
             -e CODING_TOOLS_MCP_AUTH_TOKEN="$MCP_TOKEN" \
             -v "$PWD:/workspace" \
-            coding-tools-mcp-sandbox:smoke
+            coding-tools-mcp-sandbox:smoke \
+            --sandbox-backend unsafe
 
       - name: Wait for MCP server
         run: |

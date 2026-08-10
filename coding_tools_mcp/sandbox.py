@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import errno
 import os
+import secrets
 import shutil
 import stat
 import sys
 import tempfile
+import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
 from .errors import ToolFailure
@@ -263,30 +265,79 @@ class ExecutionSandbox:
     original_workspace: Path
     sandbox_dir: Path
     created_at: float
+    owner_root: Path
+    owned_path: Path
+    ownership_token: str
+    owner_marker: Path
+    _cleanup_lock: threading.Lock = field(
+        default_factory=threading.Lock, repr=False, compare=False
+    )
+    _cleaned: bool = field(default=False, repr=False, compare=False)
 
     @classmethod
-    def create(cls, workspace: Path) -> "ExecutionSandbox":
+    def create(
+        cls,
+        workspace: Path,
+        *,
+        owner_root: Path | None = None,
+    ) -> "ExecutionSandbox":
         if not workspace.is_dir():
             raise ToolFailure(
                 "INVALID_ARGUMENT",
                 "Workspace must be a directory.",
                 category="validation",
             )
+        selected_owner = Path(
+            owner_root
+            or (Path(tempfile.gettempdir()) / "coding-tools-mcp" / "sandboxes")
+        )
+        try:
+            selected_owner.mkdir(parents=True, mode=0o700, exist_ok=True)
+            selected_owner = selected_owner.resolve(strict=True)
+            if not selected_owner.is_dir():
+                raise OSError("sandbox owner root is not a directory")
+        except OSError as exc:
+            raise ToolFailure(
+                "SANDBOX_FAILED",
+                f"Failed to prepare sandbox owner root: {exc}",
+                category="internal",
+            ) from exc
+        sandbox_path: Path | None = None
+        marker: Path | None = None
+        ownership_token = secrets.token_urlsafe(24)
         try:
             sandbox_path = Path(
-                tempfile.mkdtemp(prefix="chatgpt-dev-sandbox-")
+                tempfile.mkdtemp(prefix="sandbox-", dir=selected_owner)
             ).resolve()
+            marker = selected_owner / f".{sandbox_path.name}.owner"
+            marker.write_text(ownership_token, encoding="utf-8")
+            if os.name != "nt":
+                marker.chmod(0o600)
             cls._sync(workspace, sandbox_path)
-        except OSError as exc:
+        except BaseException as exc:
+            if sandbox_path is not None:
+                shutil.rmtree(sandbox_path, ignore_errors=True)
+            if marker is not None:
+                marker.unlink(missing_ok=True)
+            if isinstance(exc, ToolFailure):
+                raise
+            if not isinstance(exc, Exception):
+                raise
             raise ToolFailure(
                 "SANDBOX_FAILED",
                 f"Failed to create sandbox: {exc}",
                 category="internal",
             ) from exc
+        assert sandbox_path is not None
+        assert marker is not None
         return cls(
             original_workspace=workspace,
             sandbox_dir=sandbox_path,
             created_at=time.time(),
+            owner_root=selected_owner,
+            owned_path=sandbox_path,
+            ownership_token=ownership_token,
+            owner_marker=marker,
         )
 
     def sync_from_authoritative(self) -> None:
@@ -390,10 +441,40 @@ class ExecutionSandbox:
         _safe_unlink_relative(self.sandbox_dir, rel_path)
 
     def cleanup(self) -> None:
-        try:
-            shutil.rmtree(self.sandbox_dir)
-        except OSError:
-            pass
+        with self._cleanup_lock:
+            if self._cleaned:
+                return
+            try:
+                owner = self.owner_root.resolve(strict=True)
+                owned = self.owned_path.resolve(strict=False)
+                candidate = self.sandbox_dir.resolve(strict=False)
+                marker = self.owner_marker.resolve(strict=False)
+            except OSError:
+                return
+            if (
+                candidate != owned
+                or owned.parent != owner
+                or not owned.name.startswith("sandbox-")
+                or marker.parent != owner
+                or marker.name != f".{owned.name}.owner"
+            ):
+                return
+            try:
+                if (
+                    self.owner_marker.read_text(encoding="utf-8")
+                    != self.ownership_token
+                ):
+                    return
+            except OSError:
+                return
+            try:
+                shutil.rmtree(owned)
+            except FileNotFoundError:
+                pass
+            except OSError:
+                return
+            self.owner_marker.unlink(missing_ok=True)
+            self._cleaned = True
 
     def _private_dir(self, name: str) -> Path:
         path = self.sandbox_dir / f".devmcp-{name}"
