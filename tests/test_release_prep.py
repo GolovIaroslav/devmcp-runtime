@@ -926,6 +926,8 @@ class ReleaseLifecycleTests(unittest.TestCase):
                 self.assertNotIn("--policy-profile", mcp)
                 self.assertIn("-m apps.devmcp.cli tunnel run", tunnel)
                 self.assertNotIn("runtimes connect", tunnel)
+                self.assertIn(f"After={cli.MCP_SERVICE}", tunnel)
+                self.assertNotIn(f"Requires={cli.MCP_SERVICE}", tunnel)
 
     def test_serve_reads_the_current_config_on_every_start(self) -> None:
         with (
