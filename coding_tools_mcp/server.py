@@ -6622,20 +6622,57 @@ class Runtime:
                     "attempts": attempts,
                 }
             finally:
-                subprocess.run(
-                    [
-                        git,
-                        "-C",
-                        str(self.workspace.root),
-                        "worktree",
-                        "remove",
-                        "--force",
-                        str(delegate_root),
-                    ],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    timeout=60,
-                )
+                active_error = sys.exc_info()[1]
+                cleanup_failure: ToolFailure | None = None
+                try:
+                    removed = subprocess.run(
+                        [
+                            git,
+                            "-C",
+                            str(self.workspace.root),
+                            "worktree",
+                            "remove",
+                            "--force",
+                            str(delegate_root),
+                        ],
+                        text=True,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        timeout=60,
+                    )
+                    if removed.returncode != 0:
+                        cleanup_failure = ToolFailure(
+                            "GIT_ERROR",
+                            "Failed to remove isolated Antigravity worktree.",
+                            category="runtime",
+                            details={
+                                "exit_code": removed.returncode,
+                                "stderr": str(
+                                    redact_for_trace(removed.stderr[-65536:])
+                                ),
+                            },
+                        )
+                except Exception as exc:
+                    cleanup_failure = ToolFailure(
+                        "GIT_ERROR",
+                        "Failed to remove isolated Antigravity worktree.",
+                        category="runtime",
+                        details={"cleanup_error_type": type(exc).__name__},
+                    )
+                if cleanup_failure is not None:
+                    if isinstance(active_error, ToolFailure):
+                        active_error.details = {
+                            **active_error.details,
+                            "worktree_cleanup": {
+                                "code": cleanup_failure.code,
+                                "message": cleanup_failure.message,
+                                **cleanup_failure.details,
+                            },
+                        }
+                    elif active_error is None:
+                        raise cleanup_failure
+                    else:
+                        raise cleanup_failure from active_error
 
     def view_image(self, args: dict[str, Any]) -> dict[str, Any]:
         resolved = self.resolve_existing(str(args.get("path", "")))

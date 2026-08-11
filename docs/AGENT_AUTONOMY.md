@@ -85,7 +85,12 @@ instruction resume from durable state rather than trusting stale prompt text.
 
 `antigravity_delegate` is bounded and isolated. Timeout or MCP request
 cancellation terminates the delegated process group, including descendants,
-before the temporary worktree is cleaned up. Transient 502/503-style upstream
-errors and timeouts are retryable, but DevMCP performs at most one retry and
-only when the caller explicitly sets `retry_transient=true`.
+before the temporary worktree is cleaned up. On POSIX, every completed attempt
+also terminates any surviving members of that process group before the attempt
+is accepted, retried, or converted into an error, so a normal non-zero parent
+exit cannot leave delegation descendants running into the next attempt.
+Transient 502/503-style upstream errors and timeouts are retryable, but DevMCP
+performs at most one retry and only when the caller explicitly sets
+`retry_transient=true`. Worktree-removal failures are reported rather than
+silently discarded.
 

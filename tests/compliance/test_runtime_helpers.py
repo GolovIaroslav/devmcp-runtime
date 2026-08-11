@@ -2482,6 +2482,55 @@ Maven home: /usr/share/maven
             time.sleep(1)
             self.assertFalse(marker.exists())
 
+    @unittest.skipIf(os.name == "nt", "process-group marker test is POSIX-specific")
+    def test_bounded_process_completed_nonzero_kills_surviving_descendant(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as tmp:
+            marker = Path(tmp) / "child-survived"
+            child = (
+                "import os,pathlib,time; "
+                "devnull=os.open(os.devnull, os.O_WRONLY); "
+                "os.dup2(devnull,1); os.dup2(devnull,2); "
+                "time.sleep(0.8); "
+                f"pathlib.Path({str(marker)!r}).write_text('survived')"
+            )
+            parent = (
+                "import subprocess,sys; "
+                f"subprocess.Popen([sys.executable, '-c', {child!r}], close_fds=True); "
+                "raise SystemExit(7)"
+            )
+            completed = processes_module.run_bounded_process(
+                [sys.executable, "-c", parent], timeout=3
+            )
+            self.assertEqual(completed.returncode, 7)
+            time.sleep(1)
+            self.assertFalse(marker.exists())
+
+    @unittest.skipIf(os.name == "nt", "process-group marker test is POSIX-specific")
+    def test_bounded_process_completed_success_kills_surviving_descendant(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as tmp:
+            marker = Path(tmp) / "child-survived"
+            child = (
+                "import os,pathlib,time; "
+                "devnull=os.open(os.devnull, os.O_WRONLY); "
+                "os.dup2(devnull,1); os.dup2(devnull,2); "
+                "time.sleep(0.8); "
+                f"pathlib.Path({str(marker)!r}).write_text('survived')"
+            )
+            parent = (
+                "import subprocess,sys; "
+                f"subprocess.Popen([sys.executable, '-c', {child!r}], close_fds=True)"
+            )
+            completed = processes_module.run_bounded_process(
+                [sys.executable, "-c", parent], timeout=3
+            )
+            self.assertEqual(completed.returncode, 0)
+            time.sleep(1)
+            self.assertFalse(marker.exists())
+
     @unittest.skipIf(os.name == "nt", "fake executable fixture uses a POSIX shebang")
     def test_antigravity_hanging_process_times_out_and_cleans_worktree(self) -> None:
         preflight_error = git_fixture_preflight_error()
@@ -2595,6 +2644,112 @@ Maven home: /usr/share/maven
                     )
                 self.assertEqual(result["attempts"], 2)
                 self.assertEqual(counter.read_text(encoding="utf-8"), "2")
+            finally:
+                runtime.close()
+
+    @unittest.skipIf(os.name == "nt", "fake executable fixture uses a POSIX shebang")
+    def test_antigravity_transient_retry_kills_first_attempt_descendant(self) -> None:
+        preflight_error = git_fixture_preflight_error()
+        if preflight_error is not None:
+            self.skipTest(preflight_error)
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            (repo / "tracked.txt").write_text("base\n", encoding="utf-8")
+            init_git(repo)
+            counter = root / "agy-attempts"
+            marker = root / "first-child-survived"
+            fake = root / "agy"
+            fake.write_text(
+                "#!/usr/bin/env python3\n"
+                "import pathlib, subprocess, sys\n"
+                f"counter = pathlib.Path({str(counter)!r})\n"
+                f"marker = {str(marker)!r}\n"
+                "if '--version' in sys.argv:\n"
+                "    print('agy 9.9.9')\n"
+                "elif '--help' in sys.argv:\n"
+                "    print('--sandbox --output-format -p')\n"
+                "else:\n"
+                "    attempt = int(counter.read_text()) + 1 if counter.exists() else 1\n"
+                "    counter.write_text(str(attempt))\n"
+                "    if attempt == 1:\n"
+                "        child = \"import os,pathlib,time; devnull=os.open(os.devnull,os.O_WRONLY); os.dup2(devnull,1); os.dup2(devnull,2); time.sleep(1); pathlib.Path(%r).write_text('survived')\" % marker\n"
+                "        subprocess.Popen([sys.executable, '-c', child], close_fds=True)\n"
+                "        print('503 upstream unavailable', file=sys.stderr)\n"
+                "        raise SystemExit(1)\n"
+                '    print(\'{"result":"ok"}\')\n',
+                encoding="utf-8",
+            )
+            fake.chmod(0o700)
+            runtime = Runtime(repo, policy_profile="autonomous", project_roots=[root])
+            try:
+                with patch.object(
+                    runtime, "_antigravity_binary", return_value=str(fake)
+                ):
+                    result = runtime.antigravity_delegate(
+                        {
+                            "prompt": "Retry one transient failure.",
+                            "retry_transient": True,
+                        }
+                    )
+                self.assertEqual(result["attempts"], 2)
+                time.sleep(1.2)
+                self.assertFalse(marker.exists())
+            finally:
+                runtime.close()
+
+    @unittest.skipIf(os.name == "nt", "fake executable fixture uses a POSIX shebang")
+    def test_antigravity_reports_worktree_cleanup_failure(self) -> None:
+        preflight_error = git_fixture_preflight_error()
+        if preflight_error is not None:
+            self.skipTest(preflight_error)
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            (repo / "tracked.txt").write_text("base\n", encoding="utf-8")
+            init_git(repo)
+            fake = root / "agy"
+            fake.write_text(
+                "#!/usr/bin/env python3\n"
+                "import sys\n"
+                "if '--version' in sys.argv:\n"
+                "    print('agy 9.9.9')\n"
+                "elif '--help' in sys.argv:\n"
+                "    print('--sandbox --output-format -p')\n"
+                "else:\n"
+                '    print(\'{"result":"ok"}\')\n',
+                encoding="utf-8",
+            )
+            fake.chmod(0o700)
+            runtime = Runtime(repo, policy_profile="autonomous", project_roots=[root])
+            original_run = server_module.subprocess.run
+
+            def fail_worktree_remove(*args: object, **kwargs: object) -> object:
+                argv = args[0] if args else kwargs.get("args")
+                if isinstance(argv, list) and "worktree" in argv and "remove" in argv:
+                    return subprocess.CompletedProcess(argv, 1, "", "cleanup failed")
+                return original_run(*args, **kwargs)
+
+            try:
+                with (
+                    patch.object(
+                        runtime, "_antigravity_binary", return_value=str(fake)
+                    ),
+                    patch.object(
+                        server_module.subprocess,
+                        "run",
+                        side_effect=fail_worktree_remove,
+                    ),
+                ):
+                    with self.assertRaises(ToolFailure) as cleanup_error:
+                        runtime.antigravity_delegate({"prompt": "Inspect only."})
+                self.assertEqual(cleanup_error.exception.code, "GIT_ERROR")
+                self.assertIn(
+                    "remove isolated Antigravity worktree",
+                    cleanup_error.exception.message,
+                )
             finally:
                 runtime.close()
 

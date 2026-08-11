@@ -40,7 +40,7 @@ def run_bounded_process(
     timeout: float,
     cancel_event: threading.Event | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    """Run a process group and guarantee group cleanup on timeout/cancellation."""
+    """Run a bounded process group and clean up remaining group members on exit."""
 
     popen_kwargs: dict[str, Any] = {}
     if os.name == "nt":
@@ -73,8 +73,7 @@ def run_bounded_process(
                 continue
             break
     except BaseException:
-        if process.poll() is None:
-            terminate_process_group(process, signal.SIGTERM)
+        terminate_process_group(process, signal.SIGTERM)
         try:
             stdout, stderr = process.communicate(timeout=1)
         except Exception:
@@ -84,6 +83,7 @@ def run_bounded_process(
             exc.stdout = stdout
             exc.stderr = stderr
         raise
+    terminate_process_group(process, signal.SIGTERM)
     return subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
 
 
