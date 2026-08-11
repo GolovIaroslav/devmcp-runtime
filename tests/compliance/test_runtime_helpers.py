@@ -2678,7 +2678,7 @@ Maven home: /usr/share/maven
                 "        subprocess.Popen([sys.executable, '-c', child], close_fds=True)\n"
                 "        print('503 upstream unavailable', file=sys.stderr)\n"
                 "        raise SystemExit(1)\n"
-                "    print('{\"result\":\"ok\"}')\n",
+                '    print(\'{"result":"ok"}\')\n',
                 encoding="utf-8",
             )
             fake.chmod(0o700)
@@ -2719,7 +2719,7 @@ Maven home: /usr/share/maven
                 "elif '--help' in sys.argv:\n"
                 "    print('--sandbox --output-format -p')\n"
                 "else:\n"
-                "    print('{\"result\":\"ok\"}')\n",
+                '    print(\'{"result":"ok"}\')\n',
                 encoding="utf-8",
             )
             fake.chmod(0o700)
@@ -2728,17 +2728,15 @@ Maven home: /usr/share/maven
 
             def fail_worktree_remove(*args: object, **kwargs: object) -> object:
                 argv = args[0] if args else kwargs.get("args")
-                if (
-                    isinstance(argv, list)
-                    and "worktree" in argv
-                    and "remove" in argv
-                ):
+                if isinstance(argv, list) and "worktree" in argv and "remove" in argv:
                     return subprocess.CompletedProcess(argv, 1, "", "cleanup failed")
                 return original_run(*args, **kwargs)
 
             try:
                 with (
-                    patch.object(runtime, "_antigravity_binary", return_value=str(fake)),
+                    patch.object(
+                        runtime, "_antigravity_binary", return_value=str(fake)
+                    ),
                     patch.object(
                         server_module.subprocess,
                         "run",

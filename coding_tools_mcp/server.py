@@ -6647,7 +6647,9 @@ class Runtime:
                             category="runtime",
                             details={
                                 "exit_code": removed.returncode,
-                                "stderr": str(redact_for_trace(removed.stderr[-65536:])),
+                                "stderr": str(
+                                    redact_for_trace(removed.stderr[-65536:])
+                                ),
                             },
                         )
                 except Exception as exc:
