@@ -11,7 +11,7 @@ app remains a draft.
 
 ## Fixed inventory
 
-The default catalog contains exactly 53 tools:
+The default catalog contains exactly 55 tools:
 
 - `server_info`: Server info.
 - `health`: Health check.
@@ -49,6 +49,8 @@ The default catalog contains exactly 53 tools:
 - `git_delete_remote_branch`: Delete one branch from a configured remote.
 - `git_commit`: Commit only explicitly named paths.
 - `git_push`: Push the current branch to a configured remote; force is rejected.
+- `wait_for_external`: Wait for one bounded interval before re-polling an external system.
+- `continuation_checkpoint`: Read, write, or clear one durable non-secret continuation checkpoint scoped to the selected project and logical task or branch.
 - `antigravity_delegate`: Run one bounded Antigravity coding task in an isolated worktree.
 - `list_tasks`: List tasks.
 - `describe_task`: Describe task.
@@ -67,8 +69,29 @@ The default catalog contains exactly 53 tools:
 - `get_default_cwd`: Get default cwd.
 - `set_default_cwd`: Set default cwd.
 `view_image` may be disabled when an installation cannot accept binary image
-content. That capability gate is not a tool profile. The other 52 tools are
+content. That capability gate is not a tool profile. The other 54 tools are
 always advertised, and `listChanged` is `false`.
+
+## Autonomous continuation primitives
+
+`wait_for_external` deliberately does not poll GitHub, deployment providers, or
+other remote APIs itself. A caller may request 1-3600 seconds, but each call has
+a separate 1-90 second `timeout_seconds` hard bound and then returns an explicit
+instruction to re-poll through the client's authoritative connector. This avoids
+many empty model/tool round-trips without inventing credentials inside DevMCP.
+The wait has no child process or repository side effect, notices request/runtime
+cancellation, and leaves the service responsive to other requests.
+
+`continuation_checkpoint` persists one small JSON record below DevMCP's private
+user configuration directory, never inside the selected repository. Records
+are isolated by canonical project path plus a hashed logical-task or branch
+scope. Writes are atomic and mode 0600 where supported. The payload is a closed,
+bounded set of continuation fields: task/slice, branch, HEAD, PR/run identifiers,
+dirty-state summary, completed acceptance items, exact next action, and blocker
+type. Unknown fields and oversized payloads are rejected, so callers cannot turn
+the checkpoint store into an arbitrary secret or blob store. Common credential
+and private-key value forms are rejected as well. `clear` removes the record
+after terminal completion.
 
 `service_status` and `service_doctor` execute only fixed DevMCP operator
 commands on the host; they do not accept arbitrary command text. `service_restart`

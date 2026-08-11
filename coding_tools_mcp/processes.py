@@ -4,6 +4,7 @@ import concurrent.futures
 import os
 import signal
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -27,8 +28,67 @@ SESSION_BUFFER_BYTES = 524_288
 HARD_KILL_SIGNAL = getattr(signal, "SIGKILL", signal.SIGTERM)
 
 
+class ProcessCancelled(RuntimeError):
+    """Raised when a bounded child process is cancelled by its owning request."""
+
+
+def run_bounded_process(
+    argv: list[str],
+    *,
+    cwd: str | None = None,
+    env: dict[str, str] | None = None,
+    timeout: float,
+    cancel_event: threading.Event | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Run a process group and guarantee group cleanup on timeout/cancellation."""
+
+    popen_kwargs: dict[str, Any] = {}
+    if os.name == "nt":
+        creation_flag = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        if creation_flag:
+            popen_kwargs["creationflags"] = creation_flag
+    else:
+        popen_kwargs["start_new_session"] = True
+    process = subprocess.Popen(
+        argv,
+        cwd=cwd,
+        env=env,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        **popen_kwargs,
+    )
+    deadline = time.monotonic() + timeout
+    try:
+        while True:
+            if cancel_event is not None and cancel_event.is_set():
+                raise ProcessCancelled("bounded process cancelled")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(argv, timeout)
+            try:
+                stdout, stderr = process.communicate(timeout=min(0.25, remaining))
+            except subprocess.TimeoutExpired:
+                continue
+            break
+    except BaseException:
+        if process.poll() is None:
+            terminate_process_group(process, signal.SIGTERM)
+        try:
+            stdout, stderr = process.communicate(timeout=1)
+        except Exception:
+            stdout, stderr = "", ""
+        exc = sys.exc_info()[1]
+        if isinstance(exc, subprocess.TimeoutExpired):
+            exc.stdout = stdout
+            exc.stderr = stderr
+        raise
+    return subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
+
+
 def terminate_process_group(
-    process: subprocess.Popen[bytes],
+    process: subprocess.Popen[Any],
     signum: signal.Signals,
     *,
     force: bool = False,
@@ -75,8 +135,7 @@ def terminate_process_group(
             process.kill() if force else process.terminate()
         except Exception:
             return
-    if wait_for_exit(1):
-        return
+    wait_for_exit(1)
     try:
         os.killpg(process.pid, HARD_KILL_SIGNAL)
     except ProcessLookupError:

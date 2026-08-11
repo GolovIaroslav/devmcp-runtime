@@ -34,6 +34,7 @@ from typing import Any, cast
 
 from . import __version__
 from .audit import append_tool_event
+from .continuation import clear_checkpoint, read_checkpoint, write_checkpoint
 from .envutils import ENV_PREFIX, truthy_env
 from .errors import JsonRpcError, ToolFailure
 from .landlock_exec import libc_syscall
@@ -63,6 +64,8 @@ from .processes import (
     HARD_KILL_SIGNAL,
     SESSION_BUFFER_BYTES,
     ExecSession,
+    ProcessCancelled,
+    run_bounded_process,
     spawn_process,
     start_reader_threads,
     start_session_watchdog,
@@ -856,6 +859,19 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         description="Push the current branch to a configured remote; force push and URL remotes are rejected.",
         destructive=True,
         open_world=True,
+    ),
+    "wait_for_external": ToolSpec(
+        title="Wait for external process",
+        description="Wait for one bounded interval before the client re-polls an external system.",
+        read_only=True,
+        idempotent=True,
+        open_world=True,
+    ),
+    "continuation_checkpoint": ToolSpec(
+        title="Continuation checkpoint",
+        description="Read, write, or clear one durable non-secret continuation checkpoint scoped to the selected project and logical task or branch.",
+        destructive=True,
+        idempotent=True,
     ),
     "antigravity_delegate": ToolSpec(
         title="Delegate to Antigravity",
@@ -1755,6 +1771,7 @@ class Runtime:
         )
         self.active_project = self._project_record_for_path(self.workspace.root)
         self.request_sessions: dict[str | int, str] = {}
+        self.request_cancel_events: dict[str | int, threading.Event] = {}
         self.request_sessions_lock = threading.Lock()
         self.request_context = threading.local()
         self.initialized = False
@@ -2122,13 +2139,21 @@ class Runtime:
         validate_arguments(name, args)
         try:
             self.request_context.request_id = request_id
+            cancel_event: threading.Event | None = None
+            if isinstance(request_id, (str, int)) and not isinstance(request_id, bool):
+                cancel_event = threading.Event()
+                with self.request_sessions_lock:
+                    self.request_cancel_events[request_id] = cancel_event
+            self.request_context.cancel_event = cancel_event
             try:
                 payload = handler(args)
             finally:
                 if request_id is not None:
                     with self.request_sessions_lock:
                         self.request_sessions.pop(request_id, None)
+                        self.request_cancel_events.pop(request_id, None)
                 self.request_context.request_id = None
+                self.request_context.cancel_event = None
             payload.setdefault("ok", True)
             self.emit_tool_trace(name, args, payload, started_at)
             content = spec.content_builder(payload) if spec.content_builder else None
@@ -5191,6 +5216,9 @@ class Runtime:
     def cancel_request(self, request_id: str | int) -> None:
         with self.request_sessions_lock:
             session_id = self.request_sessions.get(request_id)
+            cancel_event = self.request_cancel_events.get(request_id)
+        if cancel_event is not None:
+            cancel_event.set()
         if session_id is not None:
             self.cancel_session(session_id)
 
@@ -6121,6 +6149,101 @@ class Runtime:
             "result": "pushed",
         }
 
+    def wait_for_external(self, args: dict[str, Any]) -> dict[str, Any]:
+        seconds = int(args.get("seconds", 30))
+        timeout_seconds = int(args.get("timeout_seconds", 90))
+        if not 1 <= seconds <= 3600:
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                "seconds must be between 1 and 3600.",
+                category="validation",
+            )
+        if not 1 <= timeout_seconds <= 90:
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                "timeout_seconds must be between 1 and 90.",
+                category="validation",
+            )
+        started = time.monotonic()
+        deadline = started + min(seconds, timeout_seconds)
+        cancel_event = getattr(self.request_context, "cancel_event", None)
+        while True:
+            if self._closed or (
+                isinstance(cancel_event, threading.Event) and cancel_event.is_set()
+            ):
+                return {
+                    "status": "cancelled",
+                    "requested_seconds": seconds,
+                    "timeout_seconds": timeout_seconds,
+                    "elapsed_seconds": round(time.monotonic() - started, 3),
+                }
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(0.25, remaining))
+        return {
+            "status": "completed" if seconds <= timeout_seconds else "timeout",
+            "requested_seconds": seconds,
+            "timeout_seconds": timeout_seconds,
+            "elapsed_seconds": round(time.monotonic() - started, 3),
+            "next_action": "re-poll the external system with its authoritative connector",
+        }
+
+    def _continuation_scope(self, args: dict[str, Any]) -> str:
+        logical_task = str(args.get("logical_task", "")).strip()
+        branch = str(args.get("branch", "")).strip()
+        if logical_task:
+            if len(logical_task) > 256:
+                raise ToolFailure(
+                    "INVALID_ARGUMENT",
+                    "logical_task must be at most 256 characters.",
+                    category="validation",
+                )
+            return f"task:{logical_task}"
+        if not branch:
+            git, git_env = self._require_selected_git_repo()
+            branch = self._git_current_branch(git, git_env)
+        if len(branch) > 256:
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                "branch must be at most 256 characters.",
+                category="validation",
+            )
+        return f"branch:{branch}"
+
+    def continuation_checkpoint(self, args: dict[str, Any]) -> dict[str, Any]:
+        action = str(args.get("action", "")).strip().lower()
+        if action not in {"read", "write", "clear"}:
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                "action must be read, write, or clear.",
+                category="validation",
+            )
+        scope = self._continuation_scope(args)
+        if action == "read":
+            return {
+                "action": action,
+                "scope": scope,
+                "checkpoint": read_checkpoint(self.workspace.root, scope),
+            }
+        if action == "clear":
+            return {
+                "action": action,
+                "scope": scope,
+                "cleared": clear_checkpoint(self.workspace.root, scope),
+            }
+        if "payload" not in args:
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                "payload is required for action=write.",
+                category="validation",
+            )
+        return {
+            "action": action,
+            "scope": scope,
+            "checkpoint": write_checkpoint(self.workspace.root, scope, args["payload"]),
+        }
+
     def _antigravity_binary(self) -> str:
         candidates = [
             os.environ.get("DEVMCP_ANTIGRAVITY_BIN"),
@@ -6192,12 +6315,13 @@ class Runtime:
                 category="validation",
             )
         timeout_seconds = int(args.get("timeout_seconds", 900))
-        if not 30 <= timeout_seconds <= 3600:
+        if not 1 <= timeout_seconds <= 3600:
             raise ToolFailure(
                 "INVALID_ARGUMENT",
-                "timeout_seconds must be between 30 and 3600.",
+                "timeout_seconds must be between 1 and 3600.",
                 category="validation",
             )
+        retry_transient = bool(args.get("retry_transient", False))
         pending = self._profile_authorize_operation(
             "agent.delegate", args, f"delegate {mode} task to Antigravity CLI"
         )
@@ -6249,23 +6373,37 @@ class Runtime:
             )
 
         agy = self._antigravity_binary()
-        version_result = subprocess.run(
-            [agy, "--version"],
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=10,
-            env=self._antigravity_env(),
-        )
-        help_result = subprocess.run(
-            [agy, "--help"],
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            timeout=10,
-            env=self._antigravity_env(),
-        )
-        help_text = help_result.stdout
+        cancel_event = getattr(self.request_context, "cancel_event", None)
+        try:
+            version_result = run_bounded_process(
+                [agy, "--version"],
+                timeout=10,
+                env=self._antigravity_env(),
+                cancel_event=cancel_event,
+            )
+            help_result = run_bounded_process(
+                [agy, "--help"],
+                timeout=10,
+                env=self._antigravity_env(),
+                cancel_event=cancel_event,
+            )
+        except ProcessCancelled as exc:
+            raise ToolFailure(
+                "SERVICE_COMMAND_FAILED",
+                "Antigravity preflight was cancelled and its process group was terminated.",
+                category="runtime",
+                retryable=True,
+                details={"cancelled": True},
+            ) from exc
+        except subprocess.TimeoutExpired as exc:
+            raise ToolFailure(
+                "SERVICE_COMMAND_FAILED",
+                "Antigravity preflight timed out and its process group was terminated.",
+                category="runtime",
+                retryable=True,
+                details={"timeout_seconds": 10},
+            ) from exc
+        help_text = help_result.stdout + help_result.stderr
         base_sha = self._git_rev_parse(self.workspace.root, "HEAD")
         with tempfile.TemporaryDirectory(prefix="devmcp-antigravity-") as temp_root:
             delegate_root = Path(temp_root) / "worktree"
@@ -6299,24 +6437,58 @@ class Runtime:
                 if "--output-format" in help_text:
                     argv.extend(["--output-format", "json"])
                 argv.extend(["-p", self._antigravity_prompt(prompt, mode)])
-                try:
-                    completed = subprocess.run(
-                        argv,
-                        cwd=str(delegate_root),
-                        env=self._antigravity_env(),
-                        stdin=subprocess.DEVNULL,
-                        text=True,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
-                        timeout=timeout_seconds,
+                completed: subprocess.CompletedProcess[str] | None = None
+                attempts = 0
+                while completed is None:
+                    attempts += 1
+                    try:
+                        candidate = run_bounded_process(
+                            argv,
+                            cwd=str(delegate_root),
+                            env=self._antigravity_env(),
+                            timeout=timeout_seconds,
+                            cancel_event=cancel_event,
+                        )
+                    except ProcessCancelled as exc:
+                        raise ToolFailure(
+                            "SERVICE_COMMAND_FAILED",
+                            "Antigravity delegation was cancelled and its process group was terminated.",
+                            category="runtime",
+                            retryable=True,
+                            details={"cancelled": True, "attempts": attempts},
+                        ) from exc
+                    except subprocess.TimeoutExpired as exc:
+                        if retry_transient and attempts == 1:
+                            continue
+                        raise ToolFailure(
+                            "SERVICE_COMMAND_FAILED",
+                            "Antigravity delegation timed out and its process group was terminated.",
+                            category="runtime",
+                            retryable=True,
+                            details={
+                                "timeout_seconds": timeout_seconds,
+                                "attempts": attempts,
+                            },
+                        ) from exc
+                    combined = f"{candidate.stdout}\n{candidate.stderr}".lower()
+                    upstream_status = next(
+                        (status for status in (502, 503) if str(status) in combined),
+                        None,
                     )
-                except subprocess.TimeoutExpired as exc:
-                    raise ToolFailure(
-                        "SERVICE_COMMAND_FAILED",
-                        "Antigravity delegation timed out.",
-                        category="runtime",
-                        details={"timeout_seconds": timeout_seconds},
-                    ) from exc
+                    if candidate.returncode != 0 and upstream_status is not None:
+                        if retry_transient and attempts == 1:
+                            continue
+                        raise ToolFailure(
+                            "SERVICE_UNAVAILABLE",
+                            f"Antigravity upstream returned a transient {upstream_status} failure; isolated changes were discarded.",
+                            category="runtime",
+                            retryable=True,
+                            details={
+                                "upstream_status": upstream_status,
+                                "attempts": attempts,
+                            },
+                        )
+                    completed = candidate
                 if completed.returncode != 0:
                     raise ToolFailure(
                         "SERVICE_COMMAND_FAILED",
@@ -6447,6 +6619,7 @@ class Runtime:
                     "changed_paths": changed_paths,
                     "applied": applied,
                     "isolated_worktree": True,
+                    "attempts": attempts,
                 }
             finally:
                 subprocess.run(
@@ -8661,6 +8834,34 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                 "approval_id": string,
             }
         ),
+        "wait_for_external": object_schema(
+            {
+                "seconds": {
+                    **integer,
+                    "minimum": 1,
+                    "maximum": 3600,
+                    "default": 30,
+                },
+                "timeout_seconds": {
+                    **integer,
+                    "minimum": 1,
+                    "maximum": 90,
+                    "default": 90,
+                },
+            }
+        ),
+        "continuation_checkpoint": object_schema(
+            {
+                "action": {
+                    "type": "string",
+                    "enum": ["read", "write", "clear"],
+                },
+                "logical_task": {**string, "maxLength": 256},
+                "branch": {**string, "maxLength": 256},
+                "payload": {"type": "object"},
+            },
+            ["action"],
+        ),
         "antigravity_delegate": object_schema(
             {
                 "prompt": {**string, "minLength": 1, "maxLength": 20000},
@@ -8671,10 +8872,11 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                 },
                 "timeout_seconds": {
                     **integer,
-                    "minimum": 30,
+                    "minimum": 1,
                     "maximum": 3600,
                     "default": 900,
                 },
+                "retry_transient": {**boolean, "default": False},
                 "approval_id": string,
             },
             ["prompt"],

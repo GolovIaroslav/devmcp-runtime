@@ -18,7 +18,7 @@ no dynamic `tools/list_changed`, and no required `open_workspace` call.
 `apply_patch` is the only direct file-write tool. `safe`, `trusted`, and
 `dangerous` are command permission policies and never alter `tools/list`.
 
-The default catalog contains 53 tools:
+The default catalog contains 55 tools:
 
 - runtime/context: `server_info`, `health`, `workspace_info`, `service_status`,
   `service_doctor`, `host_cli_probe`, `service_restart`, `service_update`, `activate_policy_profile`,
@@ -34,6 +34,7 @@ The default catalog contains 53 tools:
 - Git: `git_status`, `git_diff`, `git_log`, `git_show`, `git_blame`,
   `git_create_branch`, `git_switch_branch`, `git_fetch`, `git_pull`, `git_merge_remote_branch`,
   `git_delete_branch`, `git_delete_remote_branch`, `git_commit`, `git_push`
+- autonomy: `wait_for_external`, `continuation_checkpoint`
 - delegation: `antigravity_delegate`
 - approvals: `approval_status`, `list_pending_approvals`
 
