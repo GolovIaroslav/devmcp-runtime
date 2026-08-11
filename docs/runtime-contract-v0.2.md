@@ -197,7 +197,7 @@ survive tunnel churn. Forwarded headers are ignored unless
 
 ## Stable tool inventory
 
-The default catalog has 53 tools, including `view_image`. Setting
+The default catalog has 55 tools, including `view_image`. Setting
 `CODING_TOOLS_MCP_ENABLE_VIEW_IMAGE=0` is the sole installation capability gate
 and removes only that optional binary-content tool. It is not a tool profile.
 
@@ -588,9 +588,38 @@ Arbitrary URL remotes and force push are rejected. `git.push` is controlled by
 the active policy profile, and failed push output is withheld to avoid credential
 disclosure.
 
+### wait_for_external
+
+Inputs: `"seconds"`, `"timeout_seconds"`.
+
+Annotations: `{"title":"Wait for external process","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":true}`.
+
+Waits without polling or mutating an external system. `seconds` may request 1-3600
+seconds, while `timeout_seconds` is a hard 1-90 second bound for one tool call.
+The result is `completed` when the requested wait fits inside the bound, `timeout`
+when the hard bound expires first, or `cancelled` when the owning MCP request or
+runtime is cancelled. Clients must then re-poll the authoritative external
+connector rather than treating the wait result as remote-system state.
+
+### continuation_checkpoint
+
+Inputs: `"action"`, `"logical_task"`, `"branch"`, `"payload"`.
+
+Annotations: `{"title":"Continuation checkpoint","readOnlyHint":false,"destructiveHint":true,"idempotentHint":true,"openWorldHint":false}`.
+
+Reads, atomically writes, or clears one bounded non-secret JSON continuation
+record scoped to the canonical selected project plus either `logical_task` or
+`branch`. If neither scope argument is supplied, the selected repository's
+current branch is used. Storage lives under DevMCP's private configuration root,
+never inside the selected project; attempts to configure checkpoint storage
+inside the project fail. Payload keys are restricted to task/slice, branch,
+HEAD, PR/workflow identifiers, dirty-state summary, completed acceptance items,
+next action, blocker type, and timestamp. Unknown or oversized payload data is
+rejected, as are values matching common credential/private-key forms.
+
 ### antigravity_delegate
 
-Inputs: `"prompt"`, `"mode"`, `"timeout_seconds"`, `"approval_id"`.
+Inputs: `"prompt"`, `"mode"`, `"timeout_seconds"`, `"retry_transient"`, `"approval_id"`.
 
 Annotations: `{"title":"Delegate to Antigravity","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
 
@@ -611,6 +640,11 @@ DevMCP rejects Git-history changes, file deletes/moves, sensitive-path changes,
 and any modification in `read_only` or `verify` mode. `workspace_edit` applies
 only a validated `M`/`A` binary patch to the real selected checkout. Rejected,
 failed, or timed-out delegate work is discarded with the temporary worktree.
+The delegate and its descendants run in a bounded process group: timeout or MCP
+request cancellation terminates the whole group before cleanup. `timeout_seconds`
+accepts 1-3600 seconds. With `retry_transient=true`, DevMCP retries at most once
+for a timeout or an upstream 502/503-style transient failure; otherwise those
+failures are returned as retryable structured errors.
 
 ### view_image
 

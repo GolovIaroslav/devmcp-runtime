@@ -70,3 +70,9 @@ secret protections for every operation. See [Permissions](PERMISSIONS.md) and
 
 Never paste the MCP token or control-plane API key into a prompt, issue,
 screenshot, log, or public repository.
+
+For autonomous coding clients that need to survive CI waits, provider retries,
+or client/session interruption, follow the
+[autonomous continuation protocol](AGENT_AUTONOMY.md). It keeps provider polling
+with the connector that owns the credentials and uses DevMCP only for bounded
+waiting and private, project-scoped continuation checkpoints.

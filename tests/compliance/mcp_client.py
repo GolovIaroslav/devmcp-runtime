@@ -58,6 +58,8 @@ REQUIRED_TOOLS = (
     "git_delete_remote_branch",
     "git_commit",
     "git_push",
+    "wait_for_external",
+    "continuation_checkpoint",
     "antigravity_delegate",
     "view_image",
 )

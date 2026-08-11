@@ -65,6 +65,10 @@ For ChatGPT, follow [docs/CHATGPT.md](docs/CHATGPT.md). It requires a supported
 Business, Enterprise, or Edu workspace with Developer Mode and a separately
 installed Secure MCP Tunnel client.
 
+For long-running autonomous coding loops, see the
+[autonomous continuation protocol](docs/AGENT_AUTONOMY.md), including bounded
+external waits, durable non-secret checkpoints, and terminal-state rules.
+
 ### ChatGPT permissions and DevMCP policy are separate
 
 The ChatGPT app permission and DevMCP's local policy are two independent layers:

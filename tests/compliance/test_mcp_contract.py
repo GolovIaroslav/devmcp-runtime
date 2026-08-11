@@ -163,6 +163,8 @@ class MCPContractTests(ComplianceTestCase):
             "git_delete_remote_branch": (False, True, False, True),
             "git_commit": (False, True, False, False),
             "git_push": (False, True, False, True),
+            "wait_for_external": (True, False, True, True),
+            "continuation_checkpoint": (False, True, True, False),
             "antigravity_delegate": (False, True, False, True),
             "view_image": (True, False, True, False),
             "list_tasks": (True, False, True, False),

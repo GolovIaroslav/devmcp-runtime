@@ -2323,6 +2323,281 @@ Maven home: /usr/share/maven
             finally:
                 fresh_session.close()
 
+    def test_wait_for_external_is_bounded_cancel_safe_and_responsive(self) -> None:
+        with TemporaryDirectory() as tmp:
+            runtime = Runtime(Path(tmp))
+            result: dict[str, object] = {}
+            thread = threading.Thread(
+                target=lambda: result.update(
+                    runtime.call_tool(
+                        "wait_for_external",
+                        {"seconds": 2, "timeout_seconds": 2},
+                        request_id="wait-1",
+                    )
+                )
+            )
+            thread.start()
+            time.sleep(0.05)
+            started = time.monotonic()
+            info = runtime.server_info({})
+            self.assertLess(time.monotonic() - started, 0.5)
+            self.assertGreaterEqual(info["tool_count"], 55)
+            runtime.cancel_request("wait-1")
+            thread.join(timeout=1)
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(result["structuredContent"]["status"], "cancelled")
+            completed = runtime.wait_for_external({"seconds": 1, "timeout_seconds": 2})
+            self.assertEqual(completed["status"], "completed")
+            timed_out = runtime.wait_for_external({"seconds": 2, "timeout_seconds": 1})
+            self.assertEqual(timed_out["status"], "timeout")
+            with self.assertRaises(ToolFailure) as invalid:
+                runtime.wait_for_external({"seconds": 0})
+            self.assertEqual(invalid.exception.code, "INVALID_ARGUMENT")
+            with self.assertRaises(ToolFailure):
+                runtime.wait_for_external({"seconds": 1, "timeout_seconds": 91})
+            runtime.close()
+
+    def test_continuation_checkpoint_is_durable_isolated_and_bounded(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = root / "config"
+            project_a = root / "a"
+            project_b = root / "b"
+            project_a.mkdir()
+            project_b.mkdir()
+            with patch.dict(os.environ, {"DEVMCP_CONFIG_DIR": str(config)}):
+                first = Runtime(project_a)
+                first.continuation_checkpoint(
+                    {
+                        "action": "write",
+                        "logical_task": "ticketwise-u7.18",
+                        "payload": {
+                            "active_slice": "u7_18_review_queue_and_scheduler",
+                            "branch": "feat/u7-18-review-queue-and-scheduler",
+                            "head": "abc123",
+                            "pr_number": 44,
+                            "workflow_run_id": 1234,
+                            "dirty_state_summary": "clean",
+                            "completed_acceptance_items": ["schema", "queue"],
+                            "next_action": "poll CI run 1234",
+                            "blocker_type": "waiting_ci",
+                            "timestamp": "2026-08-11T12:00:00Z",
+                        },
+                    }
+                )
+                first.close()
+                second = Runtime(project_a)
+                loaded = second.continuation_checkpoint(
+                    {"action": "read", "logical_task": "ticketwise-u7.18"}
+                )["checkpoint"]
+                self.assertEqual(loaded["payload"]["head"], "abc123")
+                second.continuation_checkpoint(
+                    {
+                        "action": "write",
+                        "logical_task": "ticketwise-u7.18",
+                        "payload": {"head": "def456", "next_action": "merge PR"},
+                    }
+                )
+                other = Runtime(project_b)
+                self.assertIsNone(
+                    other.continuation_checkpoint(
+                        {"action": "read", "logical_task": "ticketwise-u7.18"}
+                    )["checkpoint"]
+                )
+                with self.assertRaises(ToolFailure):
+                    second.continuation_checkpoint(
+                        {
+                            "action": "write",
+                            "logical_task": "ticketwise-u7.18",
+                            "payload": {"api_token": "do-not-store"},
+                        }
+                    )
+                with self.assertRaises(ToolFailure):
+                    second.continuation_checkpoint(
+                        {
+                            "action": "write",
+                            "logical_task": "ticketwise-u7.18",
+                            "payload": {
+                                "next_action": "retry with Bearer abcdefghijklmnop"
+                            },
+                        }
+                    )
+                with self.assertRaises(ToolFailure):
+                    second.continuation_checkpoint(
+                        {
+                            "action": "write",
+                            "logical_task": "ticketwise-u7.18",
+                            "payload": {"next_action": "x" * 5000},
+                        }
+                    )
+                self.assertTrue(
+                    second.continuation_checkpoint(
+                        {"action": "clear", "logical_task": "ticketwise-u7.18"}
+                    )["cleared"]
+                )
+                second.close()
+                other.close()
+
+    def test_continuation_checkpoint_rejects_storage_inside_project(self) -> None:
+        with TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            project.mkdir()
+            with patch.dict(
+                os.environ,
+                {"DEVMCP_CONFIG_DIR": str(project / ".devmcp-private")},
+            ):
+                runtime = Runtime(project)
+                try:
+                    with self.assertRaises(ToolFailure) as denied:
+                        runtime.continuation_checkpoint(
+                            {
+                                "action": "write",
+                                "logical_task": "x",
+                                "payload": {"next_action": "continue"},
+                            }
+                        )
+                    self.assertEqual(denied.exception.code, "RUNTIME_DIR_UNWRITABLE")
+                finally:
+                    runtime.close()
+
+    @unittest.skipIf(os.name == "nt", "process-group marker test is POSIX-specific")
+    def test_bounded_process_timeout_kills_descendant_process_tree(self) -> None:
+        with TemporaryDirectory() as tmp:
+            marker = Path(tmp) / "child-survived"
+            child = (
+                "import pathlib,time; time.sleep(0.8); "
+                f"pathlib.Path({str(marker)!r}).write_text('survived')"
+            )
+            parent = (
+                "import subprocess,sys,time; "
+                f"subprocess.Popen([sys.executable, '-c', {child!r}]); "
+                "time.sleep(30)"
+            )
+            started = time.monotonic()
+            with self.assertRaises(subprocess.TimeoutExpired):
+                processes_module.run_bounded_process(
+                    [sys.executable, "-c", parent], timeout=0.1
+                )
+            self.assertLess(time.monotonic() - started, 3)
+            time.sleep(1)
+            self.assertFalse(marker.exists())
+
+    @unittest.skipIf(os.name == "nt", "fake executable fixture uses a POSIX shebang")
+    def test_antigravity_hanging_process_times_out_and_cleans_worktree(self) -> None:
+        preflight_error = git_fixture_preflight_error()
+        if preflight_error is not None:
+            self.skipTest(preflight_error)
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            (repo / "tracked.txt").write_text("base\n", encoding="utf-8")
+            init_git(repo)
+            marker = root / "child-survived"
+            fake = root / "agy"
+            fake.write_text(
+                "#!/usr/bin/env python3\n"
+                "import pathlib, subprocess, sys, time\n"
+                "if '--version' in sys.argv:\n"
+                "    print('agy 9.9.9')\n"
+                "elif '--help' in sys.argv:\n"
+                "    print('--sandbox --output-format -p')\n"
+                "else:\n"
+                "    child = \"import pathlib,time; time.sleep(2); pathlib.Path(%r).write_text('survived')\"\n"
+                "    subprocess.Popen([sys.executable, '-c', child])\n"
+                "    time.sleep(30)\n" % str(marker),
+                encoding="utf-8",
+            )
+            fake.chmod(0o700)
+            runtime = Runtime(repo, policy_profile="autonomous", project_roots=[root])
+            try:
+                with patch.object(
+                    runtime, "_antigravity_binary", return_value=str(fake)
+                ):
+                    started = time.monotonic()
+                    with self.assertRaises(ToolFailure) as timed_out:
+                        runtime.antigravity_delegate(
+                            {
+                                "prompt": "Hang for regression test.",
+                                "timeout_seconds": 1,
+                            }
+                        )
+                    self.assertLess(time.monotonic() - started, 5)
+                self.assertEqual(timed_out.exception.code, "SERVICE_COMMAND_FAILED")
+                self.assertTrue(timed_out.exception.retryable)
+                time.sleep(2.2)
+                self.assertFalse(marker.exists())
+                worktrees = subprocess.run(
+                    ["git", "-C", str(repo), "worktree", "list", "--porcelain"],
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=10,
+                    check=True,
+                ).stdout
+                self.assertNotIn("devmcp-antigravity-", worktrees)
+            finally:
+                runtime.close()
+
+    @unittest.skipIf(os.name == "nt", "fake executable fixture uses a POSIX shebang")
+    def test_antigravity_transient_503_requires_opt_in_and_retries_once(self) -> None:
+        preflight_error = git_fixture_preflight_error()
+        if preflight_error is not None:
+            self.skipTest(preflight_error)
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            (repo / "tracked.txt").write_text("base\n", encoding="utf-8")
+            init_git(repo)
+            counter = root / "agy-attempts"
+            fake = root / "agy"
+            fake.write_text(
+                "#!/usr/bin/env python3\n"
+                "import pathlib, sys\n"
+                f"counter = pathlib.Path({str(counter)!r})\n"
+                "if '--version' in sys.argv:\n"
+                "    print('agy 9.9.9')\n"
+                "elif '--help' in sys.argv:\n"
+                "    print('--sandbox --output-format -p')\n"
+                "else:\n"
+                "    attempt = int(counter.read_text()) + 1 if counter.exists() else 1\n"
+                "    counter.write_text(str(attempt))\n"
+                "    if attempt == 1:\n"
+                "        print('503 upstream unavailable', file=sys.stderr)\n"
+                "        raise SystemExit(1)\n"
+                '    print(\'{"result":"ok"}\')\n',
+                encoding="utf-8",
+            )
+            fake.chmod(0o700)
+            runtime = Runtime(repo, policy_profile="autonomous", project_roots=[root])
+            try:
+                with patch.object(
+                    runtime, "_antigravity_binary", return_value=str(fake)
+                ):
+                    with self.assertRaises(ToolFailure) as unavailable:
+                        runtime.antigravity_delegate(
+                            {"prompt": "Transient failure without retry."}
+                        )
+                    self.assertEqual(unavailable.exception.code, "SERVICE_UNAVAILABLE")
+                    self.assertTrue(unavailable.exception.retryable)
+                    self.assertEqual(
+                        unavailable.exception.details,
+                        {"upstream_status": 503, "attempts": 1},
+                    )
+
+                    counter.unlink()
+                    result = runtime.antigravity_delegate(
+                        {
+                            "prompt": "Retry one transient failure.",
+                            "retry_transient": True,
+                        }
+                    )
+                self.assertEqual(result["attempts"], 2)
+                self.assertEqual(counter.read_text(encoding="utf-8"), "2")
+            finally:
+                runtime.close()
+
     @unittest.skipIf(os.name == "nt", "fake executable fixture uses a POSIX shebang")
     def test_antigravity_delegate_applies_only_validated_worktree_patch(self) -> None:
         preflight_error = git_fixture_preflight_error()
