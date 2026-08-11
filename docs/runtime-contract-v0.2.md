@@ -638,10 +638,14 @@ remote through inherited Git configuration, and DevMCP requests Antigravity
 sandboxing when the installed CLI advertises that option. After completion,
 DevMCP rejects Git-history changes, file deletes/moves, sensitive-path changes,
 and any modification in `read_only` or `verify` mode. `workspace_edit` applies
-only a validated `M`/`A` binary patch to the real selected checkout. Rejected,
-failed, or timed-out delegate work is discarded with the temporary worktree.
-The delegate and its descendants run in a bounded process group: timeout or MCP
-request cancellation terminates the whole group before cleanup. `timeout_seconds`
+only a validated `M`/`A` binary patch to the real selected checkout. DevMCP
+attempts to discard rejected, failed, or timed-out delegate work with the
+temporary worktree; any worktree-removal failure is reported explicitly.
+The delegate and its descendants run in a bounded process group. On POSIX,
+DevMCP terminates any remaining members of that group before an attempt is
+accepted, retried, or returned as an error, including ordinary non-zero exits;
+timeout or MCP request cancellation also terminates the group before cleanup.
+Windows retains the existing direct-process cleanup behavior. `timeout_seconds`
 accepts 1-3600 seconds. With `retry_transient=true`, DevMCP retries at most once
 for a timeout or an upstream 502/503-style transient failure; otherwise those
 failures are returned as retryable structured errors.
