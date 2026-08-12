@@ -135,6 +135,7 @@ class MCPClient:
     session_id: str | None = None
     request_id: int = 0
     initialized: bool = False
+    permission_mode: str = "safe"
 
     def __enter__(self) -> "MCPClient":
         if self.url is None:
@@ -159,6 +160,7 @@ class MCPClient:
             AWS_SECRET_ACCESS_KEY="COMPLIANCE_SHOULD_NOT_LEAK",
             OPENAI_API_KEY="COMPLIANCE_SHOULD_NOT_LEAK",
             CODING_TOOLS_MCP_WORKSPACE=str(self.workspace),
+            CODING_TOOLS_MCP_PERMISSION_MODE=self.permission_mode,
         )
         self.process = subprocess.Popen(
             cmd,

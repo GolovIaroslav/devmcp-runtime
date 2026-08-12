@@ -647,6 +647,24 @@ class RuntimeHelperTests(unittest.TestCase):
             self.assertTrue(runtime.cache_dir.is_dir())
             self.assertFalse((workspace / ".coding-tools").exists())
 
+    def test_legacy_windows_inherit_all_preserves_each_host_temp_variable(self) -> None:
+        with TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            runtime = Runtime(workspace, shell_env_policy=ShellEnvPolicy(inherit="all"))
+            runtime._legacy_windows_process_fallback = True
+            host_env = {
+                "PATH": "host-path",
+                "TMP": "host-tmp",
+                "TEMP": "host-temp",
+                "TMPDIR": "host-tmpdir",
+            }
+            with patch.dict(server_module.os.environ, host_env, clear=True):
+                env = runtime._command_env({})
+
+            self.assertEqual(env.get("TMP"), "host-tmp")
+            self.assertEqual(env.get("TEMP"), "host-temp")
+            self.assertEqual(env.get("TMPDIR"), "host-tmpdir")
+
     @unittest.skipUnless(
         os.name != "nt" and shutil.which("bwrap"), "bwrap sandbox is required"
     )
@@ -1242,6 +1260,40 @@ class RuntimeHelperTests(unittest.TestCase):
             self.assertNotIn(session.session_id, runtime.sessions)
             runtime.cancel_session(session.session_id)
             runtime.close()
+
+    def test_exec_session_can_defer_resource_cleanup_until_transaction_finishes(
+        self,
+    ) -> None:
+        cleanup_calls = 0
+
+        class ExitedProcess:
+            stdin = None
+            stdout = None
+            stderr = None
+            pid = 123
+
+            def poll(self) -> int:
+                return 0
+
+        def cleanup() -> None:
+            nonlocal cleanup_calls
+            cleanup_calls += 1
+
+        session = ExecSession(
+            "transaction",
+            ExitedProcess(),  # type: ignore[arg-type]
+            resource_cleanup=cleanup,
+            auto_release_resources_on_exit=False,
+        )
+
+        session.refresh_status()
+        self.assertTrue(session.closed)
+        self.assertEqual(cleanup_calls, 0)
+
+        session.release_owned_resources()
+        self.assertEqual(cleanup_calls, 1)
+        session.release_owned_resources()
+        self.assertEqual(cleanup_calls, 1)
 
     def test_cancelled_execution_releases_owned_sandbox(self) -> None:
         with TemporaryDirectory() as tmp:

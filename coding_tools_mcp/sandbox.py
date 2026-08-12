@@ -661,13 +661,14 @@ class ExecutionSandbox:
         *,
         root_mounts: Iterable[tuple[Path, Path, bool]] = (),
     ) -> list[str]:
-        args = ["bwrap"]
+        # --disable-userns requires an explicit user namespace even when
+        # --unshare-all is present. Keep this explicit on both network paths.
+        args = ["bwrap", "--unshare-user"]
         if allow_network:
             # Keep the network namespace joined to the host only for an
             # explicitly granted operation. All other namespaces remain new.
             args.extend(
                 [
-                    "--unshare-user",
                     "--unshare-pid",
                     "--unshare-ipc",
                     "--unshare-uts",

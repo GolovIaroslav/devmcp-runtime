@@ -9,6 +9,7 @@ from tests.compliance.test_support import ComplianceTestCase
 
 class SecurityComplianceTests(ComplianceTestCase):
     fixture_name = "malicious-project"
+    permission_mode = "safe"
 
     def test_path_traversal_absolute_paths_and_symlink_escape_are_rejected(
         self,
@@ -173,14 +174,15 @@ class SecurityComplianceTests(ComplianceTestCase):
     def test_exec_command_long_non_path_tokens_do_not_become_internal_errors(
         self,
     ) -> None:
-        result = self.client.call_tool(
-            "exec_command",
-            {
-                "cmd": "printf " + ("a" * 300),
-                "timeout_ms": 5000,
-                "max_output_bytes": 4096,
-            },
-        )
+        with self.client_with_permission("trusted") as client:
+            result = client.call_tool(
+                "exec_command",
+                {
+                    "cmd": "printf " + ("a" * 300),
+                    "timeout_ms": 5000,
+                    "max_output_bytes": 4096,
+                },
+            )
         payload = self.assert_tool_success(result)
         self.assertEqual(payload.get("status"), "success", payload)
         self.assertTrue(payload.get("command_success"), payload)
@@ -246,24 +248,25 @@ class SecurityComplianceTests(ComplianceTestCase):
     def test_exec_command_timeout_is_enforced_after_running_session_is_returned(
         self,
     ) -> None:
-        started = self.client.call_tool(
-            "exec_command",
-            {
-                "cmd": "sleep 5",
-                "timeout_ms": 100,
-                "yield_time_ms": 0,
-                "max_output_bytes": 4096,
-            },
-        )
-        payload = self.assert_tool_success(started)
-        session_id = payload.get("session_id")
-        self.assertIsInstance(
-            session_id, str, f"running command should expose a session id: {payload!r}"
-        )
-
-        try:
+        with self.client_with_permission("trusted") as client:
+            started = client.call_tool(
+                "exec_command",
+                {
+                    "cmd": "sleep 5",
+                    "timeout_ms": 100,
+                    "yield_time_ms": 0,
+                    "max_output_bytes": 4096,
+                },
+            )
+            payload = self.assert_tool_success(started)
+            session_id = payload.get("session_id")
+            self.assertIsInstance(
+                session_id,
+                str,
+                f"running command should expose a session id: {payload!r}",
+            )
             time.sleep(0.35)
-            polled = self.client.call_tool(
+            polled = client.call_tool(
                 "write_stdin",
                 {
                     "session_id": session_id,
@@ -283,81 +286,85 @@ class SecurityComplianceTests(ComplianceTestCase):
                 or poll_payload.get("status") in {"timeout", "success", "failed"},
                 f"timeout should be explicit after deadline: {poll_payload!r}",
             )
-        finally:
             if isinstance(session_id, str):
-                self.client.call_tool(
+                client.call_tool(
                     "kill_session", {"session_id": session_id, "signal": "KILL"}
                 )
 
     def test_exec_command_timeout_is_enforced_without_client_polling(self) -> None:
-        started = self.client.call_tool(
-            "exec_command",
-            {
-                "cmd": "sleep 2",
-                "tty": True,
-                "timeout_ms": 100,
-                "yield_time_ms": 0,
-                "max_output_bytes": 4096,
-            },
-        )
-        payload = self.assert_tool_success(started)
-        session_id = payload.get("session_id")
-        self.assertIsInstance(session_id, str, payload)
+        with self.client_with_permission("trusted") as client:
+            started = client.call_tool(
+                "exec_command",
+                {
+                    "cmd": "sleep 2",
+                    "tty": True,
+                    "timeout_ms": 100,
+                    "yield_time_ms": 0,
+                    "max_output_bytes": 4096,
+                },
+            )
+            payload = self.assert_tool_success(started)
+            session_id = payload.get("session_id")
+            self.assertIsInstance(session_id, str, payload)
 
-        time.sleep(0.35)
-        polled = self.client.call_tool(
-            "write_stdin",
-            {
-                "session_id": session_id,
-                "chars": "",
-                "yield_time_ms": 0,
-                "max_output_bytes": 4096,
-            },
-        )
-        poll_payload = self.assert_tool_success(polled)
-        self.assertEqual(poll_payload.get("status"), "timeout", poll_payload)
-        self.assertIs(poll_payload.get("timed_out"), True, poll_payload)
+            time.sleep(0.35)
+            polled = client.call_tool(
+                "write_stdin",
+                {
+                    "session_id": session_id,
+                    "chars": "",
+                    "yield_time_ms": 0,
+                    "max_output_bytes": 4096,
+                },
+            )
+            poll_payload = self.assert_tool_success(polled)
+            self.assertEqual(poll_payload.get("status"), "timeout", poll_payload)
+            self.assertIs(poll_payload.get("timed_out"), True, poll_payload)
 
     def test_exec_command_long_running_output_buffer_is_bounded(self) -> None:
-        started = self.client.call_tool(
-            "exec_command",
-            {
-                "cmd": "yes x",
-                "tty": True,
-                "timeout_ms": 5000,
-                "yield_time_ms": 0,
-                "max_output_bytes": 1024,
-            },
-        )
-        payload = self.assert_tool_success(started)
-        session_id = payload.get("session_id")
-        self.assertIsInstance(session_id, str, payload)
-        time.sleep(0.5)
-        polled = self.client.call_tool(
-            "write_stdin",
-            {
-                "session_id": session_id,
-                "chars": "",
-                "yield_time_ms": 0,
-                "max_output_bytes": 1024,
-            },
-        )
-        poll_payload = self.assert_tool_success(polled)
-        self.assertGreater(poll_payload.get("stdout_dropped_bytes", 0), 0, poll_payload)
-        self.assertTrue(poll_payload.get("truncated"), poll_payload)
-        self.client.call_tool(
-            "kill_session", {"session_id": session_id, "signal": "KILL"}
-        )
+        with self.client_with_permission("trusted") as client:
+            started = client.call_tool(
+                "exec_command",
+                {
+                    "cmd": "yes x",
+                    "tty": True,
+                    "timeout_ms": 5000,
+                    "yield_time_ms": 0,
+                    "max_output_bytes": 1024,
+                },
+            )
+            payload = self.assert_tool_success(started)
+            session_id = payload.get("session_id")
+            self.assertIsInstance(session_id, str, payload)
+            time.sleep(0.5)
+            polled = client.call_tool(
+                "write_stdin",
+                {
+                    "session_id": session_id,
+                    "chars": "",
+                    "yield_time_ms": 0,
+                    "max_output_bytes": 1024,
+                },
+            )
+            poll_payload = self.assert_tool_success(polled)
+            self.assertGreater(
+                poll_payload.get("stdout_dropped_bytes", 0), 0, poll_payload
+            )
+            self.assertTrue(poll_payload.get("truncated"), poll_payload)
+            client.call_tool(
+                "kill_session", {"session_id": session_id, "signal": "KILL"}
+            )
 
     def test_sensitive_environment_is_not_leaked_to_child_processes(self) -> None:
-        result = self.client.call_tool(
-            "exec_command",
-            {
-                "cmd": "env",
-                "timeout_ms": 5000,
-                "max_output_bytes": 4096,
-            },
-        )
+        with self.client_with_permission("trusted") as client:
+            result = client.call_tool(
+                "exec_command",
+                {
+                    "cmd": "env",
+                    "timeout_ms": 5000,
+                    "max_output_bytes": 4096,
+                },
+            )
         payload = self.assert_tool_success(result)
         self.assertEqual(payload.get("exit_code"), 0)
         self.assertNotIn("COMPLIANCE_SHOULD_NOT_LEAK", self.tool_text(result))

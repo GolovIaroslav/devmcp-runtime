@@ -12,11 +12,14 @@ from tests.compliance.mcp_client import MCPClient, MCPError
 
 class ComplianceTestCase(unittest.TestCase):
     fixture_name = "tiny-js-project"
+    permission_mode = "trusted"
 
     def setUp(self) -> None:
         self.workspace_cm = workspace_from_fixture(self.fixture_name)
         self.workspace: FixtureWorkspace = self.workspace_cm.__enter__()
-        self.client_cm = MCPClient(self.workspace.root)
+        self.client_cm = MCPClient(
+            self.workspace.root, permission_mode=self.permission_mode
+        )
         self.client = self.client_cm.__enter__()
 
     def tearDown(self) -> None:
@@ -30,8 +33,13 @@ class ComplianceTestCase(unittest.TestCase):
         self, fixture_name: str
     ) -> Iterator[tuple[FixtureWorkspace, MCPClient]]:
         with workspace_from_fixture(fixture_name) as workspace:
-            with MCPClient(workspace.root) as client:
+            with MCPClient(workspace.root, permission_mode=self.permission_mode) as client:
                 yield workspace, client
+
+    @contextmanager
+    def client_with_permission(self, permission_mode: str) -> Iterator[MCPClient]:
+        with MCPClient(self.workspace.root, permission_mode=permission_mode) as client:
+            yield client
 
     def assert_tool_success(self, result: dict[str, Any]) -> dict[str, Any]:
         self.assertFalse(

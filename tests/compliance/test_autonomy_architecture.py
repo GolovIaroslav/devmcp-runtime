@@ -445,6 +445,7 @@ class AutonomyArchitectureTests(unittest.TestCase):
                     triples,
                 )
                 self.assertFalse((extra.sandbox_dir / ".env").exists())
+                self.assertIn("--unshare-user", args)
                 self.assertIn("--disable-userns", args)
             finally:
                 primary.cleanup()

@@ -126,7 +126,7 @@ class ApprovalWorkflowV5Tests(unittest.TestCase):
                     requested.get("status"), "approval_required", requested
                 )
                 self.assertIsInstance(requested.get("approval_id"), str)
-                self.assertEqual(requested.get("capabilities"), ["inline_script"])
+                self.assertEqual(requested.get("capabilities"), ["exec.arbitrary"])
                 self.assertIn("operation_summary", requested)
                 approval_id = requested["approval_id"]
 

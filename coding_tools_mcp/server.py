@@ -1990,6 +1990,7 @@ class Runtime:
                 return
             self._closed = True
             sessions = list(self.sessions.values())
+            retained_sessions = list(self.output_sessions.values())
             self.sessions.clear()
             self.output_sessions.clear()
         still_running = False
@@ -2005,6 +2006,9 @@ class Runtime:
                 self._schedule_session_reaper(session)
             else:
                 session.release_owned_resources()
+        for session in retained_sessions:
+            session.close_process_streams()
+            session.release_owned_resources()
         if not still_running and self._discard_execution_sandbox():
             shutil.rmtree(self.runtime_dir, ignore_errors=True)
         self.telemetry.finish()
@@ -5589,7 +5593,10 @@ class Runtime:
                 timeout_at=deadline,
                 warnings=[landlock_warning] if landlock_warning else None,
                 pty_master_fd=pty_master_fd,
+                # Transactional snapshots must survive child exit until
+                # finish() has inspected and staged their output.
                 resource_cleanup=release_execution_resources,
+                auto_release_resources_on_exit=not transaction_apply,
             )
             with self.sessions_lock:
                 self.starting_sessions -= 1
@@ -5806,6 +5813,8 @@ class Runtime:
                     self._complete_session(session)
                     session.release_owned_resources()
                     raise
+                finally:
+                    session.release_owned_resources()
             return self._format_session_output(session, payload, args)
 
         while True:
@@ -6110,15 +6119,18 @@ class Runtime:
                 # on the vcvars-provided TMP/TEMP location for generated
                 # response files, so preserve it when full environment
                 # inheritance was explicitly requested.
-                inherited_tmp = os.environ.get("TMP") or os.environ.get("TEMP")
-                if inherited_tmp:
-                    env["TMPDIR"] = inherited_tmp
-                    env["TMP"] = inherited_tmp
-                    env["TEMP"] = inherited_tmp
-                else:
-                    env["TMPDIR"] = str(tmp_dir)
-                    env["TMP"] = str(tmp_dir)
-                    env["TEMP"] = str(tmp_dir)
+                inherited_tmp = os.environ.get("TMP")
+                inherited_temp = os.environ.get("TEMP")
+                inherited_tmpdir = os.environ.get("TMPDIR")
+                fallback_tmp = str(tmp_dir)
+                env["TMP"] = inherited_tmp or inherited_temp or fallback_tmp
+                env["TEMP"] = inherited_temp or inherited_tmp or fallback_tmp
+                env["TMPDIR"] = (
+                    inherited_tmpdir
+                    or inherited_tmp
+                    or inherited_temp
+                    or fallback_tmp
+                )
             else:
                 env["TMPDIR"] = str(tmp_dir)
                 env["TMP"] = str(tmp_dir)
@@ -6238,6 +6250,7 @@ class Runtime:
         warnings: list[str] | None = None,
         pty_master_fd: int | None = None,
         resource_cleanup: Callable[[], None] | None = None,
+        auto_release_resources_on_exit: bool = True,
     ) -> ExecSession:
         context_id = self._active_context_id()
         session_id = (
@@ -6252,6 +6265,7 @@ class Runtime:
             warnings=warnings or [],
             pty_master_fd=pty_master_fd,
             resource_cleanup=resource_cleanup,
+            auto_release_resources_on_exit=auto_release_resources_on_exit,
         )
         if self.shared_job_registry is not None and context_id is not None:
             try:
@@ -6289,6 +6303,8 @@ class Runtime:
         ):
             oldest = self.output_sessions.pop(next(iter(self.output_sessions)))
             retained -= oldest.retained_bytes
+            oldest.close_process_streams()
+            oldest.release_owned_resources()
 
     def _complete_session(self, session: ExecSession) -> None:
         session.refresh_status()
@@ -6323,7 +6339,10 @@ class Runtime:
                 if session.completed_at is not None and session.completed_at < cutoff
             ]
             for session_id in expired:
-                self.output_sessions.pop(session_id, None)
+                session = self.output_sessions.pop(session_id, None)
+                if session is not None:
+                    session.close_process_streams()
+                    session.release_owned_resources()
             self._evict_retained_locked()
 
     def _shared_job_session(self, session_id: str) -> ExecSession | None:

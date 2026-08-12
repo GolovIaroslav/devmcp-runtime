@@ -27,30 +27,40 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("commands", nargs="*", help="commands to run via exec_command")
     args = parser.parse_args(argv)
 
-    with MCPClient(Path.cwd(), url=args.url) as client:
-        names = {tool["name"] for tool in client.list_tools()}
-        for required in ("server_info", "exec_command"):
-            if required not in names:
-                raise SystemExit(f"tools/list is missing {required}: {sorted(names)}")
-        info = client.call_tool("server_info", {})["structuredContent"]
-        print(
-            f"server_info: permission_mode={info['permission_mode']} tool_count={info['tool_count']}"
-        )
-        if (
-            args.expect_permission_mode
-            and info["permission_mode"] != args.expect_permission_mode
-        ):
-            raise SystemExit(
-                f"expected permission_mode={args.expect_permission_mode}, got {info['permission_mode']}"
+    stage = "initialize"
+    try:
+        with MCPClient(Path.cwd(), url=args.url) as client:
+            stage = "tools/list"
+            names = {tool["name"] for tool in client.list_tools()}
+            for required in ("server_info", "exec_command"):
+                if required not in names:
+                    raise SystemExit(
+                        f"tools/list is missing {required}: {sorted(names)}"
+                    )
+            stage = "server_info"
+            info = client.call_tool("server_info", {})["structuredContent"]
+            print(
+                f"server_info: permission_mode={info['permission_mode']} tool_count={info['tool_count']}"
             )
-        for cmd in args.commands:
-            result = client.call_tool(
-                "exec_command",
-                {"cmd": cmd, "timeout_ms": 30000, "yield_time_ms": 30000},
-            )["structuredContent"]
-            if result.get("status") != "exited" or result.get("exit_code") != 0:
-                raise SystemExit(f"command failed: {cmd!r} -> {result}")
-            print(f"ok: {cmd}")
+            if (
+                args.expect_permission_mode
+                and info["permission_mode"] != args.expect_permission_mode
+            ):
+                raise SystemExit(
+                    f"expected permission_mode={args.expect_permission_mode}, got {info['permission_mode']}"
+                )
+            for cmd in args.commands:
+                stage = f"exec_command {cmd!r}"
+                result = client.call_tool(
+                    "exec_command",
+                    {"cmd": cmd, "timeout_ms": 30000, "yield_time_ms": 30000},
+                )["structuredContent"]
+                if result.get("status") != "exited" or result.get("exit_code") != 0:
+                    raise SystemExit(f"command failed: {cmd!r} -> {result}")
+                print(f"ok: {cmd}")
+    except BaseException as exc:
+        print(f"mcp smoke failed at {stage}: {exc}", file=sys.stderr)
+        raise
     return 0
 
 
