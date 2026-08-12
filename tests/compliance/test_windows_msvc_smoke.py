@@ -86,7 +86,7 @@ class WindowsMsvcEnvironmentSmokeTests(unittest.TestCase):
         if not has_msvc_environment():
             self.skipTest("requires Windows with vcvars initialized for cl.exe")
 
-    def test_core_env_does_not_accidentally_inherit_msvc_toolchain(self) -> None:
+    def test_workspace_write_preserves_host_msvc_toolchain_with_core_env(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
             write_hello_c(workspace)
@@ -107,11 +107,9 @@ class WindowsMsvcEnvironmentSmokeTests(unittest.TestCase):
                 )
                 payload = assert_tool_success(self, result)
                 output = (payload.get("stdout") or "") + (payload.get("stderr") or "")
-                self.assertNotEqual(payload.get("exit_code"), 0, output)
-                self.assertFalse((workspace / "hello.exe").exists(), output)
-                self.assertRegex(
-                    output.lower(), r"(stdio\.h|c1083|include|cannot open)"
-                )
+                self.assertEqual(payload.get("exit_code"), 0, output)
+                self.assertEqual(payload.get("execution_mode"), "workspace-write")
+                self.assertTrue((workspace / "hello.exe").exists(), output)
 
     def test_inherit_all_preserves_msvc_environment_for_single_file_compile(
         self,
