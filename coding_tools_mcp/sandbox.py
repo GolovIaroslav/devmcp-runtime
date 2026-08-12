@@ -368,6 +368,26 @@ class ExecutionSandbox:
         default_factory=threading.Lock, repr=False, compare=False
     )
     _cleaned: bool = field(default=False, repr=False, compare=False)
+    owns_snapshot: bool = field(default=True, repr=False, compare=False)
+
+    @classmethod
+    def direct(cls, workspace: Path) -> "ExecutionSandbox":
+        """Represent the authoritative workspace without copying it."""
+        root = workspace.expanduser().resolve(strict=True)
+        if not root.is_dir():
+            raise ToolFailure(
+                "INVALID_ARGUMENT", "Workspace must be a directory.", category="validation"
+            )
+        return cls(
+            original_workspace=root,
+            sandbox_dir=root,
+            created_at=time.time(),
+            owner_root=root.parent,
+            owned_path=root,
+            ownership_token="",
+            owner_marker=root.parent / f".{root.name}.direct-view",
+            owns_snapshot=False,
+        )
 
     @classmethod
     def create(
@@ -592,6 +612,8 @@ class ExecutionSandbox:
         _safe_unlink_relative(self.sandbox_dir, rel_path)
 
     def cleanup(self) -> None:
+        if not self.owns_snapshot:
+            return
         with self._cleanup_lock:
             if self._cleaned:
                 return

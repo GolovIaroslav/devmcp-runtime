@@ -5266,6 +5266,21 @@ class Runtime:
                 "NOT_A_DIRECTORY", "workdir is not a directory.", category="validation"
             )
         execution_mode = str(args.get("_execution_mode", "read-only"))
+        if execution_mode == "full-access":
+            try:
+                command_tokens = shlex_split(strip_heredoc_payloads(cmd_str))
+            except ValueError:
+                command_tokens = cmd_str.split()
+            privileged = {"sudo", "su", "doas"}
+            if any(
+                PurePosixPath(token.replace("\\", "/")).name in privileged
+                for token in command_tokens
+            ):
+                raise ToolFailure(
+                    "PERMISSION_REQUIRED",
+                    "full-access does not grant privilege escalation; sudo/su/doas are blocked.",
+                    category="permission",
+                )
         if execution_mode != "full-access" and not args.get("_argv_task"):
             self._check_command_policy(
                 cmd_str, args, granted_capabilities=set(approved_caps)
@@ -5276,91 +5291,10 @@ class Runtime:
         max_output_bytes = int(args.get("max_output_bytes", 65536))
         tty = bool(args.get("tty", False))
         stdin_text = str(args.get("stdin", ""))
-        if (
+        direct_execution = (
             execution_mode in {"workspace-write", "full-access"}
             and not transaction_apply
-            and not tty
-            and not stdin_text
-        ):
-            start = time.time()
-            env = {str(key): str(value) for key, value in os.environ.items()}
-            if execution_mode == "workspace-write":
-                env = {
-                    key: value
-                    for key, value in env.items()
-                    if not is_filtered_env_var(key, value)
-                }
-            extra_env = args.get("env", {})
-            if isinstance(extra_env, dict):
-                for key, value in extra_env.items():
-                    key_text = str(key)
-                    value_text = str(value)
-                    if key_text in RESERVED_EXEC_ENV_NAMES:
-                        continue
-                    if execution_mode == "workspace-write" and is_filtered_env_var(
-                        key_text, value_text
-                    ):
-                        continue
-                    env[key_text] = value_text
-            venv_bin = self.workspace.root / ".venv" / (
-                "Scripts" if os.name == "nt" else "bin"
-            )
-            if venv_bin.is_dir():
-                env["PATH"] = str(venv_bin) + os.pathsep + env.get("PATH", os.defpath)
-                env["VIRTUAL_ENV"] = str(self.workspace.root / ".venv")
-                env.pop("PYTHONHOME", None)
-            env["PWD"] = str(workdir.path)
-            env["OLDPWD"] = str(workdir.path)
-            actual_cmd = (
-                ["cmd.exe", "/d", "/s", "/c", cmd]
-                if isinstance(cmd, str) and os.name == "nt"
-                else ["/bin/sh", "-c", cmd]
-                if isinstance(cmd, str)
-                else cmd
-            )
-            try:
-                completed = run_bounded_process(
-                    actual_cmd,
-                    cwd=str(workdir.path),
-                    env=env,
-                    timeout=max(0.001, timeout_ms / 1000.0),
-                    cancel_event=getattr(self.request_context, "cancel_event", None),
-                )
-                status = "exited"
-                exit_code: int | None = completed.returncode
-                stdout = completed.stdout or ""
-                stderr = completed.stderr or ""
-                timed_out = False
-            except subprocess.TimeoutExpired as exc:
-                status = "timeout"
-                exit_code = None
-                stdout = str(exc.stdout or "")
-                stderr = str(exc.stderr or "")
-                timed_out = True
-
-            def bounded_tail(text: str) -> tuple[str, int]:
-                data = text.encode("utf-8", errors="replace")
-                if len(data) <= max_output_bytes:
-                    return text, 0
-                kept = data[-max_output_bytes:].decode("utf-8", errors="replace")
-                return kept, len(data) - max_output_bytes
-
-            stdout, stdout_dropped = bounded_tail(stdout)
-            stderr, stderr_dropped = bounded_tail(stderr)
-            return {
-                "status": status,
-                "exit_code": exit_code,
-                "signal": None,
-                "stdout": stdout,
-                "stderr": stderr,
-                "stdout_dropped_bytes": stdout_dropped,
-                "stderr_dropped_bytes": stderr_dropped,
-                "timed_out": timed_out,
-                "elapsed_ms": int((time.time() - start) * 1000),
-                "executor_backend": str(args.get("_selected_executor", "workspace_host")),
-                "execution_mode": execution_mode,
-                "transaction": {"mode": "direct", "status": "not_transactional"},
-            }
+        )
         if transaction_apply:
             if tty:
                 raise ToolFailure(
@@ -5422,11 +5356,12 @@ class Runtime:
             and self.sandbox_backend.available
             and self.sandbox_backend.secure
         )
-        if self.sandbox_backend.name == "unsafe":
+        if self.sandbox_backend.name == "unsafe" or execution_mode == "full-access":
             bwrap_available = False
         if (
             self.sandbox_backend.name not in {"unsafe", "inherited"}
             and not bwrap_available
+            and execution_mode != "full-access"
             and not self._legacy_windows_process_fallback
         ):
             raise ToolFailure(
@@ -5445,17 +5380,28 @@ class Runtime:
                 details={"backend": "inherited"},
             )
 
-        sandbox = self._acquire_execution_sandbox()
+        from .sandbox import ExecutionSandbox
+
+        sandbox = (
+            ExecutionSandbox.direct(self.workspace.root)
+            if direct_execution
+            else self._acquire_execution_sandbox()
+        )
         additional_sandboxes: list[tuple[Path, Any, bool]] = []
 
         def release_execution_resources() -> None:
             self._cleanup_additional_execution_sandboxes(additional_sandboxes)
-            self._release_execution_sandbox(sandbox)
+            if direct_execution:
+                sandbox.cleanup()
+            else:
+                self._release_execution_sandbox(sandbox)
 
         try:
-            additional_sandboxes = self._additional_execution_sandboxes()
+            additional_sandboxes = (
+                [] if direct_execution else self._additional_execution_sandboxes()
+            )
             sandbox_workdir = sandbox.translate_path_for_exec(workdir.path)
-            if self.sandbox_backend.name == "unsafe" or (
+            if direct_execution or self.sandbox_backend.name == "unsafe" or (
                 not bwrap_available and os.name == "nt"
             ):
                 # Unsafe mode and the explicit Windows trusted fallback execute in
@@ -5546,15 +5492,53 @@ class Runtime:
                 raise
 
         try:
-            env = self._command_env(
-                args.get("env", {}),
-                sandboxed=True,
-                allow_sensitive_extra=(
-                    "sensitive_env" in approved_capabilities
-                    or "env.sensitive" in approved_capabilities
-                ),
-                inherited_sensitive_names=args.get("_leased_sensitive_env_names", []),
-            )
+            if direct_execution:
+                env = {str(key): str(value) for key, value in os.environ.items()}
+                if execution_mode == "workspace-write":
+                    env = {
+                        key: value
+                        for key, value in env.items()
+                        if not is_filtered_env_var(key, value)
+                    }
+                extra_env = args.get("env", {})
+                if isinstance(extra_env, dict):
+                    for key, value in extra_env.items():
+                        key_text = str(key)
+                        value_text = str(value)
+                        if key_text in RESERVED_EXEC_ENV_NAMES:
+                            continue
+                        if execution_mode == "workspace-write" and is_filtered_env_var(
+                            key_text, value_text
+                        ):
+                            continue
+                        env[key_text] = value_text
+                venv_bin = self.workspace.root / ".venv" / (
+                    "Scripts" if os.name == "nt" else "bin"
+                )
+                if venv_bin.is_dir():
+                    env["PATH"] = str(venv_bin) + os.pathsep + env.get(
+                        "PATH", os.defpath
+                    )
+                    env["VIRTUAL_ENV"] = str(self.workspace.root / ".venv")
+                    env.pop("PYTHONHOME", None)
+                if execution_mode == "workspace-write" and bwrap_available:
+                    env["HOME"] = "/tmp"
+                    env["TMPDIR"] = "/tmp"
+                    env["TMP"] = "/tmp"
+                    env["TEMP"] = "/tmp"
+                    env["XDG_CACHE_HOME"] = "/tmp"
+            else:
+                env = self._command_env(
+                    args.get("env", {}),
+                    sandboxed=True,
+                    allow_sensitive_extra=(
+                        "sensitive_env" in approved_capabilities
+                        or "env.sensitive" in approved_capabilities
+                    ),
+                    inherited_sensitive_names=args.get(
+                        "_leased_sensitive_env_names", []
+                    ),
+                )
             env["PWD"] = str(sandbox_workdir)
             env["OLDPWD"] = str(sandbox_workdir)
         except BaseException:
@@ -5563,7 +5547,7 @@ class Runtime:
 
         try:
             network_capability = args.get("_network_capability")
-            allow_network = (
+            allow_network = direct_execution or (
                 "network" in approved_capabilities
                 or "network.public" in approved_capabilities
                 or "network.host_local" in approved_capabilities
@@ -5612,7 +5596,7 @@ class Runtime:
 
         # We still initialize landlock as defense in depth if bwrap is missing somehow,
         # but bwrap provides the primary namespace isolation.
-        if self.landlock_enabled():
+        if self.landlock_enabled() and not direct_execution:
             try:
                 write_roots = [
                     sandbox.sandbox_dir,
@@ -5787,6 +5771,12 @@ class Runtime:
             payload["executor_backend"] = str(
                 args.get("_selected_executor", self.sandbox_backend.name)
             )
+            payload["execution_mode"] = execution_mode
+            if direct_execution:
+                payload["transaction"] = {
+                    "mode": "direct",
+                    "status": "not_transactional",
+                }
             self._add_exec_diagnostics(payload)
             if transaction_apply and payload.get("status") != "running":
                 command_succeeded = (
@@ -11530,8 +11520,8 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                 "transaction_mode": {
                     **string,
                     "enum": ["discard", "apply"],
-                    "default": "apply",
-                    "description": "Structured execution defaults to transactional apply on the local secure sandbox; use discard for test/build-only commands.",
+                    "default": "discard",
+                    "description": "Shell execution is non-transactional by default; apply is an explicit compatibility opt-in for bounded transactional execution.",
                 },
                 "execution_mode": {
                     **string,

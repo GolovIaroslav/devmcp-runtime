@@ -1839,6 +1839,43 @@ Maven home: /usr/share/maven
                 result.get("structuredContent", {}).get("status"), "failed"
             )
 
+    def test_workspace_write_exec_uses_authoritative_tree_without_snapshot(self) -> None:
+        with TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            runtime = Runtime(
+                workspace, permission_mode="trusted", sandbox_backend="unsafe"
+            )
+            with patch.object(
+                ExecutionSandbox,
+                "create",
+                side_effect=AssertionError("workspace-write must not snapshot"),
+            ):
+                result = runtime.exec_command(
+                    {
+                        "cmd": "printf direct > marker.txt",
+                        "timeout_ms": 5_000,
+                        "yield_time_ms": 5_000,
+                    }
+                )
+            self.assertEqual(result.get("status"), "success", result)
+            self.assertEqual(result.get("execution_mode"), "workspace-write")
+            self.assertEqual(
+                result.get("transaction"),
+                {"mode": "direct", "status": "not_transactional"},
+            )
+            self.assertEqual(
+                (workspace / "marker.txt").read_text(encoding="utf-8"), "direct"
+            )
+
+    def test_full_access_still_blocks_privilege_escalation(self) -> None:
+        with TemporaryDirectory() as tmp:
+            runtime = Runtime(
+                Path(tmp), permission_mode="dangerous", sandbox_backend="unsafe"
+            )
+            with self.assertRaises(ToolFailure) as raised:
+                runtime.exec_command({"cmd": "sudo true"})
+            self.assertEqual(raised.exception.code, "PERMISSION_REQUIRED")
+
     @unittest.skipIf(os.name == "nt", "POSIX signal status test")
     def test_exec_command_reports_signal_exit_as_terminated(self) -> None:
         with TemporaryDirectory() as tmp:

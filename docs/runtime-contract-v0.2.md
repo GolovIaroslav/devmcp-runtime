@@ -522,7 +522,7 @@ local out-of-band approval.
 
 ### exec_command
 
-Inputs: `"cmd"`, `"argv"`, `"cwd"`, `"workdir"`, `"timeout_ms"`, `"yield_time_ms"`, `"env"`, `"sensitive_env_names"`, `"transaction_mode"`, `"executor_backend"`, `"max_bytes"`, `"max_output_bytes"`, `"preview_bytes"`, `"tty"`, `"stdin"`, `"verbosity"`, `"network_required"`, `"network_targets"`, `"task_id"`, `"approval_id"`.
+Inputs: `"cmd"`, `"argv"`, `"cwd"`, `"workdir"`, `"timeout_ms"`, `"yield_time_ms"`, `"env"`, `"sensitive_env_names"`, `"transaction_mode"`, `"execution_mode"`, `"executor_backend"`, `"max_bytes"`, `"max_output_bytes"`, `"preview_bytes"`, `"tty"`, `"stdin"`, `"verbosity"`, `"network_required"`, `"network_targets"`, `"task_id"`, `"approval_id"`.
 
 Annotations: `{"title":"Exec command","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
 
@@ -563,7 +563,7 @@ gates only.
 
 ### exec_argv
 
-Inputs: `"argv"`, `"cwd"`, `"workdir"`, `"timeout_ms"`, `"yield_time_ms"`, `"env"`, `"sensitive_env_names"`, `"transaction_mode"`, `"executor_backend"`, `"max_output_bytes"`, `"tty"`, `"stdin"`, `"verbosity"`, `"preview_bytes"`, `"network_required"`, `"network_targets"`, `"task_id"`, `"approval_id"`.
+Inputs: `"argv"`, `"cwd"`, `"workdir"`, `"timeout_ms"`, `"yield_time_ms"`, `"env"`, `"sensitive_env_names"`, `"transaction_mode"`, `"execution_mode"`, `"executor_backend"`, `"max_output_bytes"`, `"tty"`, `"stdin"`, `"verbosity"`, `"preview_bytes"`, `"network_required"`, `"network_targets"`, `"task_id"`, `"approval_id"`.
 
 Annotations: `{"title":"Exec argv","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
 
