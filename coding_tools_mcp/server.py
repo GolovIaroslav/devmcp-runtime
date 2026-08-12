@@ -1885,6 +1885,7 @@ class Runtime:
             sandbox_backend_name=self.sandbox_backend.name,
             sandbox_secure=self.sandbox_backend.secure,
             sandbox_available=self.sandbox_backend.available,
+            allow_unsafe_host=self._legacy_windows_process_fallback,
         )
         self.executor_registry.reject_runner_below(
             [*self.project_roots, *self.grantable_roots]
@@ -4668,6 +4669,16 @@ class Runtime:
                 "transaction_mode must be discard or apply.",
                 category="validation",
             )
+        if bool(args.get("tty", False)) and os.name == "nt":
+            raise ToolFailure(
+                "TTY_UNSUPPORTED",
+                "tty=true requires ConPTY support, which is not available in this build.",
+                category="runtime",
+                details={
+                    "platform": os.name,
+                    "retry_hint": "Run the command without tty=true.",
+                },
+            )
         command_text = shlex.join(action) if isinstance(action, list) else action
         network_capability = self._network_capability(command_text, args)
         network_targets = [
@@ -4699,7 +4710,9 @@ class Runtime:
             preferred=str(args.get("executor_backend", "auto")),
         )
         expected_executor = (
-            "local_sandbox"
+            "unsafe_host"
+            if self._legacy_windows_process_fallback
+            else "local_sandbox"
             if self.sandbox_backend.name == "bwrap"
             else "inherited_sandbox"
             if self.sandbox_backend.name == "inherited"

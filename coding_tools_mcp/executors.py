@@ -81,6 +81,7 @@ class ExecutorRegistry:
         sandbox_secure: bool,
         sandbox_available: bool,
         container_runner: str | None = None,
+        allow_unsafe_host: bool = False,
     ) -> None:
         self.sandbox_backend_name = sandbox_backend_name
         self.container_runner = self._validate_runner(container_runner)
@@ -92,7 +93,9 @@ class ExecutorRegistry:
             and sandbox_secure
             and sandbox_available
         )
-        unsafe_configured = sandbox_backend_name == "unsafe" and sandbox_available
+        unsafe_configured = (
+            sandbox_backend_name == "unsafe" and sandbox_available
+        ) or allow_unsafe_host
         self.backends: dict[ExecutorName, ExecutorBackend] = {
             "local_sandbox": ExecutorBackend(
                 "local_sandbox",
@@ -276,12 +279,14 @@ class ExecutorRegistry:
         sandbox_backend_name: str,
         sandbox_secure: bool,
         sandbox_available: bool,
+        allow_unsafe_host: bool = False,
     ) -> "ExecutorRegistry":
         return cls(
             sandbox_backend_name=sandbox_backend_name,
             sandbox_secure=sandbox_secure,
             sandbox_available=sandbox_available,
             container_runner=os.environ.get("DEVMCP_EPHEMERAL_CONTAINER_RUNNER"),
+            allow_unsafe_host=allow_unsafe_host,
         )
 
     def describe(self) -> dict[str, dict[str, object]]:
