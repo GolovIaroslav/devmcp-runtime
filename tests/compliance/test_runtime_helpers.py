@@ -706,7 +706,7 @@ class RuntimeHelperTests(unittest.TestCase):
             )
             self.assertEqual(output[1:4], [str(expected_tmp)] * 3)
             self.assertEqual(output[4], "False", output)
-            self.assertFalse(expected_tmp.exists())
+            self.assertFalse(Path(output[0]).exists())
 
     def test_runtime_and_server_info_do_not_create_exec_dirs(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -1876,6 +1876,21 @@ Maven home: /usr/share/maven
             )
             with self.assertRaises(ToolFailure) as raised:
                 runtime.exec_command({"cmd": "sudo true"})
+            self.assertEqual(raised.exception.code, "PERMISSION_REQUIRED")
+
+    def test_execution_mode_cannot_escalate_legacy_permission_mode(self) -> None:
+        with TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            trusted = Runtime(
+                workspace, permission_mode="trusted", sandbox_backend="unsafe"
+            )
+            with self.assertRaises(ToolFailure) as raised:
+                trusted.exec_command({"cmd": "true", "execution_mode": "full-access"})
+            self.assertEqual(raised.exception.code, "PERMISSION_REQUIRED")
+
+            safe = Runtime(workspace, permission_mode="safe", sandbox_backend="unsafe")
+            with self.assertRaises(ToolFailure) as raised:
+                safe.exec_command({"cmd": "true", "execution_mode": "workspace-write"})
             self.assertEqual(raised.exception.code, "PERMISSION_REQUIRED")
 
     @unittest.skipIf(os.name == "nt", "POSIX signal status test")

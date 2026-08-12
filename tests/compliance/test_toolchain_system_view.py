@@ -57,6 +57,9 @@ class ToolchainSystemViewTests(unittest.TestCase):
     def _runtime(self, root: Path) -> Runtime:
         return Runtime(root, policy_profile="autonomous", sandbox_backend="bwrap")
 
+    def _workspace_runtime(self, root: Path) -> Runtime:
+        return Runtime(root, permission_mode="trusted", sandbox_backend="bwrap")
+
     def _run(self, runtime: Runtime, argv: list[str], *, timeout_ms: int = 30_000):
         return runtime.exec_argv(
             {
@@ -104,7 +107,7 @@ class ToolchainSystemViewTests(unittest.TestCase):
                 )
             shutil.rmtree(host_probe, ignore_errors=True)
 
-            runtime = self._runtime(root)
+            runtime = self._workspace_runtime(root)
             try:
                 venv = self._run(
                     runtime,
@@ -139,7 +142,7 @@ class ToolchainSystemViewTests(unittest.TestCase):
             )
 
         with TemporaryDirectory() as tmp:
-            runtime = self._runtime(Path(tmp))
+            runtime = self._workspace_runtime(Path(tmp))
             try:
                 failures: list[str] = []
                 for argv, name in host_supported:

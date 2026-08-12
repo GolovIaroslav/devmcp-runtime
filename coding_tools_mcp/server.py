@@ -4699,6 +4699,18 @@ class Runtime:
                 "execution_mode must be one of: read-only, workspace-write, full-access.",
                 category="validation",
             )
+        if execution_mode == "full-access" and self.permission_mode != "dangerous":
+            raise ToolFailure(
+                "PERMISSION_REQUIRED",
+                "full-access execution requires permission_mode=dangerous.",
+                category="permission",
+            )
+        if execution_mode == "workspace-write" and self.permission_mode == "safe":
+            raise ToolFailure(
+                "PERMISSION_REQUIRED",
+                "workspace-write execution requires permission_mode=trusted or dangerous.",
+                category="permission",
+            )
         if execution_mode in {"workspace-write", "full-access"}:
             internal_args = dict(args)
             internal_args.pop("approval_id", None)
@@ -5293,10 +5305,7 @@ class Runtime:
         max_output_bytes = int(args.get("max_output_bytes", 65536))
         tty = bool(args.get("tty", False))
         stdin_text = str(args.get("stdin", ""))
-        direct_execution = (
-            execution_mode in {"workspace-write", "full-access"}
-            and not transaction_apply
-        )
+        direct_execution = not transaction_apply
         if transaction_apply:
             if tty:
                 raise ToolFailure(
@@ -5498,7 +5507,7 @@ class Runtime:
         try:
             if direct_execution:
                 env = {str(key): str(value) for key, value in os.environ.items()}
-                if execution_mode == "workspace-write":
+                if execution_mode != "full-access":
                     env = {
                         key: value
                         for key, value in env.items()
@@ -5511,7 +5520,7 @@ class Runtime:
                         value_text = str(value)
                         if key_text in RESERVED_EXEC_ENV_NAMES:
                             continue
-                        if execution_mode == "workspace-write" and is_filtered_env_var(
+                        if execution_mode != "full-access" and is_filtered_env_var(
                             key_text, value_text
                         ):
                             continue
@@ -5527,7 +5536,7 @@ class Runtime:
                     )
                     env["VIRTUAL_ENV"] = str(self.workspace.root / ".venv")
                     env.pop("PYTHONHOME", None)
-                if execution_mode == "workspace-write" and bwrap_available:
+                if execution_mode != "full-access" and bwrap_available:
                     env["HOME"] = "/tmp"
                     env["TMPDIR"] = "/tmp"
                     env["TMP"] = "/tmp"
@@ -5553,7 +5562,7 @@ class Runtime:
 
         try:
             network_capability = args.get("_network_capability")
-            allow_network = direct_execution or (
+            allow_network = execution_mode in {"workspace-write", "full-access"} or (
                 "network" in approved_capabilities
                 or "network.public" in approved_capabilities
                 or "network.host_local" in approved_capabilities
@@ -5565,7 +5574,11 @@ class Runtime:
                 )
             )
             root_mounts = [
-                (sandbox.sandbox_dir, self.workspace.root, True),
+                (
+                    sandbox.sandbox_dir,
+                    self.workspace.root,
+                    execution_mode != "read-only",
+                ),
                 *[
                     (extra_sandbox.sandbox_dir, root, writable)
                     for root, extra_sandbox, writable in additional_sandboxes
@@ -11442,7 +11455,7 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                     **string,
                     "enum": ["discard", "apply"],
                     "default": "discard",
-                    "description": "Compatibility default discards execution-snapshot file changes; apply performs a bounded transactional commit after exit 0.",
+                    "description": "Shell execution is non-transactional by default; apply is an explicit compatibility opt-in for bounded transactional execution.",
                 },
                 "execution_mode": {
                     **string,

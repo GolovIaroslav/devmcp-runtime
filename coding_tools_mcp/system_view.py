@@ -11,6 +11,8 @@ TOOLCHAIN_RUNTIME_DIRS = (
     "/sbin",
     "/lib",
     "/lib64",
+    "/opt",
+    "/snap",
     "/etc/alternatives",
     "/usr/local/sdkman/candidates",
 )
