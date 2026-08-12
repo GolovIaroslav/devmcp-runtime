@@ -2349,7 +2349,7 @@ class Runtime:
     def initialize(self, client_info: dict[str, Any] | None = None) -> dict[str, Any]:
         context_id = self._ensure_logical_context()
         self.telemetry.record_session_start(client_info, self.protocol_version)
-        result = {
+        result: dict[str, Any] = {
             "protocolVersion": self.protocol_version,
             "capabilities": {"tools": {"listChanged": False}},
             "serverInfo": {
@@ -3942,12 +3942,16 @@ class Runtime:
                     if prior is not None
                     else FileBaseline.capture(source.path)
                 )
-                orig_text = (
-                    prior.content
-                    if prior is not None
-                    else baseline.text(source.display)
-                )
-                assert orig_text is not None
+                if prior is not None:
+                    if not isinstance(prior.content, str):
+                        raise ToolFailure(
+                            "PATCH_FAILED",
+                            "Cannot apply a text update after a non-text staged change.",
+                            category="validation",
+                        )
+                    orig_text = prior.content
+                else:
+                    orig_text = baseline.text(source.display)
                 updated_text = apply_update_hunks(orig_text, op.hunks, op.path)
 
                 orig_list = orig_text.splitlines(keepends=True)
@@ -6097,9 +6101,28 @@ class Runtime:
         else:
             tmp_dir = self.command_tmp_dir()
             env["HOME"] = str(self.command_home_dir())
-            env["TMPDIR"] = str(tmp_dir)
-            env["TMP"] = str(tmp_dir)
-            env["TEMP"] = str(tmp_dir)
+            if (
+                self._legacy_windows_process_fallback
+                and self.shell_env_policy.inherit == "all"
+            ):
+                # Legacy Windows trusted mode is explicitly an unsafe-host
+                # compatibility path.  MSVC's compiler/linker toolchain relies
+                # on the vcvars-provided TMP/TEMP location for generated
+                # response files, so preserve it when full environment
+                # inheritance was explicitly requested.
+                inherited_tmp = os.environ.get("TMP") or os.environ.get("TEMP")
+                if inherited_tmp:
+                    env["TMPDIR"] = inherited_tmp
+                    env["TMP"] = inherited_tmp
+                    env["TEMP"] = inherited_tmp
+                else:
+                    env["TMPDIR"] = str(tmp_dir)
+                    env["TMP"] = str(tmp_dir)
+                    env["TEMP"] = str(tmp_dir)
+            else:
+                env["TMPDIR"] = str(tmp_dir)
+                env["TMP"] = str(tmp_dir)
+                env["TEMP"] = str(tmp_dir)
         return env
 
     def _git_env(self) -> dict[str, str]:
