@@ -4686,6 +4686,33 @@ class Runtime:
                 "transaction_mode must be discard or apply.",
                 category="validation",
             )
+        execution_mode = str(args.get("execution_mode", "")).strip().lower()
+        if not execution_mode:
+            execution_mode = {
+                "safe": "read-only",
+                "trusted": "workspace-write",
+                "dangerous": "full-access",
+            }[self.permission_mode]
+        if execution_mode not in {"read-only", "workspace-write", "full-access"}:
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                "execution_mode must be one of: read-only, workspace-write, full-access.",
+                category="validation",
+            )
+        if execution_mode in {"workspace-write", "full-access"}:
+            internal_args = dict(args)
+            internal_args.pop("approval_id", None)
+            internal_args["cmd"] = action
+            internal_args["transaction_mode"] = transaction_mode
+            internal_args["_execution_mode"] = execution_mode
+            internal_args["_selected_executor"] = (
+                "workspace_host" if execution_mode == "workspace-write" else "unsafe_host"
+            )
+            internal_args["_resolved_workdir"] = self._operation_workdir(args).path
+            internal_args["_approved_capabilities"] = []
+            if isinstance(action, list):
+                internal_args["_argv_task"] = True
+            return self._execute_command_legacy(internal_args)
         if bool(args.get("tty", False)) and os.name == "nt":
             raise ToolFailure(
                 "TTY_UNSUPPORTED",
@@ -5238,7 +5265,8 @@ class Runtime:
             raise ToolFailure(
                 "NOT_A_DIRECTORY", "workdir is not a directory.", category="validation"
             )
-        if not args.get("_argv_task"):
+        execution_mode = str(args.get("_execution_mode", "read-only"))
+        if execution_mode != "full-access" and not args.get("_argv_task"):
             self._check_command_policy(
                 cmd_str, args, granted_capabilities=set(approved_caps)
             )
@@ -5248,6 +5276,91 @@ class Runtime:
         max_output_bytes = int(args.get("max_output_bytes", 65536))
         tty = bool(args.get("tty", False))
         stdin_text = str(args.get("stdin", ""))
+        if (
+            execution_mode in {"workspace-write", "full-access"}
+            and not transaction_apply
+            and not tty
+            and not stdin_text
+        ):
+            start = time.time()
+            env = {str(key): str(value) for key, value in os.environ.items()}
+            if execution_mode == "workspace-write":
+                env = {
+                    key: value
+                    for key, value in env.items()
+                    if not is_filtered_env_var(key, value)
+                }
+            extra_env = args.get("env", {})
+            if isinstance(extra_env, dict):
+                for key, value in extra_env.items():
+                    key_text = str(key)
+                    value_text = str(value)
+                    if key_text in RESERVED_EXEC_ENV_NAMES:
+                        continue
+                    if execution_mode == "workspace-write" and is_filtered_env_var(
+                        key_text, value_text
+                    ):
+                        continue
+                    env[key_text] = value_text
+            venv_bin = self.workspace.root / ".venv" / (
+                "Scripts" if os.name == "nt" else "bin"
+            )
+            if venv_bin.is_dir():
+                env["PATH"] = str(venv_bin) + os.pathsep + env.get("PATH", os.defpath)
+                env["VIRTUAL_ENV"] = str(self.workspace.root / ".venv")
+                env.pop("PYTHONHOME", None)
+            env["PWD"] = str(workdir.path)
+            env["OLDPWD"] = str(workdir.path)
+            actual_cmd = (
+                ["cmd.exe", "/d", "/s", "/c", cmd]
+                if isinstance(cmd, str) and os.name == "nt"
+                else ["/bin/sh", "-c", cmd]
+                if isinstance(cmd, str)
+                else cmd
+            )
+            try:
+                completed = run_bounded_process(
+                    actual_cmd,
+                    cwd=str(workdir.path),
+                    env=env,
+                    timeout=max(0.001, timeout_ms / 1000.0),
+                    cancel_event=getattr(self.request_context, "cancel_event", None),
+                )
+                status = "exited"
+                exit_code: int | None = completed.returncode
+                stdout = completed.stdout or ""
+                stderr = completed.stderr or ""
+                timed_out = False
+            except subprocess.TimeoutExpired as exc:
+                status = "timeout"
+                exit_code = None
+                stdout = str(exc.stdout or "")
+                stderr = str(exc.stderr or "")
+                timed_out = True
+
+            def bounded_tail(text: str) -> tuple[str, int]:
+                data = text.encode("utf-8", errors="replace")
+                if len(data) <= max_output_bytes:
+                    return text, 0
+                kept = data[-max_output_bytes:].decode("utf-8", errors="replace")
+                return kept, len(data) - max_output_bytes
+
+            stdout, stdout_dropped = bounded_tail(stdout)
+            stderr, stderr_dropped = bounded_tail(stderr)
+            return {
+                "status": status,
+                "exit_code": exit_code,
+                "signal": None,
+                "stdout": stdout,
+                "stderr": stderr,
+                "stdout_dropped_bytes": stdout_dropped,
+                "stderr_dropped_bytes": stderr_dropped,
+                "timed_out": timed_out,
+                "elapsed_ms": int((time.time() - start) * 1000),
+                "executor_backend": str(args.get("_selected_executor", "workspace_host")),
+                "execution_mode": execution_mode,
+                "transaction": {"mode": "direct", "status": "not_transactional"},
+            }
         if transaction_apply:
             if tty:
                 raise ToolFailure(
@@ -6446,7 +6559,24 @@ class Runtime:
             payload["next_actions"] = read_actions
             if terminal:
                 payload["next_action"] = read_actions[0]
-        verbosity = str(args.get("verbosity", "")).strip().lower()
+        raw_verbosity = args.get("verbosity", "")
+        if isinstance(raw_verbosity, bool):
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                "verbosity must be integer 0..2 or one of: summary, preview, full.",
+                category="validation",
+            )
+        if isinstance(raw_verbosity, int):
+            try:
+                verbosity = {0: "", 1: "preview", 2: "full"}[raw_verbosity]
+            except KeyError as exc:
+                raise ToolFailure(
+                    "INVALID_ARGUMENT",
+                    "verbosity integer must be between 0 and 2.",
+                    category="validation",
+                ) from exc
+        else:
+            verbosity = str(raw_verbosity).strip().lower()
         if not verbosity:
             return payload
         if verbosity not in {"summary", "preview", "full"}:
@@ -11318,6 +11448,11 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                     "default": "discard",
                     "description": "Compatibility default discards execution-snapshot file changes; apply performs a bounded transactional commit after exit 0.",
                 },
+                "execution_mode": {
+                    **string,
+                    "enum": ["read-only", "workspace-write", "full-access"],
+                    "description": "Execution model override. Legacy modes map safe->read-only, trusted->workspace-write, dangerous->full-access.",
+                },
                 "executor_backend": {
                     **string,
                     "enum": [
@@ -11397,6 +11532,11 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                     "enum": ["discard", "apply"],
                     "default": "apply",
                     "description": "Structured execution defaults to transactional apply on the local secure sandbox; use discard for test/build-only commands.",
+                },
+                "execution_mode": {
+                    **string,
+                    "enum": ["read-only", "workspace-write", "full-access"],
+                    "description": "Execution model override. Legacy modes map safe->read-only, trusted->workspace-write, dangerous->full-access.",
                 },
                 "executor_backend": {
                     **string,
