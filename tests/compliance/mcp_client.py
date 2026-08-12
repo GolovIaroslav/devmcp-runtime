@@ -136,6 +136,7 @@ class MCPClient:
     request_id: int = 0
     initialized: bool = False
     permission_mode: str = "safe"
+    policy_profile: str | None = None
 
     def __enter__(self) -> "MCPClient":
         if self.url is None:
@@ -156,11 +157,16 @@ class MCPClient:
                 + " ".join(cmd or ["<empty>"])
             )
 
+        env_overrides = {
+            "AWS_SECRET_ACCESS_KEY": "COMPLIANCE_SHOULD_NOT_LEAK",
+            "OPENAI_API_KEY": "COMPLIANCE_SHOULD_NOT_LEAK",
+            "CODING_TOOLS_MCP_WORKSPACE": str(self.workspace),
+            "CODING_TOOLS_MCP_PERMISSION_MODE": self.permission_mode,
+        }
+        if self.policy_profile is not None:
+            env_overrides["DEVMCP_POLICY_PROFILE"] = self.policy_profile
         env = safe_server_env(
-            AWS_SECRET_ACCESS_KEY="COMPLIANCE_SHOULD_NOT_LEAK",
-            OPENAI_API_KEY="COMPLIANCE_SHOULD_NOT_LEAK",
-            CODING_TOOLS_MCP_WORKSPACE=str(self.workspace),
-            CODING_TOOLS_MCP_PERMISSION_MODE=self.permission_mode,
+            **env_overrides,
         )
         self.process = subprocess.Popen(
             cmd,

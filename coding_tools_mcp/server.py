@@ -5963,6 +5963,8 @@ class Runtime:
             "docker",
             "podman",
             "nsenter",
+            "bwrap",
+            "bubblewrap",
         }
         return any(
             PurePosixPath(token.replace("\\", "/")).name in denied for token in tokens
@@ -6126,10 +6128,7 @@ class Runtime:
                 env["TMP"] = inherited_tmp or inherited_temp or fallback_tmp
                 env["TEMP"] = inherited_temp or inherited_tmp or fallback_tmp
                 env["TMPDIR"] = (
-                    inherited_tmpdir
-                    or inherited_tmp
-                    or inherited_temp
-                    or fallback_tmp
+                    inherited_tmpdir or inherited_tmp or inherited_temp or fallback_tmp
                 )
             else:
                 env["TMPDIR"] = str(tmp_dir)
