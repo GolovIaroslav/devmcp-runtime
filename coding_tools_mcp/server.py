@@ -4706,7 +4706,9 @@ class Runtime:
             internal_args["transaction_mode"] = transaction_mode
             internal_args["_execution_mode"] = execution_mode
             internal_args["_selected_executor"] = (
-                "workspace_host" if execution_mode == "workspace-write" else "unsafe_host"
+                "workspace_host"
+                if execution_mode == "workspace-write"
+                else "unsafe_host"
             )
             internal_args["_resolved_workdir"] = self._operation_workdir(args).path
             internal_args["_approved_capabilities"] = []
@@ -5401,8 +5403,10 @@ class Runtime:
                 [] if direct_execution else self._additional_execution_sandboxes()
             )
             sandbox_workdir = sandbox.translate_path_for_exec(workdir.path)
-            if direct_execution or self.sandbox_backend.name == "unsafe" or (
-                not bwrap_available and os.name == "nt"
+            if (
+                direct_execution
+                or self.sandbox_backend.name == "unsafe"
+                or (not bwrap_available and os.name == "nt")
             ):
                 # Unsafe mode and the explicit Windows trusted fallback execute in
                 # the caller-owned checkout. The snapshot lease is still created
@@ -5512,12 +5516,14 @@ class Runtime:
                         ):
                             continue
                         env[key_text] = value_text
-                venv_bin = self.workspace.root / ".venv" / (
-                    "Scripts" if os.name == "nt" else "bin"
+                venv_bin = (
+                    self.workspace.root
+                    / ".venv"
+                    / ("Scripts" if os.name == "nt" else "bin")
                 )
                 if venv_bin.is_dir():
-                    env["PATH"] = str(venv_bin) + os.pathsep + env.get(
-                        "PATH", os.defpath
+                    env["PATH"] = (
+                        str(venv_bin) + os.pathsep + env.get("PATH", os.defpath)
                     )
                     env["VIRTUAL_ENV"] = str(self.workspace.root / ".venv")
                     env.pop("PYTHONHOME", None)

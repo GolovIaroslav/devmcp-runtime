@@ -1839,7 +1839,9 @@ Maven home: /usr/share/maven
                 result.get("structuredContent", {}).get("status"), "failed"
             )
 
-    def test_workspace_write_exec_uses_authoritative_tree_without_snapshot(self) -> None:
+    def test_workspace_write_exec_uses_authoritative_tree_without_snapshot(
+        self,
+    ) -> None:
         with TemporaryDirectory() as tmp:
             workspace = Path(tmp)
             runtime = Runtime(

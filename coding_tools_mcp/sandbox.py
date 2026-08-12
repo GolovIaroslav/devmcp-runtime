@@ -376,7 +376,9 @@ class ExecutionSandbox:
         root = workspace.expanduser().resolve(strict=True)
         if not root.is_dir():
             raise ToolFailure(
-                "INVALID_ARGUMENT", "Workspace must be a directory.", category="validation"
+                "INVALID_ARGUMENT",
+                "Workspace must be a directory.",
+                category="validation",
             )
         return cls(
             original_workspace=root,
