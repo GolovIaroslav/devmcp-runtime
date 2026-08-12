@@ -89,9 +89,7 @@ class ExecutorRegistry:
             sandbox_backend_name == "bwrap" and sandbox_secure and sandbox_available
         )
         inherited_configured = (
-            sandbox_backend_name == "inherited"
-            and sandbox_secure
-            and sandbox_available
+            sandbox_backend_name == "inherited" and sandbox_secure and sandbox_available
         )
         unsafe_configured = (
             sandbox_backend_name == "unsafe" and sandbox_available
@@ -234,14 +232,21 @@ class ExecutorRegistry:
             )
         if hasattr(os, "geteuid"):
             allowed_owners = {0, os.geteuid()}
-            if runner_stat.st_uid not in allowed_owners or parent_stat.st_uid not in allowed_owners:
+            if (
+                runner_stat.st_uid not in allowed_owners
+                or parent_stat.st_uid not in allowed_owners
+            ):
                 raise ToolFailure(
                     "ACCESS_DENIED",
                     "Configured ephemeral-container runner and its directory must be owned by root or the DevMCP service user.",
                     category="security",
                     details={"path": str(resolved)},
                 )
-        if path.name.lower() in {"docker", "podman", "nerdctl"} or resolved.name.lower() in {
+        if path.name.lower() in {
+            "docker",
+            "podman",
+            "nerdctl",
+        } or resolved.name.lower() in {
             "docker",
             "podman",
             "nerdctl",

@@ -2157,7 +2157,9 @@ class Runtime:
             if root.resolve(strict=True) != self.workspace.root
         ]
         candidates: list[tuple[Path, bool]] = []
-        for root in sorted(set([*readable, *writable]), key=lambda item: len(item.parts)):
+        for root in sorted(
+            set([*readable, *writable]), key=lambda item: len(item.parts)
+        ):
             wants_write = root in writable
             covered = False
             for existing_root, existing_write in candidates:
@@ -2242,7 +2244,9 @@ class Runtime:
         if not required:
             return "auto"
         try:
-            decisions = {self.effective_capability_rules[capability] for capability in required}
+            decisions = {
+                self.effective_capability_rules[capability] for capability in required
+            }
         except KeyError as exc:
             raise ToolFailure(
                 "INVALID_ARGUMENT",
@@ -2477,7 +2481,10 @@ class Runtime:
                 details={"path": rel_path},
             )
         protected_parts = {".git", ".ssh", ".aws", ".gnupg", ".kube"}
-        if any(part in protected_parts or part.startswith(".devmcp-") for part in pure.parts):
+        if any(
+            part in protected_parts or part.startswith(".devmcp-")
+            for part in pure.parts
+        ):
             raise ToolFailure(
                 "TRANSACTION_UNSAFE_CHANGE",
                 "Transactional output targets a protected runtime/credential path.",
@@ -4393,7 +4400,9 @@ class Runtime:
             network = self._network_capability(segment, args)
             if network:
                 required.add(network)
-        if isinstance(args.get("network_targets"), list) and args.get("network_targets"):
+        if isinstance(args.get("network_targets"), list) and args.get(
+            "network_targets"
+        ):
             required.add(self._network_capability(cmd, args) or "network.public")
         env = args.get("env", {})
         if isinstance(env, dict) and any(
@@ -4739,7 +4748,9 @@ class Runtime:
             )
         if selected_executor.name == "ephemeral_container":
             pending = self._profile_authorize_operation(
-                "executor.container", args, "use operator-configured ephemeral container backend"
+                "executor.container",
+                args,
+                "use operator-configured ephemeral container backend",
             )
             if pending is not None:
                 return pending
@@ -4848,7 +4859,9 @@ class Runtime:
                 value = int(os.environ.get(name, str(default)))
             except ValueError as exc:
                 raise ToolFailure(
-                    "INVALID_ARGUMENT", f"{name} must be an integer.", category="validation"
+                    "INVALID_ARGUMENT",
+                    f"{name} must be an integer.",
+                    category="validation",
                 ) from exc
             if not minimum <= value <= maximum:
                 raise ToolFailure(
@@ -5076,9 +5089,7 @@ class Runtime:
                     ),
                     "command_success": command_success,
                     "executor_backend": "ephemeral_container",
-                    "enforcement": {
-                        name: True for name in required_enforcement
-                    },
+                    "enforcement": {name: True for name in required_enforcement},
                 }
 
                 if transaction_mode == "apply":
@@ -5120,7 +5131,10 @@ class Runtime:
                                     "Container output conflicted with current workspace state; no user WIP was overwritten.",
                                     category="conflict",
                                     retryable=True,
-                                    details={"cause_code": exc.code, "cause": exc.message},
+                                    details={
+                                        "cause_code": exc.code,
+                                        "cause": exc.message,
+                                    },
                                 ) from exc
                             raise
                         transaction_status = "applied" if staged_all else "unchanged"
@@ -5418,9 +5432,7 @@ class Runtime:
                     "sensitive_env" in approved_capabilities
                     or "env.sensitive" in approved_capabilities
                 ),
-                inherited_sensitive_names=args.get(
-                    "_leased_sensitive_env_names", []
-                ),
+                inherited_sensitive_names=args.get("_leased_sensitive_env_names", []),
             )
             env["PWD"] = str(sandbox_workdir)
             env["OLDPWD"] = str(sandbox_workdir)
@@ -5764,8 +5776,9 @@ class Runtime:
                     combined_diff = "".join(transaction_diff_parts)
                     if len(combined_diff.encode("utf-8")) > 512 * 1024:
                         combined_diff = (
-                            combined_diff.encode("utf-8")[: 512 * 1024]
-                            .decode("utf-8", errors="ignore")
+                            combined_diff.encode("utf-8")[: 512 * 1024].decode(
+                                "utf-8", errors="ignore"
+                            )
                             + "\n... combined transaction diff truncated ...\n"
                         )
                     payload["transaction"] = {
@@ -5869,7 +5882,8 @@ class Runtime:
         if system_candidate is not None:
             for system_root in readonly_system_paths(allow_network=True):
                 if system_candidate == system_root or (
-                    system_root.is_dir() and is_relative_to(system_candidate, system_root)
+                    system_root.is_dir()
+                    and is_relative_to(system_candidate, system_root)
                 ):
                     return
         try:
@@ -6034,9 +6048,8 @@ class Runtime:
                         f"Environment variable {key_text} is reserved for runtime sandbox attestation.",
                         category="security",
                     )
-                if (
-                    not allow_sensitive_extra
-                    and is_filtered_env_var(key_text, value_text)
+                if not allow_sensitive_extra and is_filtered_env_var(
+                    key_text, value_text
                 ):
                     continue
                 env[key_text] = value_text
@@ -8860,7 +8873,9 @@ class Runtime:
             ) from exc
         if not target.is_dir():
             raise ToolFailure(
-                "NOT_A_DIRECTORY", "Additional root must be a directory.", category="validation"
+                "NOT_A_DIRECTORY",
+                "Additional root must be a directory.",
+                category="validation",
             )
         if is_relative_to(target, self.workspace.root):
             return {

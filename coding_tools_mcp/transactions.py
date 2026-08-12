@@ -127,7 +127,10 @@ class ExecutionTransaction:
 
     def _diff_entries(
         self,
-    ) -> tuple[dict[str, SnapshotEntry], list[tuple[str, SnapshotEntry | None, SnapshotEntry | None]]]:
+    ) -> tuple[
+        dict[str, SnapshotEntry],
+        list[tuple[str, SnapshotEntry | None, SnapshotEntry | None]],
+    ]:
         after = capture_snapshot(self.snapshot_root)
         raw: list[tuple[str, SnapshotEntry | None, SnapshotEntry | None]] = []
         for rel in sorted(set(self.before) | set(after)):
@@ -144,7 +147,11 @@ class ExecutionTransaction:
                     category="security",
                     details={"path": rel},
                 )
-            if before is not None and current is not None and before.kind != current.kind:
+            if (
+                before is not None
+                and current is not None
+                and before.kind != current.kind
+            ):
                 raise ToolFailure(
                     "TRANSACTION_UNSAFE_CHANGE",
                     f"Transactional execution cannot change filesystem object type: {rel}",
@@ -246,7 +253,9 @@ class ExecutionTransaction:
                     before_text = before_bytes.decode("utf-8").splitlines(keepends=True)
                     after_text = after_bytes.decode("utf-8").splitlines(keepends=True)
                 except UnicodeDecodeError:
-                    diff_parts.append(f"Binary change: {rel} ({operation}, {size} bytes)\n")
+                    diff_parts.append(
+                        f"Binary change: {rel} ({operation}, {size} bytes)\n"
+                    )
                 else:
                     part = "".join(
                         difflib.unified_diff(
@@ -260,7 +269,10 @@ class ExecutionTransaction:
                     remaining = MAX_TRANSACTION_DIFF_BYTES - diff_bytes
                     if len(encoded) > remaining:
                         encoded = encoded[:remaining]
-                        part = encoded.decode("utf-8", errors="ignore") + "\n... transaction diff truncated ...\n"
+                        part = (
+                            encoded.decode("utf-8", errors="ignore")
+                            + "\n... transaction diff truncated ...\n"
+                        )
                     diff_parts.append(part)
                     diff_bytes += len(encoded)
 
@@ -294,7 +306,9 @@ class ExecutionTransaction:
                     "Transactional command output could not be applied without risking concurrent or pre-existing workspace changes.",
                     category="conflict",
                     retryable=exc.retryable,
-                    details={"cause": exc.to_dict() if hasattr(exc, "to_dict") else str(exc)},
+                    details={
+                        "cause": exc.to_dict() if hasattr(exc, "to_dict") else str(exc)
+                    },
                 ) from exc
             raise
         payload["status"] = "applied"

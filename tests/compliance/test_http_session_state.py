@@ -336,7 +336,9 @@ class HTTPSessionStateTests(unittest.TestCase):
                     )
                     self.assertEqual(current["relative_path"], "a")
 
-    def test_capability_root_leases_survive_reconnect_are_owner_scoped_and_once(self) -> None:
+    def test_capability_root_leases_survive_reconnect_are_owner_scoped_and_once(
+        self,
+    ) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             projects = root / "projects"

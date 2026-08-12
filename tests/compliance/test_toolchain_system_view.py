@@ -99,7 +99,9 @@ class ToolchainSystemViewTests(unittest.TestCase):
                 check=False,
             )
             if host_venv.returncode != 0:
-                self.skipTest(f"host python -m venv unavailable: {host_venv.stderr[-300:]}")
+                self.skipTest(
+                    f"host python -m venv unavailable: {host_venv.stderr[-300:]}"
+                )
             shutil.rmtree(host_probe, ignore_errors=True)
 
             runtime = self._runtime(root)
@@ -116,7 +118,9 @@ class ToolchainSystemViewTests(unittest.TestCase):
             finally:
                 runtime.close()
 
-    def test_available_language_package_toolchains_can_discover_runtime_metadata(self) -> None:
+    def test_available_language_package_toolchains_can_discover_runtime_metadata(
+        self,
+    ) -> None:
         candidates = [
             (["uv", "--version"], "uv"),
             (["npm", "--version"], "npm"),
@@ -130,7 +134,9 @@ class ToolchainSystemViewTests(unittest.TestCase):
             (argv, name) for argv, name in candidates if self._host_version_works(argv)
         ]
         if not host_supported:
-            self.skipTest("none of the optional package/toolchain commands are installed")
+            self.skipTest(
+                "none of the optional package/toolchain commands are installed"
+            )
 
         with TemporaryDirectory() as tmp:
             runtime = self._runtime(Path(tmp))
@@ -177,7 +183,9 @@ class ToolchainSystemViewTests(unittest.TestCase):
             finally:
                 runtime.close()
 
-    def test_transactional_exec_argv_applies_success_discards_failure_and_preserves_concurrent_wip(self) -> None:
+    def test_transactional_exec_argv_applies_success_discards_failure_and_preserves_concurrent_wip(
+        self,
+    ) -> None:
         python = shutil.which("python3") or shutil.which("python")
         if python is None:
             self.skipTest("host Python is unavailable")
@@ -202,7 +210,9 @@ class ToolchainSystemViewTests(unittest.TestCase):
                 self.assertEqual(success["status"], "success", success)
                 self.assertEqual(success["transaction"]["status"], "applied")
                 self.assertTrue(success["transaction"]["preexisting_dirty_preserved"])
-                self.assertEqual(target.read_text(encoding="utf-8"), "user-wip\nagent\n")
+                self.assertEqual(
+                    target.read_text(encoding="utf-8"), "user-wip\nagent\n"
+                )
                 self.assertEqual((root / "generated.bin").read_bytes(), b"\x00artifact")
 
                 failed = runtime.exec_argv(
@@ -221,7 +231,9 @@ class ToolchainSystemViewTests(unittest.TestCase):
                 self.assertEqual(
                     failed["transaction"]["status"], "discarded_on_command_failure"
                 )
-                self.assertEqual(target.read_text(encoding="utf-8"), "user-wip\nagent\n")
+                self.assertEqual(
+                    target.read_text(encoding="utf-8"), "user-wip\nagent\n"
+                )
 
                 def concurrent_user_edit() -> None:
                     time.sleep(0.15)

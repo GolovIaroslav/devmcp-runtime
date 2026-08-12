@@ -36,9 +36,7 @@ TOOLCHAIN_CONFIG_PATHS = (
     "/etc/xml",
 )
 
-TOOLCHAIN_CONFIG_GLOBS = (
-    "/etc/java-*",
-)
+TOOLCHAIN_CONFIG_GLOBS = ("/etc/java-*",)
 
 DYNAMIC_LINKER_PATHS = (
     "/etc/ld.so.cache",

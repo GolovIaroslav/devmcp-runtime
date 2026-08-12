@@ -441,8 +441,7 @@ class ExecutionSandbox:
     @staticmethod
     def _is_secret_path(parts: tuple[str, ...]) -> bool:
         if any(
-            part in {".devmcp-tmp", ".devmcp-home", ".devmcp-cache"}
-            for part in parts
+            part in {".devmcp-tmp", ".devmcp-home", ".devmcp-cache"} for part in parts
         ):
             return True
         return sensitive_path_reason(parts) is not None
@@ -748,7 +747,9 @@ class ExecutionSandbox:
                 if any(
                     text == str(system_path)
                     or text.startswith(str(system_path) + os.sep)
-                    for system_path in readonly_system_paths(allow_network=allow_network)
+                    for system_path in readonly_system_paths(
+                        allow_network=allow_network
+                    )
                     if system_path.is_dir()
                 ):
                     continue

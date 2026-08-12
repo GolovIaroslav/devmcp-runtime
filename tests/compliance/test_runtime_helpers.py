@@ -3182,7 +3182,9 @@ Maven home: /usr/share/maven
                 runtime.close()
 
     @unittest.skipIf(os.name == "nt", "fake executable fixture uses a POSIX shebang")
-    def test_antigravity_does_not_apply_over_concurrent_selected_repo_changes(self) -> None:
+    def test_antigravity_does_not_apply_over_concurrent_selected_repo_changes(
+        self,
+    ) -> None:
         preflight_error = git_fixture_preflight_error()
         if preflight_error is not None:
             self.skipTest(preflight_error)
@@ -3205,7 +3207,7 @@ Maven home: /usr/share/maven
                 "else:\n"
                 "    pathlib.Path('agent-added.txt').write_text('delegated\\n', encoding='utf-8')\n"
                 "    (authoritative / 'tracked.txt').write_text('concurrent-user-change\\n', encoding='utf-8')\n"
-                "    print('{\"status\":\"SUCCESS\"}')\n",
+                '    print(\'{"status":"SUCCESS"}\')\n',
                 encoding="utf-8",
             )
             fake.chmod(0o700)
@@ -3216,7 +3218,10 @@ Maven home: /usr/share/maven
                 ):
                     with self.assertRaises(ToolFailure) as conflict:
                         runtime.antigravity_delegate(
-                            {"prompt": "Add a delegated marker file.", "timeout_seconds": 30}
+                            {
+                                "prompt": "Add a delegated marker file.",
+                                "timeout_seconds": 30,
+                            }
                         )
                 self.assertEqual(conflict.exception.code, "TRANSACTION_CONFLICT")
                 self.assertEqual(
@@ -3255,7 +3260,7 @@ Maven home: /usr/share/maven
                 "else:\n"
                 "    pathlib.Path('agent-added.txt').write_text('delegated\\n', encoding='utf-8')\n"
                 "    subprocess.run(['git', '-C', str(authoritative), 'switch', 'other'], check=True, stdout=subprocess.DEVNULL)\n"
-                "    print('{\"status\":\"SUCCESS\"}')\n",
+                '    print(\'{"status":"SUCCESS"}\')\n',
                 encoding="utf-8",
             )
             fake.chmod(0o700)
@@ -3266,7 +3271,10 @@ Maven home: /usr/share/maven
                 ):
                     with self.assertRaises(ToolFailure) as conflict:
                         runtime.antigravity_delegate(
-                            {"prompt": "Add a delegated marker file.", "timeout_seconds": 30}
+                            {
+                                "prompt": "Add a delegated marker file.",
+                                "timeout_seconds": 30,
+                            }
                         )
                 self.assertEqual(conflict.exception.code, "TRANSACTION_CONFLICT")
                 self.assertFalse((repo / "agent-added.txt").exists())

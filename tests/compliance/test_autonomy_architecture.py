@@ -37,7 +37,9 @@ class AutonomyArchitectureTests(unittest.TestCase):
             **kwargs,
         )
 
-    def test_explicit_profile_is_authoritative_over_legacy_permission_mode(self) -> None:
+    def test_explicit_profile_is_authoritative_over_legacy_permission_mode(
+        self,
+    ) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             runtime = Runtime(
@@ -64,7 +66,9 @@ class AutonomyArchitectureTests(unittest.TestCase):
             finally:
                 runtime.close()
 
-    def test_permission_profile_matrix_and_legacy_adapter_are_deterministic(self) -> None:
+    def test_permission_profile_matrix_and_legacy_adapter_are_deterministic(
+        self,
+    ) -> None:
         self.assertEqual(legacy_profile("safe"), "safe")
         self.assertEqual(legacy_profile("trusted"), "power")
         self.assertEqual(legacy_profile("dangerous"), "autonomous")
@@ -105,7 +109,9 @@ class AutonomyArchitectureTests(unittest.TestCase):
             finally:
                 runtime.close()
 
-    def test_absolute_paths_inside_workspace_are_allowed_but_escapes_are_not(self) -> None:
+    def test_absolute_paths_inside_workspace_are_allowed_but_escapes_are_not(
+        self,
+    ) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp) / "repo"
             root.mkdir()
@@ -130,7 +136,10 @@ class AutonomyArchitectureTests(unittest.TestCase):
             try:
                 result = runtime.read_file({"path": str(inside)})
                 self.assertEqual(result["content"], "inside\n")
-                self.assertEqual(runtime.resolve_for_write(str(root / "new.txt")).path, root / "new.txt")
+                self.assertEqual(
+                    runtime.resolve_for_write(str(root / "new.txt")).path,
+                    root / "new.txt",
+                )
                 with self.assertRaises(ToolFailure) as escaped:
                     runtime.read_file({"path": str(sibling)})
                 self.assertEqual(escaped.exception.code, "PATH_OUTSIDE_WORKSPACE")
@@ -144,7 +153,9 @@ class AutonomyArchitectureTests(unittest.TestCase):
             finally:
                 runtime.close()
 
-    def test_scoped_additional_root_grants_are_owner_local_and_once_is_consumed(self) -> None:
+    def test_scoped_additional_root_grants_are_owner_local_and_once_is_consumed(
+        self,
+    ) -> None:
         with TemporaryDirectory() as tmp:
             base = Path(tmp)
             repo = base / "repo"
@@ -393,7 +404,9 @@ class AutonomyArchitectureTests(unittest.TestCase):
             finally:
                 sandbox.cleanup()
 
-    def test_bwrap_mounts_filtered_snapshots_at_canonical_multi_root_paths(self) -> None:
+    def test_bwrap_mounts_filtered_snapshots_at_canonical_multi_root_paths(
+        self,
+    ) -> None:
         with TemporaryDirectory() as tmp:
             base = Path(tmp)
             repo = base / "repo"
@@ -445,7 +458,9 @@ class AutonomyArchitectureTests(unittest.TestCase):
             with self.assertRaises(sqlite3.ProgrammingError):
                 conn.execute("SELECT 1").fetchone()
 
-    def test_transaction_preserves_preexisting_wip_and_applies_binary_changes(self) -> None:
+    def test_transaction_preserves_preexisting_wip_and_applies_binary_changes(
+        self,
+    ) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp) / "repo"
             root.mkdir()
@@ -468,7 +483,9 @@ class AutonomyArchitectureTests(unittest.TestCase):
                     tracked.read_text(encoding="utf-8"),
                     "user-wip\nagent-change\n",
                 )
-                self.assertEqual((root / "artifact.bin").read_bytes(), b"\x00\xffartifact")
+                self.assertEqual(
+                    (root / "artifact.bin").read_bytes(), b"\x00\xffartifact"
+                )
                 self.assertIn("user-wip", tracked.read_text(encoding="utf-8"))
             finally:
                 sandbox.cleanup()
@@ -499,7 +516,9 @@ class AutonomyArchitectureTests(unittest.TestCase):
             finally:
                 sandbox.cleanup()
 
-    def test_transaction_discard_and_symlink_change_never_touch_authoritative_tree(self) -> None:
+    def test_transaction_discard_and_symlink_change_never_touch_authoritative_tree(
+        self,
+    ) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp) / "repo"
             root.mkdir()
@@ -538,14 +557,14 @@ class AutonomyArchitectureTests(unittest.TestCase):
                     (sandbox.sandbox_dir / "escape").symlink_to("/etc/passwd")
                     with self.assertRaises(ToolFailure) as unsafe:
                         transaction.finish(apply=True)
-                    self.assertEqual(
-                        unsafe.exception.code, "TRANSACTION_UNSAFE_CHANGE"
-                    )
+                    self.assertEqual(unsafe.exception.code, "TRANSACTION_UNSAFE_CHANGE")
                     self.assertFalse((root / "escape").exists())
                 finally:
                     sandbox.cleanup()
 
-    def test_shell_constructs_are_policy_signals_not_blanket_security_denials(self) -> None:
+    def test_shell_constructs_are_policy_signals_not_blanket_security_denials(
+        self,
+    ) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             runtime = self._runtime(root)
@@ -592,7 +611,9 @@ class AutonomyArchitectureTests(unittest.TestCase):
             finally:
                 runtime.close()
 
-    def test_code_diagnostics_is_optional_normalization_over_authorized_roots(self) -> None:
+    def test_code_diagnostics_is_optional_normalization_over_authorized_roots(
+        self,
+    ) -> None:
         with TemporaryDirectory() as tmp:
             base = Path(tmp)
             root = base / "repo"
@@ -679,7 +700,9 @@ class AutonomyArchitectureTests(unittest.TestCase):
     def test_private_temp_is_normal_writable_temp_not_host_tmp_capability(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
-            runtime = Runtime(root, policy_profile="autonomous", sandbox_backend="bwrap")
+            runtime = Runtime(
+                root, policy_profile="autonomous", sandbox_backend="bwrap"
+            )
             try:
                 runtime.sandbox = ExecutionSandbox.create(
                     root, owner_root=root.parent / "sandbox-owner"
@@ -743,20 +766,28 @@ class AutonomyArchitectureTests(unittest.TestCase):
             finally:
                 runtime.close()
 
-    @unittest.skipIf(os.name == "nt", "Linux namespace inheritance is POSIX/Linux specific")
-    def test_bwrap_backend_uses_inherited_sandbox_when_kernel_namespace_is_confirmed(self) -> None:
+    @unittest.skipIf(
+        os.name == "nt", "Linux namespace inheritance is POSIX/Linux specific"
+    )
+    def test_bwrap_backend_uses_inherited_sandbox_when_kernel_namespace_is_confirmed(
+        self,
+    ) -> None:
         inherited = SandboxBackend(
             "inherited",
             True,
             True,
             "already isolated by a parent DevMCP sandbox",
         )
-        with patch("coding_tools_mcp.sandbox.inherited_sandbox_backend", return_value=inherited):
+        with patch(
+            "coding_tools_mcp.sandbox.inherited_sandbox_backend", return_value=inherited
+        ):
             backend = detect_sandbox_backend("bwrap")
         self.assertEqual(backend.name, "inherited")
         self.assertTrue(backend.secure)
 
-    @unittest.skipUnless(sys.platform == "linux", "inherited sandbox evidence is Linux-specific")
+    @unittest.skipUnless(
+        sys.platform == "linux", "inherited sandbox evidence is Linux-specific"
+    )
     def test_inherited_sandbox_requires_dropped_caps_and_private_tmp(self) -> None:
         self.assertTrue(
             _linux_effective_capabilities_dropped("CapEff:\t0000000000000000\n")
@@ -791,7 +822,9 @@ class AutonomyArchitectureTests(unittest.TestCase):
         assert backend is not None
         self.assertTrue(backend.secure)
 
-    def test_executor_registry_prefers_secure_local_and_fails_cleanly_for_missing_container(self) -> None:
+    def test_executor_registry_prefers_secure_local_and_fails_cleanly_for_missing_container(
+        self,
+    ) -> None:
         registry = ExecutorRegistry(
             sandbox_backend_name="bwrap",
             sandbox_secure=True,
@@ -805,9 +838,14 @@ class AutonomyArchitectureTests(unittest.TestCase):
                 preferred="ephemeral_container",
             )
         self.assertEqual(unavailable.exception.code, "CAPABILITY_UNAVAILABLE")
-        self.assertIn("DEVMCP_EPHEMERAL_CONTAINER_RUNNER", unavailable.exception.details["backend"]["reason"])
+        self.assertIn(
+            "DEVMCP_EPHEMERAL_CONTAINER_RUNNER",
+            unavailable.exception.details["backend"]["reason"],
+        )
 
-    def test_executor_registry_preserves_explicit_unsafe_legacy_backend_only(self) -> None:
+    def test_executor_registry_preserves_explicit_unsafe_legacy_backend_only(
+        self,
+    ) -> None:
         registry = ExecutorRegistry(
             sandbox_backend_name="unsafe",
             sandbox_secure=False,
@@ -823,7 +861,9 @@ class AutonomyArchitectureTests(unittest.TestCase):
             )
 
     @unittest.skipIf(os.name == "nt", "fake runner fixture uses a POSIX shebang")
-    def test_operator_container_runner_receives_only_filtered_snapshots_and_applies_transaction(self) -> None:
+    def test_operator_container_runner_receives_only_filtered_snapshots_and_applies_transaction(
+        self,
+    ) -> None:
         with TemporaryDirectory() as tmp:
             base = Path(tmp)
             projects = base / "projects"
@@ -896,13 +936,17 @@ class AutonomyArchitectureTests(unittest.TestCase):
                     (repo / "container-manifest.json").read_text(encoding="utf-8")
                 )
                 self.assertEqual(manifest_seen["destination"], str(repo.resolve()))
-                self.assertEqual(manifest_seen["network"]["targets"], ["api.example.com"])
+                self.assertEqual(
+                    manifest_seen["network"]["targets"], ["api.example.com"]
+                )
                 self.assertEqual(manifest_seen["limits"]["cpu"], 2)
             finally:
                 runtime.close()
 
     @unittest.skipIf(os.name == "nt", "fake runner fixture uses a POSIX shebang")
-    def test_container_output_is_not_applied_without_enforcement_attestation(self) -> None:
+    def test_container_output_is_not_applied_without_enforcement_attestation(
+        self,
+    ) -> None:
         with TemporaryDirectory() as tmp:
             base = Path(tmp)
             repo = base / "repo"
@@ -1014,7 +1058,9 @@ class AutonomyArchitectureTests(unittest.TestCase):
                     )
             self.assertEqual(rejected.exception.code, "ACCESS_DENIED")
 
-    @unittest.skipIf(os.name == "nt", "runner alias fixture uses POSIX executable paths")
+    @unittest.skipIf(
+        os.name == "nt", "runner alias fixture uses POSIX executable paths"
+    )
     def test_direct_host_container_cli_cannot_be_configured_as_runner(self) -> None:
         with TemporaryDirectory() as tmp:
             fake_docker = Path(tmp) / "docker"
