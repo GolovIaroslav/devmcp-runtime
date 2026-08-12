@@ -11,8 +11,11 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
+from typing import Iterable
 
 from .errors import ToolFailure
+from .path_security import sensitive_path_reason
+from .system_view import readonly_system_paths
 
 
 @dataclass(frozen=True)
@@ -25,11 +28,83 @@ class SandboxBackend:
     description: str
 
 
+def _linux_uid_map_is_namespaced(text: str) -> bool:
+    """Return true only for a constrained Linux user namespace mapping."""
+
+    ranges: list[int] = []
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) != 3:
+            continue
+        try:
+            ranges.append(int(parts[2]))
+        except ValueError:
+            return False
+    return bool(ranges) and sum(ranges) < 1_000_000
+
+
+def _linux_effective_capabilities_dropped(text: str) -> bool:
+    for line in text.splitlines():
+        key, separator, value = line.partition(":")
+        if separator and key.strip() == "CapEff":
+            try:
+                return int(value.strip().split()[0], 16) == 0
+            except (IndexError, ValueError):
+                return False
+    return False
+
+
+def _linux_mountinfo_has_private_tmp(text: str) -> bool:
+    for line in text.splitlines():
+        fields = line.split()
+        if len(fields) < 8:
+            continue
+        try:
+            separator = fields.index("-")
+        except ValueError:
+            continue
+        if (
+            separator + 1 < len(fields)
+            and fields[4] == "/tmp"
+            and fields[separator + 1] == "tmpfs"
+        ):
+            return True
+    return False
+
+
+def inherited_sandbox_backend() -> SandboxBackend | None:
+    """Detect a DevMCP namespace sandbox inherited from a parent execution."""
+
+    if sys.platform != "linux" or os.environ.get("DEVMCP_INHERITED_SANDBOX") != "1":
+        return None
+    try:
+        uid_map = Path("/proc/self/uid_map").read_text(encoding="ascii")
+        status = Path("/proc/self/status").read_text(encoding="ascii")
+        mountinfo = Path("/proc/self/mountinfo").read_text(encoding="ascii")
+    except OSError:
+        return None
+    if not _linux_uid_map_is_namespaced(uid_map):
+        return None
+    if not _linux_effective_capabilities_dropped(status):
+        return None
+    if not _linux_mountinfo_has_private_tmp(mountinfo):
+        return None
+    return SandboxBackend(
+        "inherited",
+        True,
+        True,
+        "execution confined by an attested parent DevMCP namespace sandbox",
+    )
+
+
 def detect_sandbox_backend(preference: str = "bwrap") -> SandboxBackend:
     """Return backend facts; never silently downgrade a requested backend."""
 
     normalized = preference.strip().lower()
     if normalized == "bwrap":
+        inherited = inherited_sandbox_backend()
+        if inherited is not None:
+            return inherited
         available = shutil.which("bwrap") is not None
         return SandboxBackend(
             "bwrap", True, available, "bubblewrap namespace and filesystem isolation"
@@ -48,6 +123,16 @@ def detect_sandbox_backend(preference: str = "bwrap") -> SandboxBackend:
             False,
             True,
             "UNSAFE HOST MODE: explicit local execution without sandbox isolation",
+        )
+    if normalized in {"inherited", "external"}:
+        inherited = inherited_sandbox_backend()
+        if inherited is not None:
+            return inherited
+        return SandboxBackend(
+            "inherited",
+            True,
+            False,
+            "inherited sandbox requested but DevMCP namespace attestation is absent",
         )
     raise ToolFailure(
         "INVALID_ARGUMENT",
@@ -222,6 +307,16 @@ def _safe_write_relative(
         os.close(parent_fd)
 
 
+def _safe_symlink_relative(root: Path, parts: tuple[str, ...], target: str) -> None:
+    if os.name == "nt":
+        return
+    parent_fd = _open_parent(root, parts[:-1], create=True)
+    try:
+        os.symlink(target, parts[-1], dir_fd=parent_fd)
+    finally:
+        os.close(parent_fd)
+
+
 def _safe_unlink_relative(root: Path, raw_path: str) -> None:
     parts = _relative_parts(raw_path)
     if os.name == "nt":
@@ -344,14 +439,13 @@ class ExecutionSandbox:
         self.__class__._sync(self.original_workspace, self.sandbox_dir)
 
     @staticmethod
-    def _is_secret_path(filename: str) -> bool:
-        if filename in {".git", ".devmcp-tmp", ".devmcp-home", ".devmcp-cache"}:
+    def _is_secret_path(parts: tuple[str, ...]) -> bool:
+        if any(
+            part in {".devmcp-tmp", ".devmcp-home", ".devmcp-cache"}
+            for part in parts
+        ):
             return True
-        if filename == ".env.example":
-            return False
-        if filename == ".env" or filename.startswith(".env."):
-            return True
-        return filename.endswith(".pem") or filename.endswith(".key")
+        return sensitive_path_reason(parts) is not None
 
     @classmethod
     def _clear_destination(cls, dest: Path) -> None:
@@ -372,24 +466,73 @@ class ExecutionSandbox:
 
     @classmethod
     def _copy_tree(
-        cls, source: Path, dest: Path, relative: tuple[str, ...] = ()
+        cls,
+        source: Path,
+        dest: Path,
+        relative: tuple[str, ...] = (),
+        *,
+        source_root: Path | None = None,
     ) -> None:
+        if source_root is None:
+            source_root = source
+
+        def beneath(path: Path, root: Path) -> bool:
+            try:
+                path.relative_to(root)
+            except ValueError:
+                return False
+            return True
+
         for entry in os.scandir(source):
-            if cls._is_secret_path(entry.name):
+            child_rel = relative + (entry.name,)
+            if cls._is_secret_path(child_rel):
                 continue
             if entry.is_symlink():
-                # Symlinks are not needed for a safe execution snapshot. In
-                # particular, do not copy a link to an excluded secret or an
-                # absolute/external target into the allowed sandbox tree.
+                # Keep the general no-symlink snapshot rule. POSIX venv
+                # interpreter links are a bounded exception so copied console
+                # scripts can use the copied, secret-filtered site-packages.
+                if child_rel[:2] == (".venv", "bin") and os.name != "nt":
+                    try:
+                        raw_target = os.readlink(entry.path)
+                        resolved_target = Path(entry.path).resolve(strict=True)
+                    except OSError:
+                        continue
+                    source_venv = source_root / ".venv"
+                    allowed_external_roots = (
+                        Path("/usr"),
+                        Path("/bin"),
+                        Path("/lib"),
+                        Path("/lib64"),
+                        Path("/sbin"),
+                        Path.home() / ".local" / "share" / "uv",
+                    )
+                    if beneath(resolved_target, source_venv):
+                        target = (
+                            str(dest / resolved_target.relative_to(source_root))
+                            if Path(raw_target).is_absolute()
+                            else raw_target
+                        )
+                    elif any(
+                        root.exists() and beneath(resolved_target, root)
+                        for root in allowed_external_roots
+                    ):
+                        target = str(resolved_target)
+                    else:
+                        continue
+                    _safe_symlink_relative(dest, child_rel, target)
                 continue
-            child_rel = relative + (entry.name,)
             if entry.is_dir(follow_symlinks=False):
                 if os.name == "nt":
                     _portable_parent(dest, child_rel, create=True)
                 else:
                     fd = _open_parent(dest, child_rel, create=True)
                     os.close(fd)
-                cls._copy_tree(Path(entry.path), dest, child_rel)
+                cls._copy_tree(
+                    Path(entry.path),
+                    dest,
+                    child_rel,
+                    source_root=source_root,
+                )
                 continue
             if not entry.is_file(follow_symlinks=False):
                 continue
@@ -404,9 +547,18 @@ class ExecutionSandbox:
                 source_mode = stat.S_IMODE(os.fstat(source_fd).st_mode)
             finally:
                 os.close(source_fd)
-            _safe_write_relative(
-                dest, "/".join(child_rel), b"".join(chunks), source_mode
-            )
+            data = b"".join(chunks)
+            if child_rel[:2] == (".venv", "bin") and data.startswith(b"#!"):
+                first_line, separator, remainder = data.partition(b"\n")
+                source_venv_bytes = str(source_root / ".venv").encode()
+                if source_venv_bytes in first_line:
+                    first_line = first_line.replace(
+                        source_venv_bytes,
+                        str(dest / ".venv").encode(),
+                        1,
+                    )
+                    data = first_line + separator + remainder
+            _safe_write_relative(dest, "/".join(child_rel), data, source_mode)
 
     @classmethod
     def _sync(cls, source: Path, dest: Path) -> None:
@@ -504,7 +656,12 @@ class ExecutionSandbox:
         parts = _relative_parts(raw_path)
         return self.sandbox_dir.joinpath(*parts)
 
-    def get_bwrap_args(self, allow_network: bool = False) -> list[str]:
+    def get_bwrap_args(
+        self,
+        allow_network: bool = False,
+        *,
+        root_mounts: Iterable[tuple[Path, Path, bool]] = (),
+    ) -> list[str]:
         args = ["bwrap"]
         if allow_network:
             # Keep the network namespace joined to the host only for an
@@ -520,11 +677,22 @@ class ExecutionSandbox:
             )
         else:
             args.append("--unshare-all")
-        args.extend(["--cap-drop", "ALL", "--new-session", "--die-with-parent"])
+        args.extend(
+            [
+                "--cap-drop",
+                "ALL",
+                "--disable-userns",
+                "--new-session",
+                "--die-with-parent",
+            ]
+        )
+        args.extend(["--setenv", "DEVMCP_INHERITED_SANDBOX", "1"])
 
-        for bind_dir in ["/usr", "/lib", "/lib64", "/bin", "/sbin", "/etc"]:
-            if os.path.exists(bind_dir):
-                args.extend(["--ro-bind", bind_dir, bind_dir])
+        args.extend(["--dir", "/etc"])
+        if allow_network:
+            args.extend(["--dir", "/run"])
+        for system_path in readonly_system_paths(allow_network=allow_network):
+            args.extend(["--ro-bind", str(system_path), str(system_path)])
         args.extend(
             [
                 "--proc",
@@ -538,7 +706,6 @@ class ExecutionSandbox:
                 str(self.sandbox_dir),
             ]
         )
-
         python_dir = str(Path(sys.executable).parent.parent)
         if not python_dir.startswith(("/usr", "/bin", "/lib")):
             args.extend(["--ro-bind", python_dir, python_dir])
@@ -554,7 +721,12 @@ class ExecutionSandbox:
             derived_uv_root = derived_uv_root.parent
         if derived_uv_root.name == "uv":
             uv_roots.append(derived_uv_root)
-        uv_roots.append(Path.home() / ".local" / "share" / "uv")
+        try:
+            service_home = Path.home()
+        except (OSError, RuntimeError):
+            service_home = None
+        if service_home is not None:
+            uv_roots.append(service_home / ".local" / "share" / "uv")
         seen_uv_roots: set[str] = set()
         for uv_root in uv_roots:
             if uv_root.exists() and str(uv_root) not in seen_uv_roots:
@@ -562,4 +734,31 @@ class ExecutionSandbox:
                 args.extend(["--ro-bind", str(uv_root), str(uv_root)])
         mcp_pkg = Path(__file__).parent
         args.extend(["--ro-bind", str(mcp_pkg), str(mcp_pkg)])
+
+        mounts = list(root_mounts)
+        if not mounts:
+            mounts = [(self.sandbox_dir, self.original_workspace, True)]
+        created_dirs: set[str] = {"/tmp", "/etc", "/run"}
+        for source, destination, writable in mounts:
+            dest = destination.resolve(strict=False)
+            for parent in reversed(dest.parents):
+                text = str(parent)
+                if text in {"/", ""} or text in created_dirs:
+                    continue
+                if any(
+                    text == str(system_path)
+                    or text.startswith(str(system_path) + os.sep)
+                    for system_path in readonly_system_paths(allow_network=allow_network)
+                    if system_path.is_dir()
+                ):
+                    continue
+                args.extend(["--dir", text])
+                created_dirs.add(text)
+            args.extend(
+                [
+                    "--bind" if writable else "--ro-bind",
+                    str(source.resolve(strict=True)),
+                    str(dest),
+                ]
+            )
         return args

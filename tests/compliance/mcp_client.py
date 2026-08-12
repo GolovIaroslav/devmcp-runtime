@@ -36,11 +36,19 @@ REQUIRED_TOOLS = (
     "project_checks",
     "run_project_check",
     "read_file",
+    "read_files",
+    "code_diagnostics",
+    "grant_root",
+    "grant_capability",
+    "list_capability_leases",
+    "revoke_capability_lease",
+    "end_task_scope",
     "list_dir",
     "list_files",
     "search_text",
     "apply_patch",
     "exec_command",
+    "exec_argv",
     "write_stdin",
     "kill_session",
     "read_output",
@@ -358,8 +366,16 @@ def stream_snapshot(stream: Any) -> str:
 
 def prepend_repo_pythonpath(env: dict[str, str]) -> dict[str, str]:
     """Ensure spawned server processes import the in-repo coding_tools_mcp package."""
+    entries = [str(ROOT)]
+    venv_candidates = [
+        *sorted((ROOT / ".venv" / "lib").glob("python*/site-packages")),
+        ROOT / ".venv" / "Lib" / "site-packages",
+    ]
+    entries.extend(str(path.resolve()) for path in venv_candidates if path.is_dir())
     existing = env.get("PYTHONPATH")
-    env["PYTHONPATH"] = str(ROOT) if not existing else str(ROOT) + os.pathsep + existing
+    if existing:
+        entries.append(existing)
+    env["PYTHONPATH"] = os.pathsep.join(entries)
     return env
 
 

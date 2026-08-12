@@ -182,7 +182,8 @@ class SecurityComplianceTests(ComplianceTestCase):
             },
         )
         payload = self.assert_tool_success(result)
-        self.assertEqual(payload.get("status"), "exited", payload)
+        self.assertEqual(payload.get("status"), "success", payload)
+        self.assertTrue(payload.get("command_success"), payload)
         self.assertEqual(payload.get("exit_code"), 0, payload)
 
     def test_exec_command_rejects_destructive_workspace_mutations(self) -> None:
@@ -279,7 +280,7 @@ class SecurityComplianceTests(ComplianceTestCase):
             )
             self.assertTrue(
                 poll_payload.get("timed_out")
-                or poll_payload.get("status") in {"timeout", "exited"},
+                or poll_payload.get("status") in {"timeout", "success", "failed"},
                 f"timeout should be explicit after deadline: {poll_payload!r}",
             )
         finally:

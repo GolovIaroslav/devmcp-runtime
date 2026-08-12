@@ -754,7 +754,8 @@ class ReleaseLifecycleTests(unittest.TestCase):
                     {"cmd": command, "approval_id": pending["approval_id"]}
                 )
                 self.assertTrue(completed["ok"])
-                self.assertEqual(completed["status"], "exited")
+                self.assertEqual(completed["status"], "success")
+                self.assertTrue(completed["command_success"])
                 self.assertIn("custom-policy-approved", completed["stdout"])
             finally:
                 runtime.close()

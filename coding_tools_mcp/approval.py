@@ -6,6 +6,7 @@ import os
 import sqlite3
 import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
@@ -171,6 +172,15 @@ class ApprovalEngine:
         self._init_db()
         self.mark_expired()
 
+    @contextmanager
+    def _connection(self):
+        conn = sqlite3.connect(self.db_path)
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
+
     def _init_db(self) -> None:
         if not self.db_path.exists():
             self.db_path.touch(mode=0o600)
@@ -180,7 +190,7 @@ class ApprovalEngine:
             except OSError:
                 pass
 
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connection() as conn:
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS requests (
@@ -277,7 +287,7 @@ class ApprovalEngine:
         )
         caps_list = list(operation.capabilities)
 
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connection() as conn:
             patterns = [row[0] for row in conn.execute("SELECT pattern FROM patterns")]
             import fnmatch
 
@@ -332,7 +342,7 @@ class ApprovalEngine:
         }
 
     def get_status(self, req_id: str) -> str:
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connection() as conn:
             row = conn.execute(
                 "SELECT status, expires_at FROM requests WHERE id = ?", (req_id,)
             ).fetchone()
@@ -349,7 +359,7 @@ class ApprovalEngine:
 
     def list_pending(self) -> list[dict[str, Any]]:
         self.mark_expired()
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connection() as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
                 "SELECT * FROM requests WHERE status = 'pending' AND expires_at >= ?",
@@ -369,7 +379,7 @@ class ApprovalEngine:
         """Transition only expired pending/approved requests; never touch active ones."""
 
         now = time.time()
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connection() as conn:
             cursor = conn.execute(
                 "UPDATE requests SET status = 'expired' WHERE status IN ('pending', 'approved') AND expires_at < ?",
                 (now,),
@@ -383,7 +393,7 @@ class ApprovalEngine:
 
         cutoff = time.time() - max(0.0, float(older_than_seconds))
         self.mark_expired()
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connection() as conn:
             cursor = conn.execute(
                 "DELETE FROM requests WHERE status = 'expired' AND expires_at < ?",
                 (cutoff,),
@@ -394,13 +404,13 @@ class ApprovalEngine:
         """Explicitly clear all expired records, leaving active records untouched."""
 
         self.mark_expired()
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connection() as conn:
             cursor = conn.execute("DELETE FROM requests WHERE status = 'expired'")
             return int(cursor.rowcount)
 
     def approve(self, req_id: str, pattern: Optional[str] = None) -> None:
         now = time.time()
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connection() as conn:
             cursor = conn.execute(
                 "UPDATE requests SET status = 'approved' WHERE id = ? AND status = 'pending' AND expires_at >= ?",
                 (req_id, now),
@@ -433,7 +443,7 @@ class ApprovalEngine:
 
     def deny(self, req_id: str) -> None:
         now = time.time()
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connection() as conn:
             cursor = conn.execute(
                 "UPDATE requests SET status = 'denied' WHERE id = ? AND status = 'pending' AND expires_at >= ?",
                 (req_id, now),
@@ -467,7 +477,7 @@ class ApprovalEngine:
         sandbox_id: str = "",
         capabilities: list[str] | None = None,
     ) -> list[str]:
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connection() as conn:
             conn.row_factory = sqlite3.Row
             row = conn.execute(
                 """

@@ -55,23 +55,49 @@ depth, per-file, and total-byte limits.
 
 The operator may configure one or more project-library roots. The runtime
 recursively discovers Git repositories below those roots without following
-symlinks. When DevMCP is started through the service CLI, `select_project`
-atomically persists the selected canonical checkout in the private DevMCP config
-directory. Fresh Streamable HTTP runtime instances for that service reload the
-same selected project, which makes project selection stable across clients that
-do not reuse one MCP session for every tool call. The persisted value is accepted
-only when it resolves to a Git checkout inside an operator-configured project
-root; invalid or stale values are ignored. Direct Runtime instances without the
-state-file option remain session-scoped. Selection never mutates the configured
-project roots. The initialize instructions tell clients to discover/select a
-named project and then read its returned root authority files before modifying
-code.
+symlinks. A configured `DEVMCP_ACTIVE_PROJECT_FILE` is an initial-default hint
+only: a new Runtime may load it at construction, but Streamable HTTP client
+selection never rewrites it. This prevents one chat/client from changing the
+workspace subsequently observed by another.
+
+Streamable HTTP uses a server-owned logical-context registry above transport
+`Mcp-Session-Id`. Initialization creates an opaque `context_id`; every tool
+result exposes that capability together with the exact `workspace` and
+`active_project` used by the call. Calls within one transport session reuse its
+context automatically. If a client reconnects or a connector creates a new MCP
+transport session between tool calls, it can pass the previous `context_id` to
+continue the same logical project/default-cwd state. Contexts are isolated from
+one another, guarded by a per-context lock, and expire after an idle TTL (3600s
+by default, configurable with `DEVMCP_LOGICAL_CONTEXT_TTL_SECONDS`). An explicit
+expired context fails with `CONTEXT_NOT_FOUND`; an already-live transport that
+does not explicitly present the stale capability rolls to a new context from
+its own current state. Treat `context_id` as a bearer capability and never share
+it between clients/chats.
+
+Long-running HTTP commands use a separate server-owned job registry. Returned
+`job_...` handles are opaque and bound to the logical `context_id`; a different
+context receives `ACCESS_DENIED` even if it obtains the job handle. Running jobs
+survive individual MCP transport Runtime teardown. Completed jobs are retained
+for bounded output/status access for 300s by default
+(`DEVMCP_COMPLETED_JOB_TTL_SECONDS`), after which the handle returns
+`status: "not_found"`. Timeout, explicit cancellation, server shutdown, and
+registry cleanup terminate/release owned resources.
 
 ## Workspace and patch guarantees
 
 - One MCP-session runtime owns one canonical active repository root at a time.
-- Direct path inputs are workspace-relative. Absolute paths, `..` traversal,
-  NUL bytes, and symlink escapes are rejected.
+- Path authorization is canonical-root based rather than syntax based. Relative
+  paths resolve from logical cwd; absolute paths and inputs containing `..` are
+  accepted only when their canonical targets remain inside an authorized root.
+  NUL bytes, sibling/ancestor escapes, symlink escapes, and protected
+  credential/runtime paths remain rejected.
+- The selected project is the primary root. `grant_root` may add an existing
+  directory below the operator-configured `DEVMCP_GRANTABLE_ROOTS` ceiling as
+  an in-memory `once`, `task`, or `session` read/write capability lease. Grants
+  never survive restart or expand the operator ceiling. Filesystem tools,
+  patching, command path checks, and execution snapshots use the same root set.
+  Project discovery roots are not grant authority; when
+  `DEVMCP_GRANTABLE_ROOTS` is unset, the additional-root ceiling is empty.
 - `apply_patch` parses and validates every operation before committing.
 - Every replacement is prepared and fsynced in the target directory, then
   installed with `os.replace`.
@@ -128,7 +154,7 @@ Tool failures keep the same envelope with `isError: true`, a readable error in
 Known tool error codes include:
 
 ```json
-["ABSOLUTE_PATH_DENIED", "ACCESS_DENIED", "BINARY_FILE", "GIT_CONFLICT", "GIT_ERROR", "HOST_CLI_PROBE_FAILED", "INTERNAL_ERROR", "INVALID_ARGUMENT", "INVALID_STATE", "IS_DIRECTORY", "NOT_A_DIRECTORY", "NOT_FOUND", "NOT_IMPLEMENTED", "OUTPUT_TOO_LARGE", "PATCH_BASELINE_LIMIT", "PATCH_CONFLICT", "PATCH_CONTEXT_AMBIGUOUS", "PATCH_CONTEXT_NOT_FOUND", "PATCH_FAILED", "PATCH_HUNKS_OVERLAP", "PATCH_ROLLBACK_FAILED", "PATH_OUTSIDE_WORKSPACE", "PERMISSION_REQUIRED", "RUNTIME_DIR_UNWRITABLE", "SANDBOX_FAILED", "SANDBOX_UNAVAILABLE", "SERVICE_COMMAND_FAILED", "SERVICE_UNAVAILABLE", "SESSION_CLOSED", "SESSION_LIMIT_REACHED", "SESSION_NOT_FOUND", "SYMLINK_ESCAPE", "TIMEOUT", "TTY_UNSUPPORTED", "UNSUPPORTED_ENCODING"]
+["ABSOLUTE_PATH_DENIED", "ACCESS_DENIED", "AGENT_TASK_FAILED", "BINARY_FILE", "CAPABILITY_LEASE_REQUIRED", "CAPABILITY_UNAVAILABLE", "CONTEXT_INVALID", "CONTEXT_NOT_FOUND", "EXECUTOR_FAILED", "EXECUTOR_PROTOCOL_ERROR", "GIT_CONFLICT", "GIT_ERROR", "HOST_CLI_PROBE_FAILED", "INTERNAL_ERROR", "INVALID_ARGUMENT", "INVALID_STATE", "IS_DIRECTORY", "NOT_A_DIRECTORY", "NOT_FOUND", "NOT_IMPLEMENTED", "OUTPUT_TOO_LARGE", "PATCH_BASELINE_LIMIT", "PATCH_CONFLICT", "PATCH_CONTEXT_AMBIGUOUS", "PATCH_CONTEXT_NOT_FOUND", "PATCH_FAILED", "PATCH_HUNKS_OVERLAP", "PATCH_ROLLBACK_FAILED", "PATH_OUTSIDE_WORKSPACE", "PERMISSION_REQUIRED", "PROJECT_ENVIRONMENT_ERROR", "RUNTIME_DIR_UNWRITABLE", "SANDBOX_FAILED", "SANDBOX_UNAVAILABLE", "SERVICE_COMMAND_FAILED", "SERVICE_UNAVAILABLE", "SESSION_CLOSED", "SESSION_LIMIT_REACHED", "SESSION_NOT_FOUND", "SYMLINK_ESCAPE", "TIMEOUT", "TRANSACTION_CONFLICT", "TRANSACTION_SNAPSHOT_FAILED", "TRANSACTION_TOO_LARGE", "TRANSACTION_UNSAFE_CHANGE", "TTY_UNSUPPORTED", "UNSUPPORTED_ENCODING"]
 ```
 
 Error categories are `validation`, `security`, `permission`, `runtime`,
@@ -310,7 +336,8 @@ Inputs: `"path"`.
 
 Annotations: `{"title":"Set default cwd","readOnlyHint":false,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}`.
 
-Changes only this MCP runtime's navigation base; it does not modify files.
+Changes only the active logical context's navigation base; it does not modify
+files. HTTP reconnects retain it when the same `context_id` is supplied.
 
 ### list_projects
 
@@ -331,9 +358,10 @@ Annotations: `{"title":"Select project","readOnlyHint":false,"destructiveHint":f
 Selects exactly one discovered repository. Running command sessions prevent
 switching. Existing execution sandboxes are discarded, the new repository
 becomes the file/patch/exec/Git/delegation root, and project context is reloaded.
-When the service supplies `DEVMCP_ACTIVE_PROJECT_FILE`, the canonical selected
-path is atomically persisted for subsequent HTTP Runtime instances. No configured
-project root is added or changed.
+For Streamable HTTP, the selected project is saved in the logical context only;
+`DEVMCP_ACTIVE_PROJECT_FILE` is not rewritten. Direct/stdio Runtime instances may
+retain the legacy persisted-last-project behavior when explicitly configured.
+No configured project root is added or changed.
 
 ### current_project
 
@@ -350,9 +378,13 @@ Inputs: none.
 
 Annotations: `{"title":"Project checks","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}`.
 
-Returns bounded project-native verification argv. Repository Makefile targets
-are preferred. A uv Python fallback uses `uv run --offline --frozen --no-sync`
-and never silently chooses host bare `pytest`.
+Returns bounded project-native verification argv plus the resolved execution
+environment: selected workspace, project `.venv`, interpreter, detected package
+manager, sanitized PATH, runtime Python, and environment warnings. Repository
+Makefile targets are preferred. When DevMCP supplies Python fallback discovery,
+a project `.venv` has priority over package-manager fallback; uv fallback uses
+`uv run --offline --frozen --no-sync` and never silently chooses bare host
+`pytest`.
 
 ### run_project_check
 
@@ -362,7 +394,12 @@ Annotations: `{"title":"Run project check","readOnlyHint":false,"destructiveHint
 
 Runs only an argv returned by `project_checks`, inside the selected repository's
 normal execution sandbox. It does not automatically install dependencies or
-grant network access.
+grant network access. Project-native PATH resolution removes an isolated DevMCP
+Runtime venv bin from PATH instead of shadowing the project's `python`,
+`python3`, `pytest`, `ruff`, etc.; project `.venv/bin` is preferred when present.
+The result reports the resolved execution environment. A missing check
+executable fails preflight with `PROJECT_ENVIRONMENT_ERROR`; common missing
+module/tool output is classified as `PROJECT_DEPENDENCY_MISSING`.
 
 ### read_file
 
@@ -375,12 +412,76 @@ binary content, and returns continuation metadata when bounded.
 
 ### read_files
 
-Inputs: `"paths"`.
+Inputs: `"paths"`, `"per_file_max_bytes"`, `"per_file_max_lines"`, `"total_max_bytes"`.
 
 Annotations: `{"title":"Read files","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}`.
 
-Reads a bounded list of UTF-8 workspace-relative files without following
-symlinks outside the workspace.
+Each `paths` entry may be a string or an object with `path`, optional line range,
+and per-entry bounds. The batch returns per-file `ok`/structured errors,
+truncation metadata, partial-success counts, and a total response budget instead
+of failing the whole call when one file is missing/binary/unauthorized.
+
+### code_diagnostics
+
+Inputs: `"text"`, `"provider"`, `"source"`, `"max_results"`.
+
+Annotations: `{"title":"Code diagnostics","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}`.
+
+Normalizes compiler/traceback-style text through an optional provider registry.
+The built-in `compiler-text` provider extracts path/line/column/severity without
+making an IDE or language server a core dependency. Reported paths are checked
+against the same authorized root resolver and annotated as authorized or
+outside-root; diagnostics themselves never grant filesystem authority.
+
+### grant_root
+
+Inputs: `"path"`, `"access"`, `"scope"`, `"ttl_seconds"`, `"task_scope_id"`, `"approval_id"`.
+
+Annotations: `{"title":"Grant additional root","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":false}`.
+
+Creates an opaque in-memory read/write root lease below the operator-configured
+grantable-root ceiling. Supported scopes are one operation, one logical task,
+and the logical session/context. Grants never survive restart and may not grant
+an ancestor of the primary workspace.
+
+### grant_capability
+
+Inputs: `"capability"`, `"target"`, `"scope"`, `"ttl_seconds"`, `"task_scope_id"`, `"approval_id"`.
+
+Annotations: `{"title":"Grant capability lease","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":false}`.
+
+Creates a narrow expiring capability lease for an executable/command pattern,
+dependency install, exact sensitive environment name, network target, or
+workspace mutation target. Destination-scoped network grants fail with
+`CAPABILITY_UNAVAILABLE` unless the selected operator backend can actually
+enforce those destinations. Permanent model-controlled escalation is not
+supported.
+
+### list_capability_leases
+
+Inputs: none.
+
+Annotations: `{"title":"List capability leases","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}`.
+
+Lists only non-expired leases owned by the current logical context/task scope.
+
+### revoke_capability_lease
+
+Inputs: `"lease_id"`.
+
+Annotations: `{"title":"Revoke capability lease","readOnlyHint":false,"destructiveHint":true,"idempotentHint":true,"openWorldHint":false}`.
+
+Revokes one owned lease. A lease from another context is not exposed as usable
+authority.
+
+### end_task_scope
+
+Inputs: none.
+
+Annotations: `{"title":"End task scope","readOnlyHint":false,"destructiveHint":true,"idempotentHint":true,"openWorldHint":false}`.
+
+Uses the common opaque `task_scope_id` argument to revoke all task-scoped leases
+owned by that logical task immediately; TTL remains fallback cleanup.
 
 ### list_dir
 
@@ -421,18 +522,60 @@ local out-of-band approval.
 
 ### exec_command
 
-Inputs: `"cmd"`, `"cwd"`, `"workdir"`, `"timeout_ms"`, `"yield_time_ms"`, `"env"`, `"max_bytes"`, `"max_output_bytes"`, `"preview_bytes"`, `"tty"`, `"stdin"`, `"verbosity"`, `"network_required"`, `"task_id"`, `"approval_id"`.
+Inputs: `"cmd"`, `"argv"`, `"cwd"`, `"workdir"`, `"timeout_ms"`, `"yield_time_ms"`, `"env"`, `"sensitive_env_names"`, `"transaction_mode"`, `"executor_backend"`, `"max_bytes"`, `"max_output_bytes"`, `"preview_bytes"`, `"tty"`, `"stdin"`, `"verbosity"`, `"network_required"`, `"network_targets"`, `"task_id"`, `"approval_id"`.
 
 Annotations: `{"title":"Exec command","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
 
-Statuses are `exited`, `running`, `timeout`, `terminated`, or `failed`.
-Launch/policy failures use the error envelope with `status: "failed"`; signal
-exits use `terminated`. Ordinary non-zero exit codes still use `exited`.
+Command execution separates MCP/tool transport success from subprocess success.
+Completed commands use `status: "success"` for exit code 0 and
+`status: "failed"` for non-zero exits. `command_success` is `true`, `false`, or
+`null` while still running. Other states include `running`, `timeout`, and
+`terminated`. Launch/policy failures still use the error envelope. `ok: true`
+therefore means the tool call itself completed structurally; callers must use
+`command_success`/`status` for command outcome.
+
+Exactly one of `cmd` or `argv` is required. `cmd` retains the shell-string path
+for compatibility and defaults to `transaction_mode: "discard"`. Shell control
+syntax is classified as policy/risk data rather than treated as the primary
+security boundary; the namespace/root/network boundary enforces actual effects.
+Legacy `argv` remains accepted here for compatibility, but new callers should
+prefer `exec_argv`.
+
+Host sensitive environment values are never inherited wholesale. A caller must
+name exact `sensitive_env_names` and own matching `env.sensitive` leases.
+`network_targets` requires a backend with enforceable target filtering.
+`executor_backend` may request the local namespace or an operator-configured
+ephemeral container; unavailable requirements fail with
+`CAPABILITY_UNAVAILABLE` rather than falling back to weaker isolation. The
+host-side runner must be a single-link executable owned by root/the service user,
+must not be group/world writable (nor live in such a writable directory), and
+must not reside below project-discovery or grantable roots. The
+container manifest uses container-private HOME/TMP/XDG paths. A successful
+runner result is accepted only when it attests all requested enforcement
+properties (`filesystem_isolation`, `resource_limits`, `network_policy`,
+`private_tmp`, and `no_host_container_socket`); missing/false attestation is an
+`EXECUTOR_PROTOCOL_ERROR` and no extracted changes are applied.
 
 `approval_id` consumes one immutable approval for the exact command, normalized
 cwd, raw environment delta, task/session identity, network capability, and
 policy version. Approved capabilities are applied to the corresponding policy
 gates only.
+
+### exec_argv
+
+Inputs: `"argv"`, `"cwd"`, `"workdir"`, `"timeout_ms"`, `"yield_time_ms"`, `"env"`, `"sensitive_env_names"`, `"transaction_mode"`, `"executor_backend"`, `"max_output_bytes"`, `"tty"`, `"stdin"`, `"verbosity"`, `"preview_bytes"`, `"network_required"`, `"network_targets"`, `"task_id"`, `"approval_id"`.
+
+Annotations: `{"title":"Exec argv","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
+
+Preferred arbitrary developer execution primitive. It never invokes a shell to
+interpret `argv`. On the local secure namespace backend it defaults to
+`transaction_mode: "apply"`: the command runs on secret-filtered snapshots
+mounted at canonical root paths, exit 0 produces a structured changed-file/diff
+summary, mutation capabilities are evaluated against the actual delta, and a
+bounded atomic commit applies only files whose authoritative baselines are still
+unchanged. Non-zero/timeout output is discarded. `TRANSACTION_CONFLICT` fails
+closed rather than overwriting concurrent/user WIP. No rollback path uses
+`git reset --hard`.
 
 ### run_task
 
@@ -453,6 +596,8 @@ Inputs: `"session_id"`, `"chars"`, `"yield_time_ms"`, `"max_output_bytes"`, `"ve
 Annotations: `{"title":"Write stdin","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":false}`.
 
 Poll or interact with a command session. Pass empty `chars` to wait for output.
+For HTTP shared jobs, use the owning `context_id`; generated `next_action`
+objects include it automatically.
 
 ### kill_session
 
@@ -633,9 +778,15 @@ The binary is discovered from `DEVMCP_ANTIGRAVITY_BIN`, the service `PATH`,
 `~/.local/bin/agy`, or `/usr/local/bin/agy`, in that order.
 
 The delegate receives an explicit untrusted-data/prompt-injection boundary and a
-filtered environment. Its process cannot use the selected repository's real Git
-remote through inherited Git configuration, and DevMCP requests Antigravity
-sandboxing when the installed CLI advertises that option. After completion,
+filtered environment. DevMCP snapshots the MCP session's selected project once,
+uses that same path for Git preflight/worktree creation/patch application, and
+launches AGY with `--new-project --sandbox` from the isolated worktree derived
+from that selected project. A pre-exec guard verifies the child's actual cwd is
+the isolated worktree and fails before AGY starts if it differs. Delegation is
+rejected if the installed CLI does not advertise both `--new-project` and
+`--sandbox`; DevMCP does not fall back to AGY's default/persisted project or to
+an unsandboxed launch. Its process cannot use the selected repository's real Git
+remote through inherited Git configuration. After completion,
 DevMCP rejects Git-history changes, file deletes/moves, sensitive-path changes,
 and any modification in `read_only` or `verify` mode. `workspace_edit` applies
 only a validated `M`/`A` binary patch to the real selected checkout. DevMCP
@@ -648,7 +799,11 @@ timeout or MCP request cancellation also terminates the group before cleanup.
 Windows retains the existing direct-process cleanup behavior. `timeout_seconds`
 accepts 1-3600 seconds. With `retry_transient=true`, DevMCP retries at most once
 for a timeout or an upstream 502/503-style transient failure; otherwise those
-failures are returned as retryable structured errors.
+failures are returned as retryable structured errors. A zero OS exit code is
+only process success: when JSON output contains `status: "ERROR"`, DevMCP returns
+a task failure (`ok: false`) instead. Successful results expose `process_ok`,
+`task_ok`, `agent_status`, `selected_workspace`, and `delegated_workspace` so the
+workspace propagation and process/task outcome are observable.
 
 ### view_image
 

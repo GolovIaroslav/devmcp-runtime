@@ -26,7 +26,7 @@ import threading
 import time
 import tomllib
 import urllib.parse
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -37,6 +37,8 @@ from .audit import append_tool_event
 from .continuation import clear_checkpoint, read_checkpoint, write_checkpoint
 from .envutils import ENV_PREFIX, truthy_env
 from .errors import JsonRpcError, ToolFailure
+from .diagnostics import DiagnosticsRegistry, normalize_diagnostic_path
+from .executors import ExecutionRequirements, ExecutorRegistry
 from .landlock_exec import libc_syscall
 from .oauth import (
     OAUTH_CODE_TTL_SECONDS,
@@ -60,6 +62,7 @@ from .patching import (
     parse_patch,
     read_text_preserve_newlines,
 )
+from .path_security import sensitive_raw_path_reason
 from .processes import (
     HARD_KILL_SIGNAL,
     SESSION_BUFFER_BYTES,
@@ -81,6 +84,13 @@ from .protocol import (
     validate_rpc_envelope,
 )
 from .project_context import ProjectContext, load_project_context
+from .session_state import (
+    CapabilityLeaseRegistry,
+    LogicalContextRegistry,
+    LogicalContextState,
+    SharedJobRegistry,
+)
+from .system_view import readonly_system_paths
 from .policy import (
     PROFILE_NAMES,
     decision as policy_decision,
@@ -91,6 +101,7 @@ from .policy import (
 from .telemetry import SessionTelemetry
 from .textutils import DEFAULT_MAX_LINES, TextTruncation, truncate_text_head
 from .tool_results import make_tool_result
+from .transactions import ExecutionTransaction
 from .transport_http import HTTPSessionManager
 from .transport_stdio import serve_stdio
 
@@ -139,6 +150,7 @@ RISKY_ENV_NAMES = {
     "RUBYOPT",
     "RUBYLIB",
 }
+RESERVED_EXEC_ENV_NAMES = {"DEVMCP_INHERITED_SANDBOX"}
 SHELL_ENV_INHERIT_CHOICES = ("core", "all", "none")
 
 
@@ -768,6 +780,40 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         read_only=True,
         idempotent=True,
     ),
+    "code_diagnostics": ToolSpec(
+        title="Code diagnostics",
+        description="Normalize compiler, traceback, or language-tool diagnostics without making diagnostics a core IDE dependency.",
+        read_only=True,
+        idempotent=True,
+    ),
+    "grant_root": ToolSpec(
+        title="Grant additional root",
+        description="Grant one existing operator-authorized directory as a temporary read or write root for the current logical context.",
+        destructive=True,
+    ),
+    "grant_capability": ToolSpec(
+        title="Grant capability lease",
+        description="Grant one narrow, expiring capability target for this logical context. Permanent self-escalation is not supported.",
+        destructive=True,
+    ),
+    "list_capability_leases": ToolSpec(
+        title="List capability leases",
+        description="List active temporary capability leases owned by the current logical context.",
+        read_only=True,
+        idempotent=True,
+    ),
+    "revoke_capability_lease": ToolSpec(
+        title="Revoke capability lease",
+        description="Revoke one temporary capability lease owned by the current logical context.",
+        destructive=True,
+        idempotent=True,
+    ),
+    "end_task_scope": ToolSpec(
+        title="End task scope",
+        description="End the supplied logical task scope and revoke all task-scoped capability leases owned by it.",
+        destructive=True,
+        idempotent=True,
+    ),
     "list_dir": ToolSpec(
         title="List dir", description="List directory.", read_only=True, idempotent=True
     ),
@@ -897,6 +943,13 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     "exec_command": ToolSpec(
         title="Exec command",
         description="Exec command.",
+        destructive=True,
+        open_world=True,
+        error_status="failed",
+    ),
+    "exec_argv": ToolSpec(
+        title="Exec argv",
+        description="Execute a structured argv directly without shell parsing, using the same policy and sandbox enforcement as exec_command.",
         destructive=True,
         open_world=True,
         error_status="failed",
@@ -1298,6 +1351,29 @@ def exec_output_diagnostics(payload: dict[str, Any]) -> list[dict[str, str]]:
                 suggested_next_command="cat /etc/resolv.conf && getent hosts repo.maven.apache.org",
             )
         )
+    missing_module = re.search(
+        r"no module named ['\"]?([A-Za-z0-9_.-]+)", combined, re.I
+    )
+    command_missing = re.search(
+        r"(?:command not found|not found):?\s*([A-Za-z0-9_.-]+)?", combined, re.I
+    )
+    if missing_module or command_missing:
+        missing = (
+            missing_module.group(1)
+            if missing_module is not None
+            else (command_missing.group(1) if command_missing is not None else None)
+        )
+        diagnostics.append(
+            diagnostic(
+                "PROJECT_DEPENDENCY_MISSING",
+                evidence=combined,
+                suggested_fix=(
+                    f"Install/sync the project's own environment before retrying; missing dependency: {missing}."
+                    if missing
+                    else "Install/sync the project's own environment before retrying."
+                ),
+            )
+        )
     if "java.security" in lower and (
         "permission denied" in lower or "could not" in lower or "error loading" in lower
     ):
@@ -1419,90 +1495,131 @@ class Workspace:
             raise ToolFailure(
                 "INVALID_ARGUMENT", "Path contains a NUL byte.", category="validation"
             )
-        if raw_path.startswith("/") or re.match(r"^[A-Za-z]:[\\/]", raw_path):
+        pure = PurePosixPath(raw_path.replace("\\", "/"))
+        sensitive_reason = sensitive_raw_path_reason(raw_path)
+        if sensitive_reason is not None:
             raise ToolFailure(
-                "ABSOLUTE_PATH_DENIED",
-                "Absolute paths are denied.",
+                "ACCESS_DENIED",
+                f"Access to sensitive path is denied: {sensitive_reason}.",
                 category="security",
             )
-        pure = PurePosixPath(raw_path)
-        if any(part == ".." for part in pure.parts):
-            raise ToolFailure(
-                "PATH_OUTSIDE_WORKSPACE",
-                "Path escapes the configured workspace.",
-                category="security",
-            )
-
-        name = pure.name
-        if name != ".env.example":
-            if name == ".env" or name.startswith(".env."):
-                raise ToolFailure(
-                    "ACCESS_DENIED",
-                    "Access to .env files is denied.",
-                    category="security",
-                )
-            if name.endswith(".pem") or name.endswith(".key"):
-                raise ToolFailure(
-                    "ACCESS_DENIED", f"Access to {name} is denied.", category="security"
-                )
 
         return pure
+
+    @staticmethod
+    def _path_text_is_absolute(raw_path: str) -> bool:
+        if Path(raw_path).expanduser().is_absolute():
+            return True
+        return bool(re.match(r"^[A-Za-z]:[\\/]", raw_path))
+
+    def _candidate_at(self, base: Path, raw_path: str) -> Path:
+        if re.match(r"^[A-Za-z]:[\\/]", raw_path) and os.name != "nt":
+            raise ToolFailure(
+                "PATH_OUTSIDE_WORKSPACE",
+                "Windows absolute path is outside this host's authorized roots.",
+                category="security",
+            )
+        expanded = Path(raw_path).expanduser()
+        return expanded if self._path_text_is_absolute(raw_path) else base / expanded
+
+    @staticmethod
+    def _matching_root(path: Path, roots: Iterable[Path]) -> Path | None:
+        for root in roots:
+            try:
+                path.relative_to(root)
+                return root
+            except ValueError:
+                continue
+        return None
+
+    def _display_for_path(self, path: Path) -> str:
+        if is_relative_to(path, self.root):
+            return normalize_rel_display(path, self.root)
+        return str(path)
 
     def resolve_existing(self, raw_path: str = ".") -> ResolvedPath:
         return self.resolve_existing_at(self.root, raw_path)
 
-    def resolve_existing_at(self, base: Path, raw_path: str = ".") -> ResolvedPath:
-        pure = self._reject_unsafe_text(raw_path or ".")
-        base = self._validate_base(base)
-        candidate = base.joinpath(*pure.parts)
+    def resolve_existing_at(
+        self,
+        base: Path,
+        raw_path: str = ".",
+        *,
+        roots: Iterable[Path] | None = None,
+    ) -> ResolvedPath:
+        self._reject_unsafe_text(raw_path or ".")
+        allowed_roots = tuple(
+            dict.fromkeys(
+                root.expanduser().resolve(strict=True)
+                for root in (roots if roots is not None else (self.root,))
+            )
+        )
+        base = self._validate_base(base, roots=allowed_roots)
+        candidate = self._candidate_at(base, raw_path or ".")
         try:
             resolved = candidate.resolve(strict=True)
         except FileNotFoundError as exc:
             raise ToolFailure(
                 "NOT_FOUND", f"Path not found: {raw_path}", category="not_found"
             ) from exc
-        if not is_relative_to(resolved, self.root):
-            current = base
-            crossed_symlink = False
-            for part in pure.parts:
-                current = current / part
-                if current.is_symlink():
-                    crossed_symlink = True
-                    break
+        if self._matching_root(resolved, allowed_roots) is None:
+            crossed_symlink = candidate.is_symlink()
+            if not crossed_symlink and not self._path_text_is_absolute(raw_path):
+                current = base
+                for part in PurePosixPath(raw_path.replace("\\", "/")).parts:
+                    current = current / part
+                    if current.is_symlink():
+                        crossed_symlink = True
+                        break
             code = "SYMLINK_ESCAPE" if crossed_symlink else "PATH_OUTSIDE_WORKSPACE"
             raise ToolFailure(
-                code, "Path escapes the configured workspace.", category="security"
+                code, "Path escapes the authorized roots.", category="security"
             )
-        return ResolvedPath(normalize_rel_display(resolved, self.root), resolved, True)
+        return ResolvedPath(self._display_for_path(resolved), resolved, True)
 
     def resolve_for_write(self, raw_path: str) -> ResolvedPath:
         return self.resolve_for_write_at(self.root, raw_path)
 
-    def resolve_for_write_at(self, base: Path, raw_path: str) -> ResolvedPath:
+    def resolve_for_write_at(
+        self,
+        base: Path,
+        raw_path: str,
+        *,
+        roots: Iterable[Path] | None = None,
+    ) -> ResolvedPath:
         pure = self._reject_unsafe_text(raw_path)
         if pure.name in {"", ".", ".."}:
             raise ToolFailure(
                 "INVALID_ARGUMENT", "Invalid write target.", category="validation"
             )
-        base = self._validate_base(base)
-        candidate = base.joinpath(*pure.parts)
+        allowed_roots = tuple(
+            dict.fromkeys(
+                root.expanduser().resolve(strict=True)
+                for root in (roots if roots is not None else (self.root,))
+            )
+        )
+        base = self._validate_base(base, roots=allowed_roots)
+        candidate = self._candidate_at(base, raw_path)
         if candidate.exists() or candidate.is_symlink():
-            resolved = candidate.resolve(strict=True)
-            if not is_relative_to(resolved, self.root):
+            try:
+                resolved = candidate.resolve(strict=True)
+            except FileNotFoundError as exc:
+                raise ToolFailure(
+                    "NOT_FOUND", f"Path not found: {raw_path}", category="not_found"
+                ) from exc
+            if self._matching_root(resolved, allowed_roots) is None:
                 raise ToolFailure(
                     "SYMLINK_ESCAPE",
-                    "Path escapes the configured workspace.",
+                    "Path escapes the authorized writable roots.",
                     category="security",
                 )
-            return ResolvedPath(
-                normalize_rel_display(resolved, self.root), resolved, True
-            )
+            return ResolvedPath(self._display_for_path(resolved), resolved, True)
 
         parent = candidate.parent
         missing: list[Path] = []
         while not parent.exists():
             missing.append(parent)
-            if parent == self.root or parent.parent == parent:
+            if parent.parent == parent:
                 break
             parent = parent.parent
         try:
@@ -1513,18 +1630,27 @@ class Workspace:
                 f"Parent directory not found: {raw_path}",
                 category="not_found",
             ) from exc
-        if not is_relative_to(resolved_parent, self.root):
+        matched_root = self._matching_root(resolved_parent, allowed_roots)
+        if matched_root is None:
             raise ToolFailure(
                 "PATH_OUTSIDE_WORKSPACE",
-                "Path escapes the configured workspace.",
+                "Path escapes the authorized writable roots.",
                 category="security",
             )
         target = resolved_parent.joinpath(
             *reversed([p.name for p in missing]), candidate.name
         )
-        return ResolvedPath(normalize_rel_display(target, self.root), target, False)
+        if self._matching_root(target.resolve(strict=False), (matched_root,)) is None:
+            raise ToolFailure(
+                "PATH_OUTSIDE_WORKSPACE",
+                "Path escapes the authorized writable root.",
+                category="security",
+            )
+        return ResolvedPath(self._display_for_path(target), target, False)
 
-    def _validate_base(self, base: Path) -> Path:
+    def _validate_base(
+        self, base: Path, *, roots: Iterable[Path] | None = None
+    ) -> Path:
         try:
             resolved = base.resolve(strict=True)
         except FileNotFoundError as exc:
@@ -1537,17 +1663,26 @@ class Workspace:
                 "Default cwd is not a directory.",
                 category="validation",
             )
-        if not is_relative_to(resolved, self.root):
+        allowed_roots = tuple(roots if roots is not None else (self.root,))
+        if self._matching_root(resolved, allowed_roots) is None:
             raise ToolFailure(
                 "PATH_OUTSIDE_WORKSPACE",
-                "Default cwd escapes the configured workspace.",
+                "Default cwd escapes the authorized roots.",
                 category="security",
             )
         return resolved
 
-    def reject_write_symlink(self, raw_path: str) -> None:
-        pure = self._reject_unsafe_text(raw_path)
-        candidate = self.root.joinpath(*pure.parts)
+    def reject_write_symlink(
+        self,
+        raw_path: str,
+        *,
+        base: Path | None = None,
+        roots: Iterable[Path] | None = None,
+    ) -> None:
+        self._reject_unsafe_text(raw_path)
+        allowed_roots = tuple(roots if roots is not None else (self.root,))
+        resolved_base = self._validate_base(base or self.root, roots=allowed_roots)
+        candidate = self._candidate_at(resolved_base, raw_path)
         if candidate.is_symlink():
             raise ToolFailure(
                 "SYMLINK_ESCAPE",
@@ -1638,6 +1773,11 @@ class Runtime:
         project_roots: list[Path] | None = None,
         git_credentials_file: Path | None = None,
         active_project_file: Path | None = None,
+        logical_context_registry: LogicalContextRegistry | None = None,
+        shared_job_registry: SharedJobRegistry | None = None,
+        capability_lease_registry: CapabilityLeaseRegistry | None = None,
+        grantable_roots: list[Path] | None = None,
+        persist_project_selection: bool = True,
     ) -> None:
         from .sandbox import ExecutionSandbox, detect_sandbox_backend
         from .tasks import TaskRegistry
@@ -1660,11 +1800,34 @@ class Runtime:
                 "Project roots must be existing directories.",
                 category="validation",
             )
+        # Project discovery roots are not filesystem grant authority.  Extra
+        # readable/writable roots require an explicit operator ceiling.
+        configured_grantable_roots = list(grantable_roots or [])
+        self.grantable_roots: tuple[Path, ...] = tuple(
+            dict.fromkeys(
+                root.expanduser().resolve(strict=True)
+                for root in configured_grantable_roots
+            )
+        )
+        if not all(root.is_dir() for root in self.grantable_roots):
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                "Grantable roots must be existing directories.",
+                category="validation",
+            )
         self.active_project_file = (
             active_project_file.expanduser()
             if active_project_file is not None
             else None
         )
+        self.logical_context_registry = logical_context_registry
+        self.shared_job_registry = shared_job_registry
+        self.capability_lease_registry = (
+            capability_lease_registry or CapabilityLeaseRegistry()
+        )
+        self._owns_capability_lease_registry = capability_lease_registry is None
+        self.persist_project_selection = persist_project_selection
+        self.logical_context_id: str | None = None
         persisted_project = self._load_persisted_project_path()
         if persisted_project is not None:
             self.workspace = Workspace(persisted_project)
@@ -1683,7 +1846,12 @@ class Runtime:
                 details={"supported": list(PERMISSION_MODE_CHOICES)},
             )
         self.permission_mode = permission_mode
-        self._profile_managed = policy_profile is not None
+        self._explicit_policy_profile = policy_profile is not None
+        self._legacy_windows_process_fallback = (
+            os.name == "nt"
+            and not self._explicit_policy_profile
+            and permission_mode == "trusted"
+        )
         if policy_profile is None:
             policy_profile = legacy_profile(permission_mode)
         if policy_profile not in PROFILE_NAMES:
@@ -1697,12 +1865,31 @@ class Runtime:
         self.policy_rules = (
             validate_rules(policy_rules or {}) if policy_profile == "custom" else None
         )
+        self.effective_capability_rules = effective_rules(
+            self.policy_profile, self.policy_rules
+        )
+        # Compatibility-only startup switches are translated into the same
+        # capability matrix.  Execution code below this point must not consult
+        # an independent legacy permission model.
+        if not self._explicit_policy_profile and allow_network:
+            self.effective_capability_rules["network.public"] = "auto"
+            self.effective_capability_rules["network.host_local"] = "auto"
+        self._profile_managed = True
         self.git_credentials_file = (
             git_credentials_file.expanduser().resolve()
             if git_credentials_file is not None and git_credentials_file.is_file()
             else None
         )
         self.sandbox_backend = detect_sandbox_backend(sandbox_backend)
+        self.executor_registry = ExecutorRegistry.from_environment(
+            sandbox_backend_name=self.sandbox_backend.name,
+            sandbox_secure=self.sandbox_backend.secure,
+            sandbox_available=self.sandbox_backend.available,
+        )
+        self.executor_registry.reject_runner_below(
+            [*self.project_roots, *self.grantable_roots]
+        )
+        self.diagnostics_registry = DiagnosticsRegistry()
         if max_removed_lines < 0 or max_removed_percent < 0:
             raise ToolFailure(
                 "INVALID_ARGUMENT",
@@ -1711,10 +1898,21 @@ class Runtime:
             )
         self.max_removed_lines = max_removed_lines
         self.max_removed_percent = max_removed_percent
-        self.capabilities = PERMISSION_MODE_CAPABILITIES[permission_mode]
-        self.dangerously_skip_all_permissions = (
-            not self._profile_managed and self.capabilities.skip_all_permissions
+        self.capabilities = ModeCapabilities(
+            network=any(
+                self.effective_capability_rules[item] == "auto"
+                for item in ("network.public", "network.host_local")
+            ),
+            shell_expansion=self.effective_capability_rules["exec.arbitrary"] == "auto",
+            inline_script=self.effective_capability_rules["exec.arbitrary"] == "auto",
+            landlock=self.sandbox_backend.name != "unsafe",
+            secret_env_filter=True,
+            global_tmp_write="sandbox-private",
+            skip_all_permissions=False,
         )
+        # Retained only as a compatibility/diagnostic name.  The legacy
+        # dangerous mode no longer disables the host-security floor.
+        self.dangerously_skip_all_permissions = False
         # Faking annotations is only defensible where the caller has already
         # asserted the workspace is disposable, so bind it to that assertion
         # instead of letting it be set orthogonally.
@@ -1734,10 +1932,9 @@ class Runtime:
                 category="validation",
                 details={"supported": list(SHELL_ENV_INHERIT_CHOICES)},
             )
-        self.allow_network = (
-            allow_network or self.capabilities.network
-            if not self._profile_managed
-            else self._policy_decision_for_capabilities({"network.public"}) == "auto"
+        self.allow_network = any(
+            self._policy_decision_for_capabilities({capability}) == "auto"
+            for capability in ("network.public", "network.host_local")
         )
         self.auth_token = auth_token or None
         self.oauth_config = oauth_config
@@ -1796,6 +1993,12 @@ class Runtime:
             self.output_sessions.clear()
         still_running = False
         for session in sessions:
+            if (
+                self.shared_job_registry is not None
+                and self.shared_job_registry.contains(session.session_id)
+            ):
+                still_running = still_running or session.process.poll() is None
+                continue
             if not self._terminate_session(session):
                 still_running = True
                 self._schedule_session_reaper(session)
@@ -1937,6 +2140,63 @@ class Runtime:
         if cleanup_runtime_dir:
             shutil.rmtree(self.runtime_dir, ignore_errors=True)
 
+    def _additional_execution_sandboxes(self) -> list[tuple[Path, Any, bool]]:
+        """Create secret-filtered snapshots for currently leased extra roots."""
+
+        from .sandbox import ExecutionSandbox
+
+        writable = [
+            root.resolve(strict=True)
+            for root in self.writable_roots()
+            if root.resolve(strict=True) != self.workspace.root
+        ]
+        readable = [
+            root.resolve(strict=True)
+            for root in self.readable_roots()
+            if root.resolve(strict=True) != self.workspace.root
+        ]
+        candidates: list[tuple[Path, bool]] = []
+        for root in sorted(set([*readable, *writable]), key=lambda item: len(item.parts)):
+            wants_write = root in writable
+            covered = False
+            for existing_root, existing_write in candidates:
+                if is_relative_to(root, existing_root) and (
+                    existing_write or not wants_write
+                ):
+                    covered = True
+                    break
+            if not covered:
+                candidates.append((root, wants_write))
+        if len(candidates) > 16:
+            raise ToolFailure(
+                "SESSION_LIMIT_REACHED",
+                "Too many additional execution roots are active.",
+                category="runtime",
+                details={"max_additional_roots": 16},
+            )
+
+        snapshots: list[tuple[Path, Any, bool]] = []
+        try:
+            for root, write in candidates:
+                self._consume_additional_root(root, write=write)
+                snapshot = ExecutionSandbox.create(
+                    root,
+                    owner_root=self.runtime_dir / "root-sandboxes",
+                )
+                snapshots.append((root, snapshot, write))
+        except BaseException:
+            for _, snapshot, _ in snapshots:
+                snapshot.cleanup()
+            raise
+        return snapshots
+
+    @staticmethod
+    def _cleanup_additional_execution_sandboxes(
+        snapshots: Iterable[tuple[Path, Any, bool]],
+    ) -> None:
+        for _, snapshot, _ in snapshots:
+            snapshot.cleanup()
+
     def _discard_execution_sandbox(self) -> bool:
         with self.sandbox_lock:
             if self.sandbox_users > 0:
@@ -1954,29 +2214,40 @@ class Runtime:
         return self.tmp_dir
 
     def global_tmp_write_policy(self) -> str:
-        return self.capabilities.global_tmp_write
+        if self.sandbox_backend.name in {"bwrap", "inherited"}:
+            return "sandbox-private"
+        return "runtime-private-host-dir"
 
     def shell_expansion_policy(self) -> str:
-        return "allowed" if self.capabilities.shell_expansion else "blocked"
+        decision = self.effective_capability_rules["exec.arbitrary"]
+        return {"auto": "allowed", "ask": "approval", "deny": "blocked"}[decision]
 
     def inline_script_policy(self) -> str:
-        return "allowed" if self.capabilities.inline_script else "blocked"
+        decision = self.effective_capability_rules["exec.arbitrary"]
+        return {"auto": "allowed", "ask": "approval", "deny": "blocked"}[decision]
 
     def secret_env_filter_policy(self) -> str:
-        return "enabled" if self.capabilities.secret_env_filter else "disabled"
+        return "always-filtered; exact-name lease required for host secret injection"
 
     def landlock_enabled(self) -> bool:
-        return self.capabilities.landlock and self.sandbox_backend.name != "unsafe"
+        return self.sandbox_backend.name not in {
+            "unsafe",
+            "inherited",
+        }
 
     def _policy_decision_for_capabilities(self, required: set[str]) -> str:
-        """Return the strictest active profile decision for real operations."""
+        """Return the strictest decision from the startup-resolved capability matrix."""
 
         if not required:
             return "auto"
-        decisions = {
-            policy_decision(self.policy_profile, capability, self.policy_rules)
-            for capability in required
-        }
+        try:
+            decisions = {self.effective_capability_rules[capability] for capability in required}
+        except KeyError as exc:
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                f"Unknown runtime capability: {exc.args[0]}",
+                category="validation",
+            ) from exc
         if "deny" in decisions:
             return "deny"
         if "ask" in decisions:
@@ -1987,17 +2258,93 @@ class Runtime:
         return [self.runtime_dir]
 
     def is_allowed_command_tmp_path(self, candidate: str) -> bool:
-        if self.capabilities.skip_all_permissions:
-            return False
+        normalized = candidate.replace("\\", "/")
+        if self.sandbox_backend.name in {"bwrap", "inherited"} and (
+            normalized == "/tmp" or normalized.startswith("/tmp/")
+        ):
+            return True
         try:
             resolved = Path(candidate).expanduser().resolve(strict=False)
         except OSError:
             return False
         return is_relative_to(resolved, self.runtime_dir)
 
+    def _ensure_logical_context(self) -> str | None:
+        registry = self.logical_context_registry
+        if registry is None:
+            return None
+        if self.logical_context_id is None:
+            try:
+                state = registry.create(self.workspace.root, self.default_cwd)
+            except RuntimeError as exc:
+                raise ToolFailure(
+                    "SERVICE_UNAVAILABLE",
+                    "Logical-context capacity is exhausted by active clients/jobs.",
+                    category="runtime",
+                    retryable=True,
+                ) from exc
+            self.logical_context_id = state.context_id
+        return self.logical_context_id
+
+    def _apply_logical_context_state(self, state: LogicalContextState) -> None:
+        workspace_root = state.workspace.resolve(strict=True)
+        default_cwd = state.default_cwd.resolve(strict=True)
+        if not any(is_relative_to(workspace_root, root) for root in self.project_roots):
+            raise ToolFailure(
+                "CONTEXT_INVALID",
+                "Logical context workspace is outside configured project roots.",
+                category="security",
+            )
+        if not default_cwd.is_dir() or not is_relative_to(default_cwd, workspace_root):
+            raise ToolFailure(
+                "CONTEXT_INVALID",
+                "Logical context default_cwd is no longer valid.",
+                category="runtime",
+            )
+        if self.workspace.root != workspace_root:
+            with self.sessions_lock:
+                starting_processes = self.starting_sessions
+                active_processes = [
+                    session
+                    for session in self.sessions.values()
+                    if session.process.poll() is None
+                ]
+            with self.sandbox_lock:
+                active_sandbox_users = self.sandbox_users
+            if starting_processes or active_processes or active_sandbox_users:
+                raise ToolFailure(
+                    "INVALID_STATE",
+                    "Cannot switch logical contexts while this MCP Runtime has active command resources.",
+                    category="runtime",
+                )
+            self._discard_execution_sandbox()
+            self.workspace = Workspace(workspace_root)
+            self.patch_baselines.clear()
+            self.patch_baseline_bytes = 0
+            self.project_context = load_project_context(workspace_root)
+            self.active_project = self._project_record_for_path(workspace_root)
+        self.default_cwd = default_cwd
+
+    def _save_logical_context_state(self, state: LogicalContextState) -> None:
+        registry = self.logical_context_registry
+        if registry is None:
+            return
+        registry.update(
+            state,
+            workspace=self.workspace.root,
+            default_cwd=self.default_cwd,
+        )
+
+    def _active_context_id(self) -> str | None:
+        value = getattr(self.request_context, "logical_context_id", None)
+        if isinstance(value, str) and value:
+            return value
+        return self.logical_context_id
+
     def initialize(self, client_info: dict[str, Any] | None = None) -> dict[str, Any]:
+        context_id = self._ensure_logical_context()
         self.telemetry.record_session_start(client_info, self.protocol_version)
-        return {
+        result = {
             "protocolVersion": self.protocol_version,
             "capabilities": {"tools": {"listChanged": False}},
             "serverInfo": {
@@ -2007,7 +2354,7 @@ class Runtime:
                 "schemaVersion": TOOL_SCHEMA_VERSION,
             },
             "instructions": (
-                "DevMCP can select one writable Git repository per MCP session. "
+                "DevMCP can select one writable Git repository per logical context. "
                 "When the user names or asks to continue a project, call list_projects, "
                 "select the matching repository with select_project, then read the returned "
                 "authority_files before changing code. All subsequent file, patch, exec, and "
@@ -2015,6 +2362,15 @@ class Runtime:
                 + self.project_context.server_instructions()
             ),
         }
+        if context_id is not None:
+            result["devmcpContextId"] = context_id
+            result["instructions"] += (
+                "\n\nHTTP reconnects: DevMCP returns an opaque context_id on tool results. "
+                "When a client may create a new MCP transport session, pass that same context_id "
+                "to subsequent tools to retain the selected project/default_cwd. Treat it as a "
+                "bearer capability and do not share it across chats or clients."
+            )
+        return result
 
     def list_tools(self) -> dict[str, Any]:
         return {
@@ -2036,11 +2392,165 @@ class Runtime:
     def default_cwd_display(self) -> str:
         return normalize_rel_display(self.default_cwd, self.workspace.root)
 
+    def _capability_owner_id(self) -> str:
+        return self._active_context_id() or f"runtime:{self.server_instance_id}"
+
+    def _task_scope_id(self) -> str | None:
+        value = getattr(self.request_context, "task_scope_id", None)
+        return value if isinstance(value, str) and value else None
+
+    def readable_roots(self) -> list[Path]:
+        roots = [self.workspace.root]
+        roots.extend(
+            self.capability_lease_registry.root_paths(
+                self._capability_owner_id(),
+                write=False,
+                task_scope_id=self._task_scope_id(),
+            )
+        )
+        return list(dict.fromkeys(roots))
+
+    def writable_roots(self) -> list[Path]:
+        roots = [self.workspace.root]
+        roots.extend(
+            self.capability_lease_registry.root_paths(
+                self._capability_owner_id(),
+                write=True,
+                task_scope_id=self._task_scope_id(),
+            )
+        )
+        return list(dict.fromkeys(roots))
+
+    def _consume_additional_root(self, path: Path, *, write: bool) -> None:
+        if is_relative_to(path.resolve(strict=False), self.workspace.root):
+            return
+        lease_id = self.capability_lease_registry.consume_root_match(
+            self._capability_owner_id(),
+            path,
+            write=write,
+            task_scope_id=self._task_scope_id(),
+        )
+        if lease_id is None:
+            raise ToolFailure(
+                "PATH_OUTSIDE_WORKSPACE",
+                "Path is outside the current authorized root set.",
+                category="security",
+            )
+        used = getattr(self.request_context, "used_capability_leases", None)
+        if isinstance(used, set):
+            used.add(lease_id)
+
+    def _matching_capability_lease(
+        self,
+        capability: str,
+        target: str,
+        *,
+        pattern: bool = False,
+    ) -> str | None:
+        leases = self.capability_lease_registry.list_owner(
+            self._capability_owner_id(), task_scope_id=self._task_scope_id()
+        )
+        for lease in leases:
+            if lease.get("capability") != capability:
+                continue
+            lease_target = str(lease.get("target", ""))
+            matched = lease_target == "*" or lease_target == target
+            if pattern and not matched:
+                matched = fnmatch.fnmatch(target, lease_target)
+            if not matched:
+                continue
+            lease_id = str(lease["lease_id"])
+            used = getattr(self.request_context, "used_capability_leases", None)
+            if isinstance(used, set):
+                used.add(lease_id)
+            return lease_id
+        return None
+
+    def _validate_transaction_relative_path(self, rel_path: str) -> None:
+        pure = PurePosixPath(rel_path)
+        if pure.is_absolute() or any(part in {"", ".", ".."} for part in pure.parts):
+            raise ToolFailure(
+                "TRANSACTION_UNSAFE_CHANGE",
+                "Transactional output path is not a canonical relative path.",
+                category="security",
+                details={"path": rel_path},
+            )
+        protected_parts = {".git", ".ssh", ".aws", ".gnupg", ".kube"}
+        if any(part in protected_parts or part.startswith(".devmcp-") for part in pure.parts):
+            raise ToolFailure(
+                "TRANSACTION_UNSAFE_CHANGE",
+                "Transactional output targets a protected runtime/credential path.",
+                category="security",
+                details={"path": rel_path},
+            )
+        for part in pure.parts:
+            if part == ".env.example":
+                continue
+            if part == ".env" or part.startswith(".env."):
+                raise ToolFailure(
+                    "TRANSACTION_UNSAFE_CHANGE",
+                    "Transactional output targets a protected environment file.",
+                    category="security",
+                    details={"path": rel_path},
+                )
+        self.workspace._reject_unsafe_text(rel_path)
+
+    def _authorize_transaction_changes(self, changes: Iterable[Any]) -> None:
+        pending: list[dict[str, str]] = []
+        denied: list[dict[str, str]] = []
+        for change in changes:
+            if isinstance(change, dict):
+                operation = str(change.get("operation", ""))
+                path = str(change.get("path", ""))
+            else:
+                operation = str(change.operation)
+                path = str(change.path)
+            capability = {
+                "create": "workspace.create",
+                "delete": "workspace.delete",
+                "update": "workspace.patch_small",
+            }.get(operation, "workspace.patch_destructive")
+            if self._matching_capability_lease(capability, path, pattern=True):
+                continue
+            decision = self._policy_decision_for_capabilities({capability})
+            item = {"capability": capability, "target": path}
+            if decision == "deny":
+                denied.append(item)
+            elif decision == "ask":
+                pending.append(item)
+        if denied:
+            raise ToolFailure(
+                "ACCESS_DENIED",
+                "Transactional output contains changes denied by the active policy.",
+                category="security",
+                details={"changes": denied},
+            )
+        if pending:
+            raise ToolFailure(
+                "CAPABILITY_LEASE_REQUIRED",
+                "Transactional output needs narrow workspace capability leases before it can be applied.",
+                category="permission",
+                retryable=True,
+                details={
+                    "changes": pending,
+                    "suggested_tool": "grant_capability",
+                    "retry_hint": "Grant only the listed capability/target patterns, then rerun the command.",
+                },
+            )
+
     def resolve_existing(self, raw_path: str = ".") -> ResolvedPath:
-        return self.workspace.resolve_existing_at(self.default_cwd, raw_path)
+        resolved = self.workspace.resolve_existing_at(
+            self.default_cwd, raw_path, roots=self.readable_roots()
+        )
+        self._consume_additional_root(resolved.path, write=False)
+        return resolved
 
     def resolve_for_write(self, raw_path: str) -> ResolvedPath:
-        return self.workspace.resolve_for_write_at(self.default_cwd, raw_path)
+        resolved = self.workspace.resolve_for_write_at(
+            self.default_cwd, raw_path, roots=self.writable_roots()
+        )
+        self._consume_additional_root(resolved.path, write=True)
+        return resolved
 
     def git_path_filter(self, raw_path: str) -> str:
         if raw_path == ".":
@@ -2051,6 +2561,9 @@ class Runtime:
         return {
             "workspace": str(self.workspace.root),
             "permission_mode": self.permission_mode,
+            "permission_mode_role": "startup-compatibility-adapter",
+            "policy_profile": self.policy_profile,
+            "effective_capabilities": dict(self.effective_capability_rules),
             "network_allowed": self.allow_network,
             "runtime_dir": str(self.runtime_dir),
             "home": str(self.command_home_dir()),
@@ -2058,6 +2571,8 @@ class Runtime:
             "cache_dir": str(self.cache_dir),
             "sandbox_backend": self.sandbox_backend.name,
             "sandbox_secure": self.sandbox_backend.secure,
+            "executor_backends": self.executor_registry.describe(),
+            "diagnostic_providers": self.diagnostics_registry.providers(),
         }
 
     def _landlock_enforced(self, landlock: dict[str, Any]) -> bool:
@@ -2076,8 +2591,11 @@ class Runtime:
             **self._exec_environment_summary(),
             "default_cwd": self.default_cwd_display(),
             "policy_profile": self.policy_profile,
-            "policy_rules": effective_rules(self.policy_profile, self.policy_rules),
+            "policy_rules": dict(self.effective_capability_rules),
             "project_roots": [str(root) for root in self.project_roots],
+            "grantable_roots": [str(root) for root in self.grantable_roots],
+            "readable_roots": [str(root) for root in self.readable_roots()],
+            "writable_roots": [str(root) for root in self.writable_roots()],
             "active_project": self.active_project,
             "patch_risk_thresholds": {
                 "max_removed_lines": self.max_removed_lines,
@@ -2125,7 +2643,27 @@ class Runtime:
         request_id: str | int | None = None,
     ) -> dict[str, Any]:
         started_at = time.time()
-        args = arguments or {}
+        args = dict(arguments or {})
+        requested_context = args.pop("context_id", None)
+        requested_task_scope = args.pop("task_scope_id", None)
+        if requested_context is not None and (
+            not isinstance(requested_context, str)
+            or not 16 <= len(requested_context) <= 128
+        ):
+            raise JsonRpcError(
+                -32602,
+                "context_id must be an opaque string between 16 and 128 characters.",
+                {"reason": "invalid_arguments", "code": "INVALID_ARGUMENT"},
+            )
+        if requested_task_scope is not None and (
+            not isinstance(requested_task_scope, str)
+            or not 8 <= len(requested_task_scope) <= 128
+        ):
+            raise JsonRpcError(
+                -32602,
+                "task_scope_id must be an opaque string between 8 and 128 characters.",
+                {"reason": "invalid_arguments", "code": "INVALID_ARGUMENT"},
+            )
         handler = (
             self._tool_handlers.get(name)
             if name in self._exposed_tool_name_set
@@ -2137,8 +2675,65 @@ class Runtime:
             )
         spec = TOOL_REGISTRY[name]
         validate_arguments(name, args)
+        context_state: LogicalContextState | None = None
+        context_id: str | None = None
+        context_locked = False
+        used_capability_leases: set[str] = set()
+
+        def decorate(payload: dict[str, Any]) -> None:
+            if context_id is not None:
+                payload.setdefault("context_id", context_id)
+            if requested_task_scope is not None:
+                payload.setdefault("task_scope_id", requested_task_scope)
+            payload.setdefault("workspace", str(self.workspace.root))
+            payload.setdefault("active_project", dict(self.active_project))
+
         try:
+            registry = self.logical_context_registry
+            if requested_context and registry is None:
+                raise ToolFailure(
+                    "INVALID_ARGUMENT",
+                    "context_id is available only on transports with logical-context support.",
+                    category="validation",
+                )
+            if registry is not None:
+                if requested_context:
+                    context_id = requested_context
+                    context_state = registry.retain(context_id)
+                else:
+                    context_id = self._ensure_logical_context()
+                    assert context_id is not None
+                    context_state = registry.retain(context_id)
+                    if context_state is None:
+                        try:
+                            context_state = registry.create(
+                                self.workspace.root, self.default_cwd
+                            )
+                        except RuntimeError as exc:
+                            raise ToolFailure(
+                                "SERVICE_UNAVAILABLE",
+                                "Logical-context capacity is exhausted by active clients/jobs.",
+                                category="runtime",
+                                retryable=True,
+                            ) from exc
+                        context_id = context_state.context_id
+                        self.logical_context_id = context_id
+                        retained_state = registry.retain(context_id)
+                        assert retained_state is context_state
+                if context_state is None:
+                    raise ToolFailure(
+                        "CONTEXT_NOT_FOUND",
+                        "Logical context is unknown or expired; reconnect without reusing stale state.",
+                        category="not_found",
+                        details={"context_id": context_id},
+                    )
+                context_state.lock.acquire()
+                context_locked = True
+                self._apply_logical_context_state(context_state)
             self.request_context.request_id = request_id
+            self.request_context.logical_context_id = context_id
+            self.request_context.task_scope_id = requested_task_scope
+            self.request_context.used_capability_leases = used_capability_leases
             cancel_event: threading.Event | None = None
             if isinstance(request_id, (str, int)) and not isinstance(request_id, bool):
                 cancel_event = threading.Event()
@@ -2147,6 +2742,8 @@ class Runtime:
             self.request_context.cancel_event = cancel_event
             try:
                 payload = handler(args)
+                if context_state is not None:
+                    self._save_logical_context_state(context_state)
             finally:
                 if request_id is not None:
                     with self.request_sessions_lock:
@@ -2154,7 +2751,10 @@ class Runtime:
                         self.request_cancel_events.pop(request_id, None)
                 self.request_context.request_id = None
                 self.request_context.cancel_event = None
+                self.request_context.logical_context_id = None
+                self.request_context.task_scope_id = None
             payload.setdefault("ok", True)
+            decorate(payload)
             self.emit_tool_trace(name, args, payload, started_at)
             content = spec.content_builder(payload) if spec.content_builder else None
             return make_tool_result(
@@ -2171,6 +2771,7 @@ class Runtime:
                     "details": exc.details,
                 },
             }
+            decorate(payload)
             if spec.error_status:
                 payload["status"] = spec.error_status
             diagnostics = permission_failure_diagnostics(exc)
@@ -2197,10 +2798,24 @@ class Runtime:
                     "details": {},
                 },
             }
+            decorate(payload)
             if spec.error_status:
                 payload["status"] = spec.error_status
             self.emit_tool_trace(name, args, payload, started_at)
             return make_tool_result(name, payload, is_error=True)
+        finally:
+            owner_context_id = context_id or f"runtime:{self.server_instance_id}"
+            for lease_id in used_capability_leases:
+                self.capability_lease_registry.consume_once(
+                    lease_id, owner_context_id=owner_context_id
+                )
+            self.request_context.used_capability_leases = None
+            self.request_context.logical_context_id = None
+            self.request_context.task_scope_id = None
+            if context_locked and context_state is not None:
+                context_state.lock.release()
+            if context_id is not None and self.logical_context_registry is not None:
+                self.logical_context_registry.release(context_id)
 
     def server_info(self, args: dict[str, Any]) -> dict[str, Any]:
         return self.server_info_payload()
@@ -2210,8 +2825,6 @@ class Runtime:
         warnings: list[str] = []
         if not landlock.get("available"):
             warnings.append("Linux Landlock filesystem confinement is unavailable")
-        if self.capabilities.skip_all_permissions:
-            warnings.append("permission_mode=dangerous disables MCP safety gates")
         if self.fake_readonly_annotations:
             warnings.append(
                 "tools/list annotations are faked as read-only; apply_patch and exec_command still mutate and execute"
@@ -2410,10 +3023,21 @@ class Runtime:
             ]
         with self.sandbox_lock:
             active_sandbox_users = self.sandbox_users
-        if starting_processes or active_processes or active_sandbox_users:
+        context_id = self._active_context_id()
+        shared_context_job_running = bool(
+            self.shared_job_registry is not None
+            and context_id is not None
+            and self.shared_job_registry.has_running_jobs(context_id)
+        )
+        if (
+            starting_processes
+            or active_processes
+            or active_sandbox_users
+            or shared_context_job_running
+        ):
             raise ToolFailure(
                 "INVALID_STATE",
-                "Cannot switch projects while command sessions are running.",
+                "Cannot switch projects while command sessions/jobs are running in this logical context.",
                 category="runtime",
             )
         self._discard_execution_sandbox()
@@ -2423,7 +3047,8 @@ class Runtime:
         self.patch_baseline_bytes = 0
         self.project_context = load_project_context(self.workspace.root)
         self.active_project = selected
-        self._persist_active_project(selected_path)
+        if self.persist_project_selection:
+            self._persist_active_project(selected_path)
         return dict(selected)
 
     def _discovered_project_checks(self) -> list[dict[str, Any]]:
@@ -2459,7 +3084,16 @@ class Runtime:
                     )
         pyproject = root / "pyproject.toml"
         if pyproject.is_file() and not any(item["id"] == "test" for item in checks):
-            if (root / "uv.lock").is_file():
+            if (root / ".venv" / "bin" / "python").is_file():
+                checks.append(
+                    {
+                        "id": "test",
+                        "argv": [".venv/bin/python", "-m", "pytest"],
+                        "environment": "project-venv",
+                        "source": ".venv + pyproject.toml",
+                    }
+                )
+            elif (root / "uv.lock").is_file():
                 prefix = ["uv", "run", "--offline", "--frozen", "--no-sync"]
                 checks.append(
                     {
@@ -2469,21 +3103,17 @@ class Runtime:
                         "source": "uv.lock + pyproject.toml",
                     }
                 )
-            elif (root / ".venv" / "bin" / "python").is_file():
-                checks.append(
-                    {
-                        "id": "test",
-                        "argv": [".venv/bin/python", "-m", "pytest"],
-                        "environment": "project-venv",
-                        "source": ".venv + pyproject.toml",
-                    }
-                )
         return checks
 
     def project_checks(self, args: dict[str, Any]) -> dict[str, Any]:
+        execution_environment = self._project_environment_info()
+        checks = self._discovered_project_checks()
+        for check in checks:
+            check["execution_environment"] = execution_environment
         return {
             "project": self.active_project,
-            "checks": self._discovered_project_checks(),
+            "checks": checks,
+            "execution_environment": execution_environment,
         }
 
     def run_project_check(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -2503,12 +3133,27 @@ class Runtime:
                 category="validation",
             )
         argv = [str(item) for item in check["argv"]]
+        execution_environment = self._project_environment_info()
+        task_env = self._task_env({})
+        executable = argv[0]
+        executable_path = (
+            str((self.workspace.root / executable).resolve())
+            if "/" in executable or "\\" in executable
+            else shutil.which(executable, path=str(task_env.get("PATH", os.defpath)))
+        )
+        if not executable_path or not Path(executable_path).is_file():
+            raise ToolFailure(
+                "PROJECT_ENVIRONMENT_ERROR",
+                f"Project check executable '{executable}' is unavailable in the resolved project environment.",
+                category="environment",
+                details={"execution_environment": execution_environment},
+            )
         exec_args = {
             "cwd": ".",
             "timeout_ms": args.get("timeout_ms", 120000),
             "yield_time_ms": args.get("yield_time_ms", 10000),
             "max_output_bytes": args.get("max_output_bytes", 262144),
-            "env": self._task_env({}),
+            "env": task_env,
             "approval_id": args.get("approval_id"),
             "network_required": False,
         }
@@ -2523,7 +3168,10 @@ class Runtime:
                 return authorized
         else:
             authorized = set()
-        return self._execute_task_argv(argv, exec_args, set(authorized))
+        result = self._execute_task_argv(argv, exec_args, set(authorized))
+        result["check_id"] = check_id
+        result["execution_environment"] = execution_environment
+        return result
 
     def emit_tool_trace(
         self,
@@ -3214,13 +3862,17 @@ class Runtime:
                 op.path, require_existing=op.kind in {"update", "delete"}
             )
             if op.kind in {"add", "update", "delete"}:
-                self.workspace.reject_write_symlink(op.path)
+                self.workspace.reject_write_symlink(
+                    op.path, base=self.default_cwd, roots=self.writable_roots()
+                )
             if op.move_to:
                 self._validate_patch_path(op.move_to, require_existing=False)
-                self.workspace.reject_write_symlink(op.move_to)
+                self.workspace.reject_write_symlink(
+                    op.move_to, base=self.default_cwd, roots=self.writable_roots()
+                )
 
             if op.kind == "add":
-                target = self.workspace.resolve_for_write(op.path)
+                target = self.resolve_for_write(op.path)
                 if target.existed:
                     raise ToolFailure(
                         "PATCH_FAILED",
@@ -3263,7 +3915,7 @@ class Runtime:
                 summaries.append(f"A {target.display}")
 
             elif op.kind == "update":
-                source = self.workspace.resolve_existing(op.path)
+                source = self.resolve_existing(op.path)
                 if source.path.is_dir():
                     raise ToolFailure(
                         "PATCH_FAILED",
@@ -3354,15 +4006,15 @@ class Runtime:
                 summaries.append(f"M {source.display}")
 
             elif op.kind == "delete":
-                source = self.workspace.resolve_existing(op.path)
+                source = self.resolve_existing(op.path)
                 if source.path.is_dir():
                     raise ToolFailure(
                         "PATCH_FAILED",
                         "Cannot delete a directory with Delete File.",
                         category="validation",
                     )
-                operation_decision = policy_decision(
-                    self.policy_profile, "workspace.delete", self.policy_rules
+                operation_decision = self._policy_decision_for_capabilities(
+                    {"workspace.delete"}
                 )
                 policy_capabilities.add("workspace.delete")
                 if operation_decision == "deny":
@@ -3402,8 +4054,8 @@ class Runtime:
                         "Move target is required.",
                         category="validation",
                     )
-                source = self.workspace.resolve_existing(op.path)
-                target = self.workspace.resolve_for_write(op.move_to)
+                source = self.resolve_existing(op.path)
+                target = self.resolve_for_write(op.move_to)
                 if source.path.is_dir():
                     raise ToolFailure(
                         "PATCH_FAILED",
@@ -3416,8 +4068,8 @@ class Runtime:
                         "Move target already exists.",
                         category="validation",
                     )
-                operation_decision = policy_decision(
-                    self.policy_profile, "workspace.move", self.policy_rules
+                operation_decision = self._policy_decision_for_capabilities(
+                    {"workspace.move"}
                 )
                 policy_capabilities.add("workspace.move")
                 if operation_decision == "deny":
@@ -3585,9 +4237,9 @@ class Runtime:
 
     def _validate_patch_path(self, raw_path: str, *, require_existing: bool) -> None:
         if require_existing:
-            self.workspace.resolve_existing(raw_path)
+            self.resolve_existing(raw_path)
         else:
-            self.workspace.resolve_for_write(raw_path)
+            self.resolve_for_write(raw_path)
 
     def _commit_staged_files(self, staged: list[StagedFile]) -> None:
         new_baselines: list[tuple[str, str | None, int]] = []
@@ -3658,39 +4310,6 @@ class Runtime:
             )
         return workdir
 
-    def _required_command_capabilities(
-        self, cmd: str, args: dict[str, Any]
-    ) -> set[str]:
-        if self.dangerously_skip_all_permissions:
-            return set()
-        self._check_command_paths(cmd)
-        required: set[str] = set()
-        env = args.get("env", {})
-        if isinstance(env, dict) and any(
-            is_filtered_env_var(str(key), str(value)) for key, value in env.items()
-        ):
-            required.add("sensitive_env")
-        if (
-            not self.capabilities.inline_script
-            and inline_script_command(cmd) is not None
-        ):
-            required.add(INLINE_SCRIPT_PERMISSION)
-        if not self.capabilities.shell_expansion and SHELL_EXPANSION_RE.search(cmd):
-            required.add("shell_expansion")
-        compact = " ".join(cmd.split()).lower()
-        if re.search(
-            r"(^|[;&|]\s*)rm\s+(-[^\s]*r[^\s]*f|-?[^\s]*f[^\s]*r)\s+/", compact
-        ) or DESTRUCTIVE_RE.search(cmd):
-            required.add("destructive_command")
-        if not self.allow_network and (
-            bool(args.get("network_required", False))
-            or (
-                NETWORK_RE.search(cmd) and not is_literal_network_reference_command(cmd)
-            )
-        ):
-            required.add("network")
-        return required
-
     @staticmethod
     def _network_capability(cmd: str, args: dict[str, Any]) -> str | None:
         if not (
@@ -3733,22 +4352,156 @@ class Runtime:
             required.add("git.push")
         return required
 
+    @staticmethod
+    def _shell_policy_segments(cmd: str) -> list[str]:
+        """Return top-level shell segments for policy classification.
+
+        This deliberately does not attempt to prove shell safety.  It separates
+        ordinary pipelines/conditionals so policy signals are attached to the
+        commands that cause them while bwrap/root/network enforcement remains
+        the actual boundary.
+        """
+
+        try:
+            tokens = shlex_split(strip_heredoc_payloads(cmd))
+        except ValueError:
+            return [cmd]
+        segments: list[list[str]] = []
+        current: list[str] = []
+        for token in tokens:
+            if token in SHELL_CONTROL_TOKENS:
+                if current:
+                    segments.append(current)
+                    current = []
+                continue
+            current.append(token)
+        if current:
+            segments.append(current)
+        return [shlex.join(segment) for segment in segments] or [cmd]
+
     def _profile_command_capabilities(
         self, cmd: str, args: dict[str, Any], registered_task: Any = None
     ) -> set[str]:
         required = {
             "exec.registered" if registered_task is not None else "exec.arbitrary"
         }
-        required.update(self._command_domain_capabilities(cmd))
-        network = self._network_capability(cmd, args)
-        if network:
-            required.add(network)
+        segments = self._shell_policy_segments(cmd)
+        args["_policy_segments"] = segments
+        for segment in segments:
+            required.update(self._command_domain_capabilities(segment))
+            network = self._network_capability(segment, args)
+            if network:
+                required.add(network)
+        if isinstance(args.get("network_targets"), list) and args.get("network_targets"):
+            required.add(self._network_capability(cmd, args) or "network.public")
         env = args.get("env", {})
         if isinstance(env, dict) and any(
             is_filtered_env_var(str(key), str(value)) for key, value in env.items()
         ):
             required.add("env.sensitive")
+        sensitive_env_names = args.get("sensitive_env_names", [])
+        if isinstance(sensitive_env_names, list) and sensitive_env_names:
+            required.add("env.sensitive")
         return required
+
+    def _command_executable_names(self, action: str | list[str]) -> list[str]:
+        if isinstance(action, list):
+            if not action:
+                return []
+            return [action[0]]
+        scannable = strip_heredoc_payloads(action)
+        try:
+            tokens = shlex_split(scannable)
+        except ValueError:
+            tokens = scannable.split()
+        return command_executables(tokens)
+
+    def _leased_command_capabilities(
+        self,
+        action: str | list[str],
+        args: dict[str, Any],
+        required: set[str],
+    ) -> set[str]:
+        covered: set[str] = set()
+        executables = self._command_executable_names(action)
+        if "exec.arbitrary" in required and executables:
+            if all(
+                self._matching_capability_lease(
+                    "exec.arbitrary", executable, pattern=True
+                )
+                or self._matching_capability_lease(
+                    "exec.arbitrary",
+                    PurePosixPath(executable.replace("\\", "/")).name,
+                    pattern=True,
+                )
+                for executable in executables
+            ):
+                covered.add("exec.arbitrary")
+        if "deps.install" in required:
+            command_text = action if isinstance(action, str) else shlex.join(action)
+            if self._matching_capability_lease(
+                "deps.install", command_text, pattern=True
+            ) or any(
+                self._matching_capability_lease(
+                    "deps.install",
+                    PurePosixPath(executable.replace("\\", "/")).name,
+                    pattern=True,
+                )
+                for executable in executables
+            ):
+                covered.add("deps.install")
+        for network_capability in ("network.public", "network.host_local"):
+            if network_capability not in required:
+                continue
+            network_targets = [
+                str(target)
+                for target in args.get("network_targets", [])
+                if isinstance(target, str) and target
+            ]
+            if network_targets:
+                if all(
+                    self._matching_capability_lease(
+                        network_capability, target, pattern=True
+                    )
+                    for target in network_targets
+                ):
+                    covered.add(network_capability)
+            elif self._matching_capability_lease(network_capability, "*"):
+                covered.add(network_capability)
+        if "env.sensitive" in required:
+            env = args.get("env", {})
+            env_items = env.items() if isinstance(env, dict) else ()
+            extra_sensitive_names = [
+                str(key)
+                for key, value in env_items
+                if is_filtered_env_var(str(key), str(value))
+            ]
+            requested_host_names = [
+                str(name)
+                for name in args.get("sensitive_env_names", [])
+                if isinstance(name, str) and name
+            ]
+            sensitive_names = list(
+                dict.fromkeys([*extra_sensitive_names, *requested_host_names])
+            )
+            matched_names = [
+                name
+                for name in sensitive_names
+                if self._matching_capability_lease("env.sensitive", name)
+            ]
+            if sensitive_names and len(matched_names) == len(sensitive_names):
+                covered.add("env.sensitive")
+            if requested_host_names:
+                leased_host_names = [
+                    name for name in requested_host_names if name in matched_names
+                ]
+                args["_leased_sensitive_env_names"] = leased_host_names
+                missing = [
+                    name for name in requested_host_names if name not in matched_names
+                ]
+                if missing:
+                    args["_missing_sensitive_env_names"] = missing
+        return covered
 
     def _profile_authorize_command(
         self,
@@ -3758,7 +4511,7 @@ class Runtime:
         registered_task: Any = None,
         task_id: str = "",
     ) -> set[str] | dict[str, Any]:
-        cmd = action if isinstance(action, str) else " ".join(action)
+        cmd = action if isinstance(action, str) else shlex.join(action)
         self._check_command_paths(cmd)
         if self._contains_always_denied_command(cmd):
             raise ToolFailure(
@@ -3767,13 +4520,27 @@ class Runtime:
                 category="security",
             )
         required = self._profile_command_capabilities(cmd, args, registered_task)
-        decision = self._policy_decision_for_capabilities(required)
+        leased = self._leased_command_capabilities(action, args, required)
+        missing_sensitive_names = args.get("_missing_sensitive_env_names", [])
+        if missing_sensitive_names:
+            raise ToolFailure(
+                "CAPABILITY_LEASE_REQUIRED",
+                "Host sensitive environment values require exact-name capability leases.",
+                category="permission",
+                retryable=True,
+                details={
+                    "capability": "env.sensitive",
+                    "targets": list(missing_sensitive_names),
+                    "suggested_tool": "grant_capability",
+                },
+            )
+        unresolved = required - leased
+        decision = self._policy_decision_for_capabilities(unresolved)
         if decision == "deny":
             blocked = sorted(
                 capability
-                for capability in required
-                if policy_decision(self.policy_profile, capability, self.policy_rules)
-                == "deny"
+                for capability in unresolved
+                if self.effective_capability_rules.get(capability) == "deny"
             )
             raise ToolFailure(
                 "ACCESS_DENIED",
@@ -3781,12 +4548,12 @@ class Runtime:
                 category="security",
                 details={"capabilities": blocked},
             )
-        from .approval import ApprovalEngine
-
         workdir = self._operation_workdir(args)
-        approval_engine = ApprovalEngine()
         approval_id = args.get("approval_id")
         if approval_id:
+            from .approval import ApprovalEngine
+
+            approval_engine = ApprovalEngine()
             approved = set(
                 approval_engine.consume(
                     str(approval_id),
@@ -3795,7 +4562,7 @@ class Runtime:
                     env=args.get("env", {}),
                     task_id=task_id,
                     network=any(
-                        capability.startswith("network.") for capability in required
+                        capability.startswith("network.") for capability in unresolved
                     ),
                     sandbox=True,
                     sandbox_id=self.server_instance_id,
@@ -3803,21 +4570,24 @@ class Runtime:
             )
             return approved | required
         if decision == "ask":
+            from .approval import ApprovalEngine
+
+            approval_engine = ApprovalEngine()
             return approval_engine.request_approval(
                 action=action,
                 cwd=str(workdir.path),
                 reason="Permission required by the active policy profile.",
                 risk="high"
-                if required & {"env.sensitive", "git.push", "db.migrate"}
+                if unresolved & {"env.sensitive", "git.push", "db.migrate"}
                 else "medium",
                 network=any(
-                    capability.startswith("network.") for capability in required
+                    capability.startswith("network.") for capability in unresolved
                 ),
                 env=args.get("env", {}),
                 task_id=task_id,
                 sandbox=True,
                 sandbox_id=self.server_instance_id,
-                capabilities=sorted(required),
+                capabilities=sorted(unresolved),
             )
         return required
 
@@ -3860,16 +4630,108 @@ class Runtime:
         )
 
     def _profile_exec_command(self, args: dict[str, Any]) -> dict[str, Any]:
-        cmd = args.get("cmd", "")
-        if not isinstance(cmd, str) or not cmd:
+        cmd = args.get("cmd")
+        raw_argv = args.get("argv")
+        if cmd is not None and raw_argv is not None:
             raise ToolFailure(
                 "INVALID_ARGUMENT",
-                "cmd is required and must be a string.",
+                "Provide exactly one of cmd or argv.",
                 category="validation",
             )
-        registered_task = self._registered_direct_task(cmd)
+        action: str | list[str]
+        if raw_argv is not None:
+            if (
+                not isinstance(raw_argv, list)
+                or not raw_argv
+                or any(not isinstance(item, str) or not item for item in raw_argv)
+            ):
+                raise ToolFailure(
+                    "INVALID_ARGUMENT",
+                    "argv must be a non-empty array of non-empty strings.",
+                    category="validation",
+                )
+            action = list(raw_argv)
+            registered_task = self.task_registry.match_direct_argv(action)
+        elif isinstance(cmd, str) and cmd:
+            action = cmd
+            registered_task = self._registered_direct_task(cmd)
+        else:
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                "Exactly one of cmd or argv is required.",
+                category="validation",
+            )
+        transaction_mode = str(args.get("transaction_mode", "discard")).strip().lower()
+        if transaction_mode not in {"discard", "apply"}:
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                "transaction_mode must be discard or apply.",
+                category="validation",
+            )
+        command_text = shlex.join(action) if isinstance(action, list) else action
+        network_capability = self._network_capability(command_text, args)
+        network_targets = [
+            str(target).strip()
+            for target in args.get("network_targets", [])
+            if isinstance(target, str) and target.strip()
+        ]
+        if network_targets:
+            for target in network_targets:
+                if len(target) > 255 or not re.fullmatch(
+                    r"(?:\*\.)?[A-Za-z0-9_.:-]+", target
+                ):
+                    raise ToolFailure(
+                        "INVALID_ARGUMENT",
+                        f"Invalid network target: {target}",
+                        category="validation",
+                    )
+            network_capability = network_capability or "network.public"
+        requirements = ExecutionRequirements(
+            readable_roots=len(self.readable_roots()),
+            writable_roots=len(self.writable_roots()),
+            network=network_capability is not None,
+            network_targets=bool(network_targets),
+            transactional_apply=transaction_mode == "apply",
+            interactive_tty=bool(args.get("tty", False)),
+        )
+        selected_executor = self.executor_registry.select(
+            requirements,
+            preferred=str(args.get("executor_backend", "auto")),
+        )
+        expected_executor = (
+            "local_sandbox"
+            if self.sandbox_backend.name == "bwrap"
+            else "inherited_sandbox"
+            if self.sandbox_backend.name == "inherited"
+            else "unsafe_host"
+            if self.sandbox_backend.name == "unsafe"
+            else None
+        )
+        if selected_executor.name not in {expected_executor, "ephemeral_container"}:
+            raise ToolFailure(
+                "CAPABILITY_UNAVAILABLE",
+                f"Executor backend '{selected_executor.name}' is planned but its command adapter is not enabled for this execution path.",
+                category="environment",
+                details={
+                    "backend": selected_executor.describe(),
+                    "requirements": {
+                        "readable_roots": requirements.readable_roots,
+                        "writable_roots": requirements.writable_roots,
+                        "network": requirements.network,
+                        "network_targets": requirements.network_targets,
+                        "transactional_apply": requirements.transactional_apply,
+                        "interactive_tty": requirements.interactive_tty,
+                    },
+                },
+            )
+        if selected_executor.name == "ephemeral_container":
+            pending = self._profile_authorize_operation(
+                "executor.container", args, "use operator-configured ephemeral container backend"
+            )
+            if pending is not None:
+                return pending
         authorized = self._profile_authorize_command(
-            cmd,
+            action,
             args,
             registered_task=registered_task,
             task_id=str(args.get("task_id", "")),
@@ -3878,106 +4740,398 @@ class Runtime:
             return authorized
         internal_args = dict(args)
         internal_args.pop("approval_id", None)
+        internal_args["cmd"] = action
+        internal_args["transaction_mode"] = transaction_mode
+        internal_args["_selected_executor"] = selected_executor.name
+        internal_args["network_targets"] = network_targets
+        if transaction_mode == "apply" and "yield_time_ms" not in internal_args:
+            internal_args["yield_time_ms"] = int(internal_args.get("timeout_ms", 30000))
+        if isinstance(action, list):
+            internal_args["_argv_task"] = True
         internal_args.update(
             {
                 "approval_class": "ALLOW",
                 "_policy_authorized": True,
                 "_approved_capabilities": sorted(authorized),
                 "_resolved_workdir": self._operation_workdir(args).path,
-                "_network_capability": self._network_capability(cmd, args),
+                "_network_capability": network_capability,
             }
         )
+        if selected_executor.name == "ephemeral_container":
+            return self._execute_ephemeral_container(
+                internal_args, selected_executor.trusted_runner or ""
+            )
         return self._execute_command_legacy(internal_args)
 
     def exec_command(self, args: dict[str, Any]) -> dict[str, Any]:
-        if self._profile_managed:
-            return self._profile_exec_command(args)
-        cmd = args.get("cmd", "")
-        if not isinstance(cmd, str) or not cmd:
+        """Backward-compatible shell/argv entrypoint using one capability evaluator."""
+
+        # Keep the public compatibility wrapper audit-explicit: these fields are
+        # consumed by _profile_exec_command, but are named here so schema/code
+        # drift tooling can verify that the security-sensitive inputs are not
+        # accidentally orphaned behind delegation.
+        args.get("approval_id")
+        args.get("network_required")
+        args.get("task_id")
+        return self._profile_exec_command(args)
+
+    def exec_argv(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Preferred structured execution path with no shell parsing."""
+
+        if "cmd" in args:
             raise ToolFailure(
                 "INVALID_ARGUMENT",
-                "cmd is required and must be a string.",
+                "exec_argv accepts argv only; use exec_command for shell strings.",
                 category="validation",
             )
-        workdir = self._operation_workdir(args)
-        from .approval import ApprovalEngine
+        forwarded = dict(args)
+        raw_argv = forwarded.get("argv")
+        if not isinstance(raw_argv, list) or not raw_argv:
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                "argv is required and must be a non-empty array.",
+                category="validation",
+            )
+        forwarded.setdefault(
+            "transaction_mode",
+            "apply" if self.sandbox_backend.name == "bwrap" else "discard",
+        )
+        return self._profile_exec_command(forwarded)
 
-        approval_engine = ApprovalEngine()
-        approval_id = args.get("approval_id")
-        task_id = str(args.get("task_id", ""))
-        network_required = bool(args.get("network_required", False))
-        operation_cwd = str(workdir.path)
-        required_caps = self._required_command_capabilities(cmd, args)
-        if self._contains_always_denied_command(cmd):
+    def _execute_ephemeral_container(
+        self, args: dict[str, Any], runner: str
+    ) -> dict[str, Any]:
+        """Execute through an operator-owned container runner using filtered snapshots."""
+
+        if not runner:
             raise ToolFailure(
-                "ACCESS_DENIED",
-                "The requested executable is unconditionally denied by the runtime policy.",
-                category="security",
+                "CAPABILITY_UNAVAILABLE",
+                "Ephemeral container runner is not configured.",
+                category="environment",
             )
-        registered_task = self._registered_direct_task(cmd)
-        if registered_task is not None and registered_task.approval_class == "DENY":
+        if bool(args.get("tty", False)):
             raise ToolFailure(
-                "ACCESS_DENIED",
-                "The registered task is unconditionally denied.",
-                category="security",
+                "CAPABILITY_UNAVAILABLE",
+                "Ephemeral container backend does not support interactive TTY sessions.",
+                category="environment",
             )
-        if self.dangerously_skip_all_permissions or self.permission_mode == "trusted":
-            decision = "ALLOW"
-        elif (
-            registered_task is not None
-            and not registered_task.network_requirement
-            and registered_task.approval_class == "ALLOW"
-        ):
-            decision = "ALLOW"
-        else:
-            decision = str(
-                args.get("approval_class") or approval_engine.evaluate_command(cmd)
-            )
-        if decision == "DENY":
+        action = args.get("cmd")
+        if not isinstance(action, (str, list)):
             raise ToolFailure(
-                "ACCESS_DENIED",
-                "Command is unconditionally denied.",
-                category="security",
+                "INVALID_ARGUMENT",
+                "Container execution requires a shell command or argv action.",
+                category="validation",
+            )
+        self._ensure_runtime_dirs()
+        workdir = args.get("_resolved_workdir")
+        if not isinstance(workdir, Path):
+            workdir = self._operation_workdir(args).path
+        timeout_ms = int(args.get("timeout_ms", 30000))
+        max_output_bytes = int(args.get("max_output_bytes", 262144))
+        transaction_mode = str(args.get("transaction_mode", "discard"))
+
+        def bounded_env_int(name: str, default: int, minimum: int, maximum: int) -> int:
+            try:
+                value = int(os.environ.get(name, str(default)))
+            except ValueError as exc:
+                raise ToolFailure(
+                    "INVALID_ARGUMENT", f"{name} must be an integer.", category="validation"
+                ) from exc
+            if not minimum <= value <= maximum:
+                raise ToolFailure(
+                    "INVALID_ARGUMENT",
+                    f"{name} must be between {minimum} and {maximum}.",
+                    category="validation",
+                )
+            return value
+
+        limits = {
+            "timeout_ms": timeout_ms,
+            "cpu": bounded_env_int("DEVMCP_CONTAINER_CPU_LIMIT", 2, 1, 64),
+            "memory_mb": bounded_env_int(
+                "DEVMCP_CONTAINER_MEMORY_MB", 4096, 128, 131072
+            ),
+            "pids": bounded_env_int("DEVMCP_CONTAINER_PIDS_LIMIT", 512, 32, 4096),
+        }
+
+        from .sandbox import ExecutionSandbox
+
+        primary = ExecutionSandbox.create(
+            self.workspace.root, owner_root=self.runtime_dir / "container-sandboxes"
+        )
+        additional: list[tuple[Path, Any, bool]] = []
+        try:
+            additional = self._additional_execution_sandboxes()
+            mounts = [
+                {
+                    "source": str(primary.sandbox_dir),
+                    "destination": str(self.workspace.root),
+                    "writable": True,
+                },
+                *[
+                    {
+                        "source": str(snapshot.sandbox_dir),
+                        "destination": str(root),
+                        "writable": writable,
+                    }
+                    for root, snapshot, writable in additional
+                ],
+            ]
+            transactions: list[tuple[Path, ExecutionTransaction]] = []
+            if transaction_mode == "apply":
+                transactions.append(
+                    (
+                        self.workspace.root,
+                        ExecutionTransaction(
+                            authoritative_root=self.workspace.root,
+                            snapshot_root=primary.sandbox_dir,
+                            validate_relative_path=self._validate_transaction_relative_path,
+                        ),
+                    )
+                )
+                for root, snapshot, writable in additional:
+                    if writable:
+                        transactions.append(
+                            (
+                                root,
+                                ExecutionTransaction(
+                                    authoritative_root=root,
+                                    snapshot_root=snapshot.sandbox_dir,
+                                    validate_relative_path=self._validate_transaction_relative_path,
+                                ),
+                            )
+                        )
+
+            child_env = self._command_env(
+                args.get("env", {}),
+                allow_sensitive_extra=(
+                    "env.sensitive" in set(args.get("_approved_capabilities", []))
+                ),
+                inherited_sensitive_names=args.get("_leased_sensitive_env_names", []),
+                sandboxed=False,
+            )
+            child_env.update(
+                {
+                    "HOME": "/tmp/devmcp-home",
+                    "TMPDIR": "/tmp",
+                    "TMP": "/tmp",
+                    "TEMP": "/tmp",
+                    "XDG_CACHE_HOME": "/tmp/devmcp-cache",
+                    "XDG_CONFIG_HOME": "/tmp/devmcp-config",
+                    "XDG_STATE_HOME": "/tmp/devmcp-state",
+                    "PWD": str(workdir),
+                    "OLDPWD": str(workdir),
+                }
+            )
+            network_targets = list(args.get("network_targets", []))
+            network_capability = args.get("_network_capability")
+            required_enforcement = (
+                "filesystem_isolation",
+                "resource_limits",
+                "network_policy",
+                "private_tmp",
+                "no_host_container_socket",
             )
 
-        internal_args = dict(args)
-        if approval_id:
-            granted = set(
-                approval_engine.consume(
-                    approval_id,
-                    cmd,
-                    operation_cwd,
-                    env=args.get("env", {}),
-                    task_id=task_id,
-                    network=network_required,
-                    sandbox=True,
-                    sandbox_id=self.server_instance_id,
+            with tempfile.TemporaryDirectory(
+                prefix="container-run-", dir=self.runtime_dir
+            ) as temp_root:
+                temp_dir = Path(temp_root)
+                manifest_path = temp_dir / "manifest.json"
+                result_path = temp_dir / "result.json"
+                manifest = {
+                    "protocol": "devmcp-ephemeral-container-v1",
+                    "action": (
+                        {"kind": "argv", "argv": [str(item) for item in action]}
+                        if isinstance(action, list)
+                        else {"kind": "shell", "command": action}
+                    ),
+                    "cwd": str(workdir),
+                    "env": child_env,
+                    "mounts": mounts,
+                    "network": {
+                        "enabled": isinstance(network_capability, str),
+                        "targets": network_targets,
+                    },
+                    "limits": limits,
+                    "filesystem": {
+                        "disposable_root": True,
+                        "private_tmp": True,
+                        "no_host_container_socket": True,
+                    },
+                    "required_enforcement": list(required_enforcement),
+                    "result_path": str(result_path),
+                    "max_output_bytes": max_output_bytes,
+                }
+                manifest_path.write_text(
+                    json.dumps(manifest, sort_keys=True), encoding="utf-8"
                 )
-            )
-            internal_args.pop("approval_id", None)
-            internal_args["approval_class"] = "ALLOW"
-            internal_args["_approved_capabilities"] = sorted(granted)
-        else:
-            requested = set(required_caps)
-            if decision == "ASK":
-                requested.add("exec")
-            if requested:
-                return approval_engine.request_approval(
-                    action=cmd,
-                    cwd=operation_cwd,
-                    reason="Permission required for the requested command capabilities.",
-                    risk="high" if "destructive_command" in requested else "medium",
-                    network="network" in requested,
-                    env=args.get("env", {}),
-                    task_id=task_id,
-                    sandbox=True,
-                    sandbox_id=self.server_instance_id,
-                    capabilities=sorted(requested),
+                os.chmod(manifest_path, 0o600)
+                runner_env = {
+                    "PATH": os.environ.get("PATH", os.defpath),
+                    "HOME": str(self.runtime_dir),
+                    "TMPDIR": str(temp_dir),
+                    "TMP": str(temp_dir),
+                    "TEMP": str(temp_dir),
+                    "GIT_TERMINAL_PROMPT": "0",
+                    "GIT_ASKPASS": "/bin/false" if os.name != "nt" else "",
+                }
+                runner_result = run_bounded_process(
+                    [runner, "--manifest", str(manifest_path)],
+                    cwd=str(temp_dir),
+                    env=runner_env,
+                    timeout=max(1.0, timeout_ms / 1000.0 + 10.0),
+                    cancel_event=getattr(self.request_context, "cancel_event", None),
                 )
-            self._check_command_policy(cmd, args)
-        internal_args["approval_class"] = "ALLOW" if decision == "ALLOW" else decision
-        internal_args["_resolved_workdir"] = workdir.path
-        return self._execute_command_legacy(internal_args)
+                if runner_result.returncode != 0:
+                    raise ToolFailure(
+                        "EXECUTOR_FAILED",
+                        "Operator-configured ephemeral container runner failed.",
+                        category="runtime",
+                        details={
+                            "runner_exit_code": runner_result.returncode,
+                            "runner_stderr": str(
+                                redact_for_trace(runner_result.stderr[-16384:])
+                            ),
+                        },
+                    )
+                try:
+                    raw_result = json.loads(result_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError) as exc:
+                    raise ToolFailure(
+                        "EXECUTOR_PROTOCOL_ERROR",
+                        "Ephemeral container runner did not produce a valid result document.",
+                        category="runtime",
+                    ) from exc
+                if not isinstance(raw_result, dict):
+                    raise ToolFailure(
+                        "EXECUTOR_PROTOCOL_ERROR",
+                        "Ephemeral container result must be an object.",
+                        category="runtime",
+                    )
+                enforcement = raw_result.get("enforcement")
+                if not isinstance(enforcement, dict) or any(
+                    enforcement.get(name) is not True for name in required_enforcement
+                ):
+                    missing = [
+                        name
+                        for name in required_enforcement
+                        if not isinstance(enforcement, dict)
+                        or enforcement.get(name) is not True
+                    ]
+                    raise ToolFailure(
+                        "EXECUTOR_PROTOCOL_ERROR",
+                        "Ephemeral container runner did not attest required isolation enforcement.",
+                        category="security",
+                        details={"missing_or_false": missing},
+                    )
+                status = str(raw_result.get("status", ""))
+                exit_code = raw_result.get("exit_code")
+                if status not in {"success", "failed", "timeout", "terminated"}:
+                    raise ToolFailure(
+                        "EXECUTOR_PROTOCOL_ERROR",
+                        "Ephemeral container runner returned an invalid status.",
+                        category="runtime",
+                        details={"status": status},
+                    )
+                if exit_code is not None and (
+                    isinstance(exit_code, bool) or not isinstance(exit_code, int)
+                ):
+                    raise ToolFailure(
+                        "EXECUTOR_PROTOCOL_ERROR",
+                        "Ephemeral container exit_code must be an integer or null.",
+                        category="runtime",
+                    )
+                if status == "success" and exit_code != 0:
+                    raise ToolFailure(
+                        "EXECUTOR_PROTOCOL_ERROR",
+                        "Ephemeral container success status requires exit_code=0.",
+                        category="runtime",
+                    )
+                command_success = status == "success" and exit_code == 0
+                stdout_bytes = str(raw_result.get("stdout", "")).encode("utf-8")
+                stderr_bytes = str(raw_result.get("stderr", "")).encode("utf-8")
+                payload: dict[str, Any] = {
+                    "status": status,
+                    "exit_code": exit_code,
+                    "signal": raw_result.get("signal"),
+                    "stdout": stdout_bytes[-max_output_bytes:].decode(
+                        "utf-8", errors="replace"
+                    ),
+                    "stderr": stderr_bytes[-max_output_bytes:].decode(
+                        "utf-8", errors="replace"
+                    ),
+                    "command_success": command_success,
+                    "executor_backend": "ephemeral_container",
+                    "enforcement": {
+                        name: True for name in required_enforcement
+                    },
+                }
+
+                if transaction_mode == "apply":
+                    staged_all: list[StagedFile] = []
+                    changes_all: list[dict[str, Any]] = []
+                    diffs: list[str] = []
+                    inspection_error: ToolFailure | None = None
+                    try:
+                        for root, transaction in transactions:
+                            staged, changes, diff = transaction.prepare()
+                            staged_all.extend(staged)
+                            for change in changes:
+                                changes_all.append(
+                                    {
+                                        "path": (
+                                            change.path
+                                            if root == self.workspace.root
+                                            else str(root / change.path)
+                                        ),
+                                        "operation": change.operation,
+                                        "bytes": change.bytes,
+                                        "mode": change.mode,
+                                    }
+                                )
+                            if diff:
+                                diffs.append(diff)
+                    except ToolFailure as exc:
+                        if command_success:
+                            raise
+                        inspection_error = exc
+                    if command_success:
+                        self._authorize_transaction_changes(changes_all)
+                        try:
+                            AtomicPatchCommitter().commit(staged_all)
+                        except ToolFailure as exc:
+                            if exc.code in {"PATCH_CONFLICT", "PATCH_ROLLBACK_FAILED"}:
+                                raise ToolFailure(
+                                    "TRANSACTION_CONFLICT",
+                                    "Container output conflicted with current workspace state; no user WIP was overwritten.",
+                                    category="conflict",
+                                    retryable=True,
+                                    details={"cause_code": exc.code, "cause": exc.message},
+                                ) from exc
+                            raise
+                        transaction_status = "applied" if staged_all else "unchanged"
+                    elif inspection_error is not None:
+                        transaction_status = "discarded_uninspectable"
+                    else:
+                        transaction_status = "discarded_on_command_failure"
+                    payload["transaction"] = {
+                        "mode": "apply",
+                        "status": transaction_status,
+                        "changed_count": len(changes_all),
+                        "changed_files": changes_all,
+                        "diff": "".join(diffs)[: 512 * 1024],
+                        "preexisting_dirty_preserved": True,
+                    }
+                    if inspection_error is not None:
+                        payload["transaction"]["inspection_error"] = {
+                            "code": inspection_error.code,
+                            "message": inspection_error.message,
+                        }
+                return payload
+        finally:
+            self._cleanup_additional_execution_sandboxes(additional)
+            primary.cleanup()
 
     def _execute_task_argv(
         self, argv: list[str], args: dict[str, Any], capabilities: set[str]
@@ -3998,12 +5152,20 @@ class Runtime:
 
     def _execute_command_legacy(self, args: dict[str, Any]) -> dict[str, Any]:
         self._prune_sessions()
+        transaction_mode = str(args.get("transaction_mode", "discard")).strip().lower()
+        if transaction_mode not in {"discard", "apply"}:
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                "transaction_mode must be discard or apply.",
+                category="validation",
+            )
+        transaction_apply = transaction_mode == "apply"
         cmd_raw = args.get("cmd", "")
         cmd: str | list[str]
         cmd_str: str
         if isinstance(cmd_raw, list):
             cmd = [str(x) for x in cmd_raw]
-            cmd_str = " ".join(cmd)
+            cmd_str = shlex.join(cmd)
         else:
             cmd = str(cmd_raw)
             cmd_str = cmd
@@ -4013,53 +5175,9 @@ class Runtime:
                 "INVALID_ARGUMENT", "cmd is required.", category="validation"
             )
 
-        approval_id = args.get("approval_id")
-        from .approval import ApprovalEngine
-
-        approval_engine = ApprovalEngine()
         approved_caps: list[str] = [
             str(item) for item in args.get("_approved_capabilities", [])
         ]
-        network_required = bool(args.get("network_required", False))
-
-        if approval_id:
-            approved_caps = approval_engine.consume(
-                approval_id,
-                cmd_raw,
-                str(args.get("cwd", ".")),
-                env=args.get("env"),
-                task_id=str(args.get("task_id", "")),
-                network=network_required,
-                sandbox=True,
-            )
-        else:
-            decision = args.get("approval_class") or approval_engine.evaluate_command(
-                cmd_str
-            )
-            if decision == "DENY":
-                raise ToolFailure(
-                    "ACCESS_DENIED",
-                    "Command is unconditionally denied.",
-                    category="security",
-                )
-            elif decision == "ASK":
-                req_caps = (
-                    ["destructive_command"]
-                    if "rm " in cmd_str or "reset" in cmd_str
-                    else ["exec"]
-                )
-                if network_required:
-                    req_caps.append("network")
-                return approval_engine.request_approval(
-                    action=cmd_raw,
-                    cwd=str(args.get("cwd", ".")),
-                    reason="Permission required",
-                    risk="high" if "destructive" in req_caps else "medium",
-                    network=network_required,
-                    env=args.get("env", {}),
-                    task_id=str(args.get("task_id", "")),
-                    capabilities=req_caps,
-                )
 
         resolved_workdir = args.get("_resolved_workdir")
         if isinstance(resolved_workdir, Path):
@@ -4095,6 +5213,29 @@ class Runtime:
         max_output_bytes = int(args.get("max_output_bytes", 65536))
         tty = bool(args.get("tty", False))
         stdin_text = str(args.get("stdin", ""))
+        if transaction_apply:
+            if tty:
+                raise ToolFailure(
+                    "CAPABILITY_UNAVAILABLE",
+                    "Transactional apply cannot run with tty=true.",
+                    category="environment",
+                )
+            if yield_ms < timeout_ms:
+                raise ToolFailure(
+                    "INVALID_ARGUMENT",
+                    "transaction_mode=apply requires yield_time_ms >= timeout_ms so the snapshot can be finalized in the same tool call.",
+                    category="validation",
+                )
+            with self.sessions_lock:
+                other_running = any(
+                    session.process.poll() is None for session in self.sessions.values()
+                )
+                if other_running or self.starting_sessions:
+                    raise ToolFailure(
+                        "INVALID_STATE",
+                        "Transactional apply cannot start while another command is running in this Runtime.",
+                        category="runtime",
+                    )
         approved_capabilities = set(approved_caps)
         start = time.time()
         deadline = start + (timeout_ms / 1000.0)
@@ -4128,12 +5269,17 @@ class Runtime:
         bwrap_available = (
             self.sandbox_backend.name == "bwrap" and shutil.which("bwrap") is not None
         )
+        inherited_sandbox = (
+            self.sandbox_backend.name == "inherited"
+            and self.sandbox_backend.available
+            and self.sandbox_backend.secure
+        )
         if self.sandbox_backend.name == "unsafe":
             bwrap_available = False
         if (
-            self.sandbox_backend.name != "unsafe"
+            self.sandbox_backend.name not in {"unsafe", "inherited"}
             and not bwrap_available
-            and not (os.name == "nt" and self.permission_mode == "trusted")
+            and not self._legacy_windows_process_fallback
         ):
             raise ToolFailure(
                 "SANDBOX_UNAVAILABLE",
@@ -4141,8 +5287,25 @@ class Runtime:
                 category="security",
             )
 
+        if inherited_sandbox and (
+            len(self.readable_roots()) > 1 or len(self.writable_roots()) > 1
+        ):
+            raise ToolFailure(
+                "CAPABILITY_UNAVAILABLE",
+                "Additional filesystem roots require a backend that can mount their filtered snapshots; inherited sandbox mode cannot add mounts to its parent namespace.",
+                category="environment",
+                details={"backend": "inherited"},
+            )
+
         sandbox = self._acquire_execution_sandbox()
+        additional_sandboxes: list[tuple[Path, Any, bool]] = []
+
+        def release_execution_resources() -> None:
+            self._cleanup_additional_execution_sandboxes(additional_sandboxes)
+            self._release_execution_sandbox(sandbox)
+
         try:
+            additional_sandboxes = self._additional_execution_sandboxes()
             sandbox_workdir = sandbox.translate_path_for_exec(workdir.path)
             if self.sandbox_backend.name == "unsafe" or (
                 not bwrap_available and os.name == "nt"
@@ -4151,26 +5314,105 @@ class Runtime:
                 # the caller-owned checkout. The snapshot lease is still created
                 # so ownership/cleanup semantics stay identical across backends.
                 sandbox_workdir = workdir.path
+            elif inherited_sandbox:
+                # The parent DevMCP namespace is already the host-security
+                # boundary. Avoid nested bwrap/Landlock and execute inside the
+                # parent-owned workspace.
+                sandbox_workdir = workdir.path
+            elif bwrap_available:
+                # The filtered snapshot is mounted at the canonical workspace
+                # path so absolute compiler/LSP paths remain usable.
+                sandbox_workdir = workdir.path
         except BaseException:
-            self._release_execution_sandbox(sandbox)
+            release_execution_resources()
             raise
+
+        transactions: list[tuple[Path, ExecutionTransaction]] = []
+        transaction_git_head: str | None = None
+        transaction_git_branch: str | None = None
+        transaction_git_dirty = False
+        if transaction_apply:
+            try:
+                transactions.append(
+                    (
+                        self.workspace.root,
+                        ExecutionTransaction(
+                            authoritative_root=self.workspace.root,
+                            snapshot_root=sandbox.sandbox_dir,
+                            validate_relative_path=self._validate_transaction_relative_path,
+                        ),
+                    )
+                )
+                for root, extra_sandbox, writable in additional_sandboxes:
+                    if writable:
+                        transactions.append(
+                            (
+                                root,
+                                ExecutionTransaction(
+                                    authoritative_root=root,
+                                    snapshot_root=extra_sandbox.sandbox_dir,
+                                    validate_relative_path=self._validate_transaction_relative_path,
+                                ),
+                            )
+                        )
+                if self._is_git_checkout(self.workspace.root):
+                    transaction_git_head = self._git_rev_parse(
+                        self.workspace.root, "HEAD"
+                    )
+                    branch_result = subprocess.run(
+                        [
+                            self.workspace.git_path or "git",
+                            "-C",
+                            str(self.workspace.root),
+                            "symbolic-ref",
+                            "--quiet",
+                            "--short",
+                            "HEAD",
+                        ],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.DEVNULL,
+                        text=True,
+                        check=False,
+                    )
+                    transaction_git_branch = (
+                        branch_result.stdout.strip()
+                        if branch_result.returncode == 0
+                        else None
+                    )
+                    status = subprocess.run(
+                        [
+                            self.workspace.git_path or "git",
+                            "-C",
+                            str(self.workspace.root),
+                            "status",
+                            "--porcelain=v1",
+                        ],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.DEVNULL,
+                        text=True,
+                        check=False,
+                    )
+                    transaction_git_dirty = bool(status.stdout.strip())
+            except BaseException:
+                release_execution_resources()
+                raise
 
         try:
             env = self._command_env(
                 args.get("env", {}),
                 sandboxed=True,
-                allow_sensitive=(
+                allow_sensitive_extra=(
                     "sensitive_env" in approved_capabilities
                     or "env.sensitive" in approved_capabilities
-                    or (
-                        self._profile_managed
-                        and self._policy_decision_for_capabilities({"env.sensitive"})
-                        == "auto"
-                    )
+                ),
+                inherited_sensitive_names=args.get(
+                    "_leased_sensitive_env_names", []
                 ),
             )
+            env["PWD"] = str(sandbox_workdir)
+            env["OLDPWD"] = str(sandbox_workdir)
         except BaseException:
-            self._release_execution_sandbox(sandbox)
+            release_execution_resources()
             raise
 
         try:
@@ -4185,10 +5427,19 @@ class Runtime:
                     and self._policy_decision_for_capabilities({network_capability})
                     == "auto"
                 )
-                or (not self._profile_managed and self.permission_mode == "trusted")
             )
+            root_mounts = [
+                (sandbox.sandbox_dir, self.workspace.root, True),
+                *[
+                    (extra_sandbox.sandbox_dir, root, writable)
+                    for root, extra_sandbox, writable in additional_sandboxes
+                ],
+            ]
             bwrap_args = (
-                sandbox.get_bwrap_args(allow_network=allow_network)
+                sandbox.get_bwrap_args(
+                    allow_network=allow_network,
+                    root_mounts=root_mounts,
+                )
                 if bwrap_available
                 else []
             )
@@ -4210,17 +5461,31 @@ class Runtime:
                 actual_cmd = cmd
                 popen_shell = False
         except BaseException:
-            self._release_execution_sandbox(sandbox)
+            release_execution_resources()
             raise
 
         # We still initialize landlock as defense in depth if bwrap is missing somehow,
         # but bwrap provides the primary namespace isolation.
         if self.landlock_enabled():
             try:
-                write_roots = [sandbox.sandbox_dir, self.runtime_dir]
+                write_roots = [
+                    sandbox.sandbox_dir,
+                    self.runtime_dir,
+                    *[
+                        extra_sandbox.sandbox_dir
+                        for _, extra_sandbox, writable in additional_sandboxes
+                        if writable
+                    ],
+                ]
                 landlock_fd = open_landlock_ruleset(
                     sandbox.sandbox_dir,
-                    guard_allow_roots(),
+                    [
+                        *guard_allow_roots(),
+                        *[
+                            extra_sandbox.sandbox_dir
+                            for _, extra_sandbox, _ in additional_sandboxes
+                        ],
+                    ],
                     write_roots=write_roots,
                 )
                 actual_cmd = landlock_exec_argv(landlock_fd, actual_cmd)
@@ -4233,7 +5498,7 @@ class Runtime:
                         except OSError:
                             pass
                         landlock_fd = None
-                    self._release_execution_sandbox(sandbox)
+                    release_execution_resources()
                     raise
                 landlock_warning = landlock_unavailable_warning(exc)
             except BaseException:
@@ -4243,7 +5508,7 @@ class Runtime:
                     except OSError:
                         pass
                     landlock_fd = None
-                self._release_execution_sandbox(sandbox)
+                release_execution_resources()
                 raise
         popen_cmd = bwrap_args + actual_cmd
         self._prune_sessions()
@@ -4255,7 +5520,7 @@ class Runtime:
                     except OSError:
                         pass
                     landlock_fd = None
-                self._release_execution_sandbox(sandbox)
+                release_execution_resources()
                 raise ToolFailure(
                     "SESSION_CLOSED", "Runtime is closed.", category="runtime"
                 )
@@ -4266,7 +5531,7 @@ class Runtime:
                     except OSError:
                         pass
                     landlock_fd = None
-                self._release_execution_sandbox(sandbox)
+                release_execution_resources()
                 raise ToolFailure(
                     "SESSION_LIMIT_REACHED",
                     "Too many commands are already running or starting.",
@@ -4295,7 +5560,7 @@ class Runtime:
                 timeout_at=deadline,
                 warnings=[landlock_warning] if landlock_warning else None,
                 pty_master_fd=pty_master_fd,
-                resource_cleanup=lambda: self._release_execution_sandbox(sandbox),
+                resource_cleanup=release_execution_resources,
             )
             with self.sessions_lock:
                 self.starting_sessions -= 1
@@ -4321,9 +5586,7 @@ class Runtime:
                         timeout_at=deadline,
                         warnings=[landlock_warning] if landlock_warning else [],
                         pty_master_fd=pty_master_fd,
-                        resource_cleanup=lambda: self._release_execution_sandbox(
-                            sandbox
-                        ),
+                        resource_cleanup=release_execution_resources,
                     )
                 try:
                     exited = self._terminate_session(session)
@@ -4334,8 +5597,10 @@ class Runtime:
                     session.release_owned_resources()
                 else:
                     self._schedule_session_reaper(session)
+                if self.shared_job_registry is not None:
+                    self.shared_job_registry.remove(session.session_id)
             elif not registered:
-                self._release_execution_sandbox(sandbox)
+                release_execution_resources()
             raise
         finally:
             if landlock_fd is not None:
@@ -4370,7 +5635,147 @@ class Runtime:
             # terminated/timeout) so exec, polling, and kill paths agree.
             payload = session.snapshot_since_cursor(max_output_bytes)
             payload["elapsed_ms"] = int((time.time() - start) * 1000)
+            payload["executor_backend"] = str(
+                args.get("_selected_executor", self.sandbox_backend.name)
+            )
             self._add_exec_diagnostics(payload)
+            if transaction_apply and payload.get("status") != "running":
+                command_succeeded = (
+                    payload.get("status") == "exited" and payload.get("exit_code") == 0
+                )
+                staged_all: list[StagedFile] = []
+                transaction_changes: list[dict[str, Any]] = []
+                transaction_diff_parts: list[str] = []
+                try:
+                    inspection_error: ToolFailure | None = None
+                    try:
+                        for root, transaction in transactions:
+                            staged, changes, diff = transaction.prepare()
+                            staged_all.extend(staged)
+                            for change in changes:
+                                display = (
+                                    change.path
+                                    if root == self.workspace.root
+                                    else str(root.joinpath(*change.path.split("/")))
+                                )
+                                transaction_changes.append(
+                                    {
+                                        "path": display,
+                                        "operation": change.operation,
+                                        "bytes": change.bytes,
+                                        "mode": change.mode,
+                                    }
+                                )
+                            if diff:
+                                prefix = (
+                                    ""
+                                    if root == self.workspace.root
+                                    else f"# root: {root}\n"
+                                )
+                                transaction_diff_parts.append(prefix + diff)
+                    except ToolFailure as exc:
+                        if command_succeeded:
+                            raise
+                        inspection_error = exc
+
+                    if command_succeeded:
+                        if transaction_git_head is not None:
+                            current_head = self._git_rev_parse(
+                                self.workspace.root, "HEAD"
+                            )
+                            if current_head != transaction_git_head:
+                                raise ToolFailure(
+                                    "TRANSACTION_CONFLICT",
+                                    "Git HEAD changed while the transactional command was running; output was not applied.",
+                                    category="conflict",
+                                    retryable=True,
+                                    details={
+                                        "before_head": transaction_git_head,
+                                        "current_head": current_head,
+                                    },
+                                )
+                            current_branch_result = subprocess.run(
+                                [
+                                    self.workspace.git_path or "git",
+                                    "-C",
+                                    str(self.workspace.root),
+                                    "symbolic-ref",
+                                    "--quiet",
+                                    "--short",
+                                    "HEAD",
+                                ],
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL,
+                                text=True,
+                                check=False,
+                            )
+                            current_branch = (
+                                current_branch_result.stdout.strip()
+                                if current_branch_result.returncode == 0
+                                else None
+                            )
+                            if current_branch != transaction_git_branch:
+                                raise ToolFailure(
+                                    "TRANSACTION_CONFLICT",
+                                    "Git branch changed while the transactional command was running; output was not applied.",
+                                    category="conflict",
+                                    retryable=True,
+                                    details={
+                                        "before_branch": transaction_git_branch,
+                                        "current_branch": current_branch,
+                                    },
+                                )
+                        self._authorize_transaction_changes(transaction_changes)
+                        try:
+                            AtomicPatchCommitter().commit(staged_all)
+                        except ToolFailure as exc:
+                            if exc.code in {"PATCH_CONFLICT", "PATCH_ROLLBACK_FAILED"}:
+                                raise ToolFailure(
+                                    "TRANSACTION_CONFLICT",
+                                    "Transactional output could not be applied without risking concurrent or pre-existing workspace changes.",
+                                    category="conflict",
+                                    retryable=exc.retryable,
+                                    details={
+                                        "cause_code": exc.code,
+                                        "cause": exc.message,
+                                        "cause_details": exc.details,
+                                    },
+                                ) from exc
+                            raise
+                        transaction_status = "applied" if staged_all else "unchanged"
+                    elif inspection_error is not None:
+                        transaction_status = "discarded_uninspectable"
+                    else:
+                        transaction_status = "discarded_on_command_failure"
+
+                    combined_diff = "".join(transaction_diff_parts)
+                    if len(combined_diff.encode("utf-8")) > 512 * 1024:
+                        combined_diff = (
+                            combined_diff.encode("utf-8")[: 512 * 1024]
+                            .decode("utf-8", errors="ignore")
+                            + "\n... combined transaction diff truncated ...\n"
+                        )
+                    payload["transaction"] = {
+                        "mode": "apply",
+                        "status": transaction_status,
+                        "changed_count": len(transaction_changes),
+                        "changed_files": transaction_changes,
+                        "diff": combined_diff,
+                        "git_head_before": transaction_git_head,
+                        "git_branch_before": transaction_git_branch,
+                        "git_dirty_before": transaction_git_dirty,
+                        "preexisting_dirty_preserved": True,
+                    }
+                    if inspection_error is not None:
+                        payload["transaction"]["inspection_error"] = {
+                            "code": inspection_error.code,
+                            "message": inspection_error.message,
+                            "details": inspection_error.details,
+                        }
+                except ToolFailure:
+                    self._complete_session(session)
+                    session.release_owned_resources()
+                    raise
             return self._format_session_output(session, payload, args)
 
         while True:
@@ -4401,82 +5806,11 @@ class Runtime:
         *,
         granted_capabilities: set[str] | None = None,
     ) -> None:
-        granted = granted_capabilities or set()
-        if self._profile_managed:
-            # Profile decisions and approvals were resolved before command
-            # execution. Keep the non-negotiable path validation here, but do
-            # not reapply the retired safe/trusted/dangerous gates.
-            self._check_command_paths(cmd)
-            return
-        if self.dangerously_skip_all_permissions:
-            return
+        # All user-facing allow/ask/deny decisions are resolved once by the
+        # effective capability matrix before execution. Low-level execution
+        # retains only the non-negotiable path/security floor.
+        del args, granted_capabilities
         self._check_command_paths(cmd)
-        env = args.get("env", {})
-        if (
-            "sensitive_env" not in granted
-            and isinstance(env, dict)
-            and any(
-                is_filtered_env_var(str(key), str(value)) for key, value in env.items()
-            )
-        ):
-            raise ToolFailure(
-                "PERMISSION_REQUIRED",
-                "Sensitive or loader/startup environment variables require explicit permission.",
-                category="permission",
-                details={
-                    "permission": "sensitive_env",
-                    "env_keys": sorted(str(key) for key in env),
-                },
-            )
-        if "inline_script" not in granted and not self.capabilities.inline_script:
-            inline_script = inline_script_command(cmd)
-            if inline_script is not None:
-                raise ToolFailure(
-                    "PERMISSION_REQUIRED",
-                    "Inline interpreter or shell code requires explicit permission because network and filesystem effects cannot be verified statically.",
-                    category="permission",
-                    details={"permission": INLINE_SCRIPT_PERMISSION, **inline_script},
-                )
-        compact = " ".join(cmd.split()).lower()
-        if (
-            "shell_expansion" not in granted
-            and not self.capabilities.shell_expansion
-            and SHELL_EXPANSION_RE.search(cmd)
-        ):
-            raise ToolFailure(
-                "PERMISSION_REQUIRED",
-                "Shell command substitution and parameter expansion require explicit permission.",
-                category="permission",
-                details={"permission": "shell_expansion", "command": compact},
-            )
-        if "destructive_command" not in granted and re.search(
-            r"(^|[;&|]\s*)rm\s+(-[^\s]*r[^\s]*f|-?[^\s]*f[^\s]*r)\s+/", compact
-        ):
-            raise ToolFailure(
-                "PERMISSION_REQUIRED",
-                "Destructive commands are blocked without explicit permission.",
-                category="permission",
-                details={"permission": "destructive_command", "command": compact},
-            )
-        if "destructive_command" not in granted and DESTRUCTIVE_RE.search(cmd):
-            raise ToolFailure(
-                "PERMISSION_REQUIRED",
-                "Destructive commands are blocked without explicit permission.",
-                category="permission",
-                details={"permission": "destructive_command", "command": compact},
-            )
-        if (
-            "network" not in granted
-            and not self.allow_network
-            and NETWORK_RE.search(cmd)
-            and not is_literal_network_reference_command(cmd)
-        ):
-            raise ToolFailure(
-                "PERMISSION_REQUIRED",
-                "Network access is denied by default.",
-                category="permission",
-                details={"permission": "network", "command": compact},
-            )
 
     def _add_exec_diagnostics(self, payload: dict[str, Any]) -> None:
         diagnostics = exec_output_diagnostics(payload)
@@ -4514,15 +5848,19 @@ class Runtime:
             return
         if self.is_allowed_command_tmp_path(normalized):
             return
-        if (
-            normalized.startswith("/")
-            or normalized.startswith("~")
-            or re.match(r"^[A-Za-z]:/", normalized)
-            or any(part == ".." for part in PurePosixPath(normalized).parts)
-        ):
-            raise escape_failure()
         try:
-            self.workspace.resolve_existing(normalized)
+            expanded = Path(normalized).expanduser()
+            system_candidate = expanded.resolve(strict=False)
+        except OSError:
+            system_candidate = None
+        if system_candidate is not None:
+            for system_root in readonly_system_paths(allow_network=True):
+                if system_candidate == system_root or (
+                    system_root.is_dir() and is_relative_to(system_candidate, system_root)
+                ):
+                    return
+        try:
+            self.resolve_existing(normalized)
         except OSError as exc:
             raise ToolFailure(
                 "INVALID_ARGUMENT",
@@ -4537,7 +5875,7 @@ class Runtime:
         except ToolFailure as exc:
             if exc.code == "NOT_FOUND":
                 try:
-                    self.workspace.resolve_for_write(normalized)
+                    self.resolve_for_write(normalized)
                 except ToolFailure as write_exc:
                     if write_exc.code == "NOT_FOUND":
                         return
@@ -4555,6 +5893,11 @@ class Runtime:
                 "SYMLINK_ESCAPE",
             }:
                 raise escape_failure() from exc
+            # Sensitive/protected path failures are part of the immutable host
+            # security floor.  Do not accidentally turn ACCESS_DENIED (or any
+            # future validator failure) into permission to use the path merely
+            # because it was not one of the workspace-escape aliases above.
+            raise
 
     @staticmethod
     def _contains_always_denied_command(cmd: str) -> bool:
@@ -4577,14 +5920,9 @@ class Runtime:
             "sudo",
             "su",
             "doas",
-            "mount",
-            "umount",
             "docker",
             "podman",
-            "bwrap",
-            "unshare",
             "nsenter",
-            "chroot",
         }
         return any(
             PurePosixPath(token.replace("\\", "/")).name in denied for token in tokens
@@ -4626,21 +5964,20 @@ class Runtime:
         self,
         extra: Any,
         *,
-        allow_sensitive: bool = False,
+        allow_sensitive_extra: bool = False,
+        inherited_sensitive_names: Iterable[str] = (),
         sandboxed: bool = False,
     ) -> dict[str, str]:
         env = self._base_command_env()
-        if not self.dangerously_skip_all_permissions and not allow_sensitive:
-            env = {
-                key: value
-                for key, value in env.items()
-                if not is_filtered_env_var(key, value)
-            }
-            env = {
-                key: value
-                for key, value in env.items()
-                if key not in ECOSYSTEM_CACHE_ENV_NAMES
-            }
+        # Host credentials are never inherited wholesale, even under the
+        # autonomous profile. Exact-name capability leases may selectively add
+        # values back below; unrelated secrets stay absent.
+        env = {
+            key: value
+            for key, value in env.items()
+            if not is_filtered_env_var(key, value)
+            and key not in ECOSYSTEM_CACHE_ENV_NAMES
+        }
         if self.shell_env_policy.exclude:
             env = {
                 key: value
@@ -4654,16 +5991,38 @@ class Runtime:
                 if env_pattern_matches(key, self.shell_env_policy.include_only)
             }
         env.update(
-            {str(key): str(value) for key, value in self.shell_env_policy.set.items()}
+            {
+                str(key): str(value)
+                for key, value in self.shell_env_policy.set.items()
+                if str(key) not in RESERVED_EXEC_ENV_NAMES
+            }
         )
+        for raw_name in inherited_sensitive_names:
+            name = str(raw_name)
+            if name in RESERVED_EXEC_ENV_NAMES or name not in os.environ:
+                continue
+            if self.shell_env_policy.exclude and env_pattern_matches(
+                name, self.shell_env_policy.exclude
+            ):
+                continue
+            if self.shell_env_policy.include_only and not env_pattern_matches(
+                name, self.shell_env_policy.include_only
+            ):
+                continue
+            env[name] = os.environ[name]
         self._ensure_runtime_dirs()
         if isinstance(extra, dict):
             for key, value in extra.items():
                 key_text = str(key)
                 value_text = str(value)
+                if key_text in RESERVED_EXEC_ENV_NAMES:
+                    raise ToolFailure(
+                        "ACCESS_DENIED",
+                        f"Environment variable {key_text} is reserved for runtime sandbox attestation.",
+                        category="security",
+                    )
                 if (
-                    not self.dangerously_skip_all_permissions
-                    and not allow_sensitive
+                    not allow_sensitive_extra
                     and is_filtered_env_var(key_text, value_text)
                 ):
                     continue
@@ -4675,12 +6034,40 @@ class Runtime:
             # sandbox bind, so Landlock can authorize them without exposing
             # the host /tmp hierarchy.
             assert self.sandbox is not None
-            sandbox_tmp = str(self.sandbox.temp_dir)
+            original_root = self.workspace.root.resolve()
+            sandbox_root = self.sandbox.sandbox_dir.resolve()
+
+            def translate_project_env_path(raw: str) -> str:
+                try:
+                    candidate = Path(raw).expanduser().resolve()
+                    relative = candidate.relative_to(original_root)
+                except (OSError, ValueError):
+                    return raw
+                return str(sandbox_root / relative)
+
+            if "PATH" in env:
+                env["PATH"] = os.pathsep.join(
+                    translate_project_env_path(part)
+                    for part in env["PATH"].split(os.pathsep)
+                    if part
+                )
+            if "VIRTUAL_ENV" in env:
+                env["VIRTUAL_ENV"] = translate_project_env_path(env["VIRTUAL_ENV"])
             env["HOME"] = str(self.sandbox.home_dir)
-            env["TMPDIR"] = sandbox_tmp
-            env["TMP"] = sandbox_tmp
-            env["TEMP"] = sandbox_tmp
+            env["TMPDIR"] = "/tmp"
+            env["TMP"] = "/tmp"
+            env["TEMP"] = "/tmp"
             env["XDG_CACHE_HOME"] = str(self.sandbox.cache_dir)
+        elif sandboxed and self.sandbox_backend.name == "inherited":
+            # The parent DevMCP sandbox already owns the project environment.
+            # Keep its project PATH/VIRTUAL_ENV intact; only give this child a
+            # private runtime home/cache and the parent's private /tmp.
+            env["HOME"] = str(self.command_home_dir())
+            env["TMPDIR"] = "/tmp"
+            env["TMP"] = "/tmp"
+            env["TEMP"] = "/tmp"
+            env["XDG_CACHE_HOME"] = str(self.cache_dir)
+            env["DEVMCP_INHERITED_SANDBOX"] = "1"
         else:
             tmp_dir = self.command_tmp_dir()
             env["HOME"] = str(self.command_home_dir())
@@ -4803,14 +6190,35 @@ class Runtime:
         pty_master_fd: int | None = None,
         resource_cleanup: Callable[[], None] | None = None,
     ) -> ExecSession:
-        return ExecSession(
-            session_id=secrets.token_urlsafe(18),
+        context_id = self._active_context_id()
+        session_id = (
+            self.shared_job_registry.new_handle()
+            if self.shared_job_registry is not None and context_id is not None
+            else secrets.token_urlsafe(18)
+        )
+        session = ExecSession(
+            session_id=session_id,
             process=process,
             timeout_at=timeout_at,
             warnings=warnings or [],
             pty_master_fd=pty_master_fd,
             resource_cleanup=resource_cleanup,
         )
+        if self.shared_job_registry is not None and context_id is not None:
+            try:
+                self.shared_job_registry.register(
+                    session,
+                    owner_context_id=context_id,
+                    owner_runtime=self,
+                )
+            except RuntimeError as exc:
+                raise ToolFailure(
+                    "SESSION_LIMIT_REACHED",
+                    "Shared job registry cannot accept another job.",
+                    category="runtime",
+                    retryable=True,
+                ) from exc
+        return session
 
     def _remember_output_session(self, session: ExecSession) -> None:
         session.refresh_status()
@@ -4837,11 +6245,21 @@ class Runtime:
         session.refresh_status()
         if session.process.poll() is None:
             return
+        if self.shared_job_registry is not None and self.shared_job_registry.contains(
+            session.session_id
+        ):
+            with self.sessions_lock:
+                self.sessions.pop(session.session_id, None)
+                self.output_sessions.pop(session.session_id, None)
+            self.shared_job_registry.touch(session.session_id)
+            return
         with self.sessions_lock:
             self.sessions.pop(session.session_id, None)
         self._remember_output_session(session)
 
     def _prune_sessions(self) -> None:
+        if self.shared_job_registry is not None:
+            self.shared_job_registry.prune()
         with self.sessions_lock:
             active = list(self.sessions.values())
         for session in active:
@@ -4859,8 +6277,25 @@ class Runtime:
                 self.output_sessions.pop(session_id, None)
             self._evict_retained_locked()
 
+    def _shared_job_session(self, session_id: str) -> ExecSession | None:
+        registry = self.shared_job_registry
+        context_id = self._active_context_id()
+        if registry is None or context_id is None:
+            return None
+        status, session = registry.lookup(session_id, owner_context_id=context_id)
+        if status == "forbidden":
+            raise ToolFailure(
+                "ACCESS_DENIED",
+                "Job handle belongs to a different logical context.",
+                category="security",
+            )
+        return session if status == "found" else None
+
     def _get_output_session(self, session_id: str) -> ExecSession:
         self._prune_sessions()
+        shared = self._shared_job_session(session_id)
+        if shared is not None:
+            return shared
         with self.sessions_lock:
             session = self.sessions.get(session_id) or self.output_sessions.get(
                 session_id
@@ -4874,17 +6309,33 @@ class Runtime:
     def _format_session_output(
         self, session: ExecSession, payload: dict[str, Any], args: dict[str, Any]
     ) -> dict[str, Any]:
+        raw_status = str(payload.get("status", ""))
+        if raw_status == "exited" and not args.get("_preserve_terminal_status"):
+            payload["status"] = "success" if payload.get("exit_code") == 0 else "failed"
+        status = str(payload.get("status", ""))
+        if status == "running":
+            payload["command_success"] = None
+        elif status == "success":
+            payload["command_success"] = True
+        elif status == "exited":
+            payload["command_success"] = payload.get("exit_code") == 0
+        else:
+            payload["command_success"] = False
         terminal = payload.get("status") != "running"
         if terminal:
             self._complete_session(session)
         if payload.get("status") == "running":
+            next_arguments: dict[str, Any] = {
+                "session_id": session.session_id,
+                "chars": "",
+                "yield_time_ms": 10000,
+            }
+            context_id = self._active_context_id()
+            if context_id is not None:
+                next_arguments["context_id"] = context_id
             payload["next_action"] = {
                 "tool": "write_stdin",
-                "arguments": {
-                    "session_id": session.session_id,
-                    "chars": "",
-                    "yield_time_ms": 10000,
-                },
+                "arguments": next_arguments,
             }
         output_refs = {
             "stdout": f"session:{session.session_id}:stdout",
@@ -4919,6 +6370,9 @@ class Runtime:
             read_actions = [
                 read_output_action(output_refs[stream]) for stream in truncated_streams
             ]
+            if context_id := self._active_context_id():
+                for action in read_actions:
+                    action["arguments"]["context_id"] = context_id
             payload["next_actions"] = read_actions
             if terminal:
                 payload["next_action"] = read_actions[0]
@@ -4977,6 +6431,9 @@ class Runtime:
                     read_output_action(output_refs[stream])
                     for stream in preview_streams
                 ]
+                if context_id := self._active_context_id():
+                    for action in preview_actions:
+                        action["arguments"]["context_id"] = context_id
                 compact["next_actions"] = preview_actions
                 if terminal and preview_actions:
                     compact["next_action"] = preview_actions[0]
@@ -5082,9 +6539,12 @@ class Runtime:
             "warnings": warnings,
         }
         if next_offset is not None:
-            result["next_action"] = read_output_action(
+            next_read = read_output_action(
                 str(result["stream_output_ref"]), offset=next_offset, limit=limit
             )
+            if context_id := self._active_context_id():
+                next_read["arguments"]["context_id"] = context_id
+            result["next_action"] = next_read
         return result
 
     def write_stdin(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -5186,7 +6646,9 @@ class Runtime:
                 "signal_sent": signal_sent,
             }
         )
-        payload = self._format_session_output(session, payload, args)
+        format_args = dict(args)
+        format_args["_preserve_terminal_status"] = True
+        payload = self._format_session_output(session, payload, format_args)
         if status == "terminating":
             warnings = list(payload.get("warnings", []))
             warnings.append(
@@ -5203,6 +6665,8 @@ class Runtime:
         with self.sessions_lock:
             session = self.sessions.get(session_id)
         if session is None:
+            session = self._shared_job_session(session_id)
+        if session is None:
             return
         exited = self._terminate_session(session)
         if exited:
@@ -5210,6 +6674,8 @@ class Runtime:
             with self.sessions_lock:
                 if self.sessions.get(session_id) is session:
                     self.sessions.pop(session_id, None)
+            if self.shared_job_registry is not None:
+                self.shared_job_registry.remove(session_id)
         else:
             self._schedule_session_reaper(session)
 
@@ -5224,6 +6690,9 @@ class Runtime:
 
     def _get_session(self, session_id: str) -> ExecSession:
         self._prune_sessions()
+        shared = self._shared_job_session(session_id)
+        if shared is not None:
+            return shared
         with self.sessions_lock:
             session = self.sessions.get(session_id) or self.output_sessions.get(
                 session_id
@@ -6264,12 +7733,31 @@ class Runtime:
             category="environment",
         )
 
-    def _antigravity_env(self) -> dict[str, str]:
+    def _antigravity_env(self, cwd: Path) -> dict[str, str]:
         env = {
             key: value
             for key, value in os.environ.items()
-            if not is_filtered_env_var(key, value) and not is_risky_env_name(key)
+            if is_core_command_env_name(key)
+            and not is_filtered_env_var(key, value)
+            and not is_risky_env_name(key)
         }
+        # AGY needs its authenticated user config, but it must not inherit shell
+        # location/state hints from the long-lived DevMCP service process.
+        home = os.environ.get("HOME")
+        if home and not is_filtered_env_var("HOME", home):
+            env["HOME"] = home
+        xdg_config = os.environ.get("XDG_CONFIG_HOME")
+        if xdg_config and not is_filtered_env_var("XDG_CONFIG_HOME", xdg_config):
+            env["XDG_CONFIG_HOME"] = xdg_config
+        self._ensure_runtime_dirs()
+        agy_cache = self.cache_dir / "antigravity"
+        agy_state = self.runtime_dir / "antigravity-state"
+        agy_cache.mkdir(parents=True, mode=0o700, exist_ok=True)
+        agy_state.mkdir(parents=True, mode=0o700, exist_ok=True)
+        env["XDG_CACHE_HOME"] = str(agy_cache)
+        env["XDG_STATE_HOME"] = str(agy_state)
+        env["PWD"] = str(cwd.resolve(strict=True))
+        env["OLDPWD"] = env["PWD"]
         env.update(
             {
                 "GIT_TERMINAL_PROMPT": "0",
@@ -6301,6 +7789,64 @@ class Runtime:
             "OPERATOR TASK:\n" + user_prompt
         )
 
+    def _antigravity_selected_workspace(self) -> tuple[Workspace, Path]:
+        """Snapshot and verify the project selected by this Runtime session."""
+
+        workspace = self.workspace
+        selected_root = workspace.root.resolve(strict=True)
+        try:
+            active_root = Path(str(self.active_project["path"])).resolve(strict=True)
+        except (KeyError, OSError, ValueError) as exc:
+            raise ToolFailure(
+                "INVALID_STATE",
+                "The active project record is invalid; Antigravity delegation was not started.",
+                category="runtime",
+            ) from exc
+        if active_root != selected_root:
+            raise ToolFailure(
+                "INVALID_STATE",
+                "The active project and Runtime workspace disagree; Antigravity delegation was not started.",
+                category="runtime",
+                details={
+                    "active_project": str(active_root),
+                    "runtime_workspace": str(selected_root),
+                },
+            )
+        return workspace, selected_root
+
+    @staticmethod
+    def _antigravity_guarded_argv(argv: list[str], expected_cwd: Path) -> list[str]:
+        """Fail before exec if the delegated child did not enter expected_cwd."""
+
+        guard = (
+            "import os,pathlib,sys;"
+            "expected=pathlib.Path(sys.argv[1]).resolve(strict=True);"
+            "actual=pathlib.Path.cwd().resolve(strict=True);"
+            "ok=(actual==expected);"
+            "sys.stderr.write('DEVMCP_AGY_CWD_MISMATCH expected=%s actual=%s\\n' % (expected,actual)) if not ok else None;"
+            "sys.exit(125) if not ok else None;"
+            "os.execv(sys.argv[2],sys.argv[2:])"
+        )
+        return [sys.executable, "-c", guard, str(expected_cwd), *argv]
+
+    @staticmethod
+    def _antigravity_structured_result(stdout: str) -> dict[str, Any] | None:
+        text = stdout.strip()
+        if not text:
+            return None
+        candidates = [text]
+        candidates.extend(
+            line.strip() for line in reversed(text.splitlines()) if line.strip()
+        )
+        for candidate in candidates:
+            try:
+                parsed = json.loads(candidate)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed, dict):
+                return parsed
+        return None
+
     def antigravity_delegate(self, args: dict[str, Any]) -> dict[str, Any]:
         prompt = str(args.get("prompt", "")).strip()
         if not prompt:
@@ -6327,8 +7873,9 @@ class Runtime:
         )
         if pending is not None:
             return pending
-        git = self.workspace.git_path
-        if not git or not self._is_git_checkout(self.workspace.root):
+        workspace, selected_root = self._antigravity_selected_workspace()
+        git = workspace.git_path
+        if not git or not self._is_git_checkout(selected_root):
             raise ToolFailure(
                 "INVALID_STATE",
                 "Antigravity delegation requires the selected project to be a Git checkout.",
@@ -6336,7 +7883,7 @@ class Runtime:
             )
         for diff_args in (["diff", "--quiet"], ["diff", "--cached", "--quiet"]):
             dirty = subprocess.run(
-                [git, "-C", str(self.workspace.root), *diff_args]
+                [git, "-C", str(selected_root), *diff_args]
             ).returncode
             if dirty != 0:
                 raise ToolFailure(
@@ -6345,7 +7892,7 @@ class Runtime:
                     category="runtime",
                 )
         tracked = subprocess.run(
-            [git, "-C", str(self.workspace.root), "ls-files", "-z"],
+            [git, "-C", str(selected_root), "ls-files", "-z"],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             timeout=30,
@@ -6361,7 +7908,7 @@ class Runtime:
             if not raw_path:
                 continue
             try:
-                self.workspace._reject_unsafe_text(raw_path)
+                workspace._reject_unsafe_text(raw_path)
             except ToolFailure:
                 sensitive_tracked.append(raw_path)
         if sensitive_tracked:
@@ -6377,14 +7924,16 @@ class Runtime:
         try:
             version_result = run_bounded_process(
                 [agy, "--version"],
+                cwd=str(selected_root),
                 timeout=10,
-                env=self._antigravity_env(),
+                env=self._antigravity_env(selected_root),
                 cancel_event=cancel_event,
             )
             help_result = run_bounded_process(
                 [agy, "--help"],
+                cwd=str(selected_root),
                 timeout=10,
-                env=self._antigravity_env(),
+                env=self._antigravity_env(selected_root),
                 cancel_event=cancel_event,
             )
         except ProcessCancelled as exc:
@@ -6404,14 +7953,46 @@ class Runtime:
                 details={"timeout_seconds": 10},
             ) from exc
         help_text = help_result.stdout + help_result.stderr
-        base_sha = self._git_rev_parse(self.workspace.root, "HEAD")
+        if "--new-project" not in help_text:
+            raise ToolFailure(
+                "SERVICE_UNAVAILABLE",
+                "Installed Antigravity CLI cannot bind a new session to the selected workspace; --new-project is required.",
+                category="environment",
+            )
+        if "--sandbox" not in help_text:
+            raise ToolFailure(
+                "SERVICE_UNAVAILABLE",
+                "Installed Antigravity CLI cannot enforce the delegated workspace boundary; --sandbox is required.",
+                category="security",
+            )
+        base_sha = self._git_rev_parse(selected_root, "HEAD")
+        base_branch_result = subprocess.run(
+            [
+                git,
+                "-C",
+                str(selected_root),
+                "symbolic-ref",
+                "--quiet",
+                "--short",
+                "HEAD",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=30,
+        )
+        base_branch = (
+            base_branch_result.stdout.strip()
+            if base_branch_result.returncode == 0
+            else None
+        )
         with tempfile.TemporaryDirectory(prefix="devmcp-antigravity-") as temp_root:
             delegate_root = Path(temp_root) / "worktree"
             added = subprocess.run(
                 [
                     git,
                     "-C",
-                    str(self.workspace.root),
+                    str(selected_root),
                     "worktree",
                     "add",
                     "--detach",
@@ -6431,9 +8012,7 @@ class Runtime:
                     details={"stderr": str(redact_for_trace(added.stderr))},
                 )
             try:
-                argv = [agy]
-                if "--sandbox" in help_text:
-                    argv.append("--sandbox")
+                argv = [agy, "--new-project", "--sandbox"]
                 if "--output-format" in help_text:
                     argv.extend(["--output-format", "json"])
                 argv.extend(["-p", self._antigravity_prompt(prompt, mode)])
@@ -6443,9 +8022,9 @@ class Runtime:
                     attempts += 1
                     try:
                         candidate = run_bounded_process(
-                            argv,
+                            self._antigravity_guarded_argv(argv, delegate_root),
                             cwd=str(delegate_root),
-                            env=self._antigravity_env(),
+                            env=self._antigravity_env(delegate_root),
                             timeout=timeout_seconds,
                             cancel_event=cancel_event,
                         )
@@ -6495,9 +8074,31 @@ class Runtime:
                         "Antigravity delegation failed; isolated changes were discarded.",
                         category="runtime",
                         details={
+                            "process_ok": False,
+                            "task_ok": False,
                             "exit_code": completed.returncode,
                             "stdout": str(redact_for_trace(completed.stdout[-65536:])),
                             "stderr": str(redact_for_trace(completed.stderr[-65536:])),
+                        },
+                    )
+                structured_result = self._antigravity_structured_result(
+                    completed.stdout
+                )
+                agent_status = (
+                    str(structured_result.get("status", "")).strip().upper()
+                    if structured_result is not None
+                    else ""
+                )
+                if agent_status == "ERROR":
+                    raise ToolFailure(
+                        "AGENT_TASK_FAILED",
+                        "Antigravity reported task failure despite process exit 0.",
+                        category="runtime",
+                        details={
+                            "process_ok": True,
+                            "task_ok": False,
+                            "exit_code": completed.returncode,
+                            "agent_status": agent_status,
                         },
                     )
                 current_sha = self._git_rev_parse(delegate_root, "HEAD")
@@ -6538,17 +8139,19 @@ class Runtime:
                     "\0"
                 )
                 changed_paths: list[str] = []
+                changed_entries: list[tuple[str, str]] = []
                 disallowed: list[str] = []
                 index = 0
                 while index + 1 < len(fields) and fields[index]:
                     status, path = fields[index], fields[index + 1]
                     index += 2
                     changed_paths.append(path)
+                    changed_entries.append((status, path))
                     if status not in {"M", "A"}:
                         disallowed.append(f"{status}:{path}")
                         continue
                     try:
-                        self.workspace._reject_unsafe_text(path)
+                        workspace._reject_unsafe_text(path)
                     except ToolFailure:
                         disallowed.append(f"sensitive:{path}")
                 if mode != "workspace_edit" and changed_paths:
@@ -6585,11 +8188,90 @@ class Runtime:
                     )
                 applied = False
                 if mode == "workspace_edit" and patch_result.stdout:
+                    current_head = self._git_rev_parse(selected_root, "HEAD")
+                    current_branch_result = subprocess.run(
+                        [
+                            git,
+                            "-C",
+                            str(selected_root),
+                            "symbolic-ref",
+                            "--quiet",
+                            "--short",
+                            "HEAD",
+                        ],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.DEVNULL,
+                        text=True,
+                        timeout=30,
+                    )
+                    current_branch = (
+                        current_branch_result.stdout.strip()
+                        if current_branch_result.returncode == 0
+                        else None
+                    )
+                    if current_head != base_sha:
+                        raise ToolFailure(
+                            "TRANSACTION_CONFLICT",
+                            "Selected project HEAD changed while Antigravity was running; delegated changes were not applied.",
+                            category="conflict",
+                            retryable=True,
+                            details={
+                                "before_head": base_sha,
+                                "current_head": current_head,
+                            },
+                        )
+                    if current_branch != base_branch:
+                        raise ToolFailure(
+                            "TRANSACTION_CONFLICT",
+                            "Selected project branch changed while Antigravity was running; delegated changes were not applied.",
+                            category="conflict",
+                            retryable=True,
+                            details={
+                                "before_branch": base_branch,
+                                "current_branch": current_branch,
+                            },
+                        )
+                    for diff_args in (
+                        ["diff", "--quiet"],
+                        ["diff", "--cached", "--quiet"],
+                    ):
+                        if (
+                            subprocess.run(
+                                [git, "-C", str(selected_root), *diff_args],
+                                stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL,
+                                timeout=30,
+                            ).returncode
+                            != 0
+                        ):
+                            raise ToolFailure(
+                                "TRANSACTION_CONFLICT",
+                                "Selected project changed while Antigravity was running; delegated changes were not applied.",
+                                category="conflict",
+                                retryable=True,
+                            )
+                    conflicting_additions = [
+                        path
+                        for status, path in changed_entries
+                        if status == "A"
+                        and (
+                            (selected_root / path).exists()
+                            or (selected_root / path).is_symlink()
+                        )
+                    ]
+                    if conflicting_additions:
+                        raise ToolFailure(
+                            "TRANSACTION_CONFLICT",
+                            "A delegated addition now exists in the selected project; refusing to overwrite concurrent user work.",
+                            category="conflict",
+                            retryable=True,
+                            details={"paths": conflicting_additions[:50]},
+                        )
                     apply_result = subprocess.run(
                         [
                             git,
                             "-C",
-                            str(self.workspace.root),
+                            str(selected_root),
                             "apply",
                             "--binary",
                             "--whitespace=nowarn",
@@ -6614,6 +8296,11 @@ class Runtime:
                     or version_result.stderr.strip(),
                     "mode": mode,
                     "exit_code": completed.returncode,
+                    "process_ok": True,
+                    "task_ok": True,
+                    "agent_status": agent_status or None,
+                    "selected_workspace": str(selected_root),
+                    "delegated_workspace": str(delegate_root),
                     "stdout": str(redact_for_trace(completed.stdout[-131072:])),
                     "stderr": str(redact_for_trace(completed.stderr[-65536:])),
                     "changed_paths": changed_paths,
@@ -6629,7 +8316,7 @@ class Runtime:
                         [
                             git,
                             "-C",
-                            str(self.workspace.root),
+                            str(selected_root),
                             "worktree",
                             "remove",
                             "--force",
@@ -7072,6 +8759,13 @@ class Runtime:
             return pending
 
         previous = self.policy_profile
+        if profile == previous:
+            return {
+                "profile": profile,
+                "previous_profile": previous,
+                "status": "unchanged",
+                "restart": None,
+            }
         completed = subprocess.run(
             [sys.executable, "-m", "apps.devmcp.cli", "policy", "profile", profile],
             cwd=str(DEVMCP_SOURCE_ROOT),
@@ -7124,6 +8818,224 @@ class Runtime:
             "workspace": str(self.workspace.root),
             "active_project": self.active_project,
             "project_roots": [str(root) for root in self.project_roots],
+            "grantable_roots": [str(root) for root in self.grantable_roots],
+            "readable_roots": [str(root) for root in self.readable_roots()],
+            "writable_roots": [str(root) for root in self.writable_roots()],
+        }
+
+    def grant_root(self, args: dict[str, Any]) -> dict[str, Any]:
+        raw_path = str(args.get("path", "")).strip()
+        access = str(args.get("access", "")).strip().lower()
+        scope = str(args.get("scope", "session")).strip().lower()
+        if not raw_path or access not in {"read", "write"}:
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                "grant_root requires path and access=read|write.",
+                category="validation",
+            )
+        if scope not in {"once", "task", "session"}:
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                "grant_root scope must be once, task, or session.",
+                category="validation",
+            )
+        try:
+            target = Path(raw_path).expanduser().resolve(strict=True)
+        except FileNotFoundError as exc:
+            raise ToolFailure(
+                "NOT_FOUND", f"Root not found: {raw_path}", category="not_found"
+            ) from exc
+        if not target.is_dir():
+            raise ToolFailure(
+                "NOT_A_DIRECTORY", "Additional root must be a directory.", category="validation"
+            )
+        if is_relative_to(target, self.workspace.root):
+            return {
+                "status": "already_authorized",
+                "path": str(target),
+                "access": access,
+                "scope": "session",
+                "lease_id": None,
+            }
+        if is_relative_to(self.workspace.root, target):
+            raise ToolFailure(
+                "ACCESS_DENIED",
+                "Granting an ancestor of the primary workspace is too broad; grant the specific sibling/library directory instead.",
+                category="security",
+                details={"path": str(target), "workspace": str(self.workspace.root)},
+            )
+        if not any(is_relative_to(target, root) for root in self.grantable_roots):
+            raise ToolFailure(
+                "ACCESS_DENIED",
+                "Requested root is outside the operator-configured grantable roots.",
+                category="security",
+                details={"path": str(target)},
+            )
+        capability = (
+            "workspace.additional_write_root"
+            if access == "write"
+            else "workspace.additional_read_root"
+        )
+        pending = self._profile_authorize_operation(
+            capability, args, f"grant {access} root {target}"
+        )
+        if pending is not None:
+            return pending
+        task_scope_id = self._task_scope_id()
+        if scope == "task" and not task_scope_id:
+            task_scope_id = "task_" + secrets.token_urlsafe(24)
+        try:
+            record = self.capability_lease_registry.create(
+                owner_context_id=self._capability_owner_id(),
+                capability=capability,
+                target=str(target),
+                scope=scope,
+                ttl_seconds=int(args.get("ttl_seconds", 900)),
+                task_scope_id=task_scope_id if scope == "task" else None,
+            )
+        except (RuntimeError, ValueError) as exc:
+            raise ToolFailure(
+                "SESSION_LIMIT_REACHED",
+                str(exc),
+                category="runtime",
+            ) from exc
+        return {
+            "lease_id": record.lease_id,
+            "capability": record.capability,
+            "path": record.target,
+            "access": access,
+            "scope": record.scope,
+            "task_scope_id": record.task_scope_id,
+        }
+
+    def grant_capability(self, args: dict[str, Any]) -> dict[str, Any]:
+        capability = str(args.get("capability", "")).strip()
+        target = str(args.get("target", "")).strip()
+        scope = str(args.get("scope", "once")).strip().lower()
+        leaseable = {
+            "exec.arbitrary",
+            "deps.install",
+            "env.sensitive",
+            "network.public",
+            "network.host_local",
+            "workspace.create",
+            "workspace.delete",
+            "workspace.move",
+            "workspace.patch_small",
+            "workspace.patch_destructive",
+        }
+        if capability not in leaseable or not target:
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                "grant_capability requires a supported capability and non-empty target.",
+                category="validation",
+                details={"supported": sorted(leaseable)},
+            )
+        if scope not in {"once", "task", "session"}:
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                "Capability lease scope must be once, task, or session.",
+                category="validation",
+            )
+        if capability.startswith("network.") and target != "*":
+            container_backend = self.executor_registry.backends["ephemeral_container"]
+            if not (
+                container_backend.configured
+                and container_backend.secure
+                and container_backend.supports_network_targets
+            ):
+                raise ToolFailure(
+                    "CAPABILITY_UNAVAILABLE",
+                    "Destination-scoped network egress requires an operator-configured backend with a real network filter; the local sandbox cannot enforce host/domain targets.",
+                    category="environment",
+                    details={"capability": capability, "target": target},
+                )
+        if capability == "env.sensitive":
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", target):
+                raise ToolFailure(
+                    "INVALID_ARGUMENT",
+                    "Sensitive environment leases require one exact variable name.",
+                    category="validation",
+                )
+            if target in RESERVED_EXEC_ENV_NAMES:
+                raise ToolFailure(
+                    "ACCESS_DENIED",
+                    "Runtime-reserved environment names cannot be leased.",
+                    category="security",
+                )
+        elif len(target) > 4096 or "\x00" in target or "\n" in target:
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                "Capability lease target is invalid.",
+                category="validation",
+            )
+
+        pending = self._profile_authorize_operation(
+            capability, args, f"grant capability {capability} target {target}"
+        )
+        if pending is not None:
+            return pending
+        task_scope_id = self._task_scope_id()
+        if scope == "task" and not task_scope_id:
+            task_scope_id = "task_" + secrets.token_urlsafe(24)
+        try:
+            record = self.capability_lease_registry.create(
+                owner_context_id=self._capability_owner_id(),
+                capability=capability,
+                target=target,
+                scope=scope,
+                ttl_seconds=int(args.get("ttl_seconds", 900)),
+                task_scope_id=task_scope_id if scope == "task" else None,
+            )
+        except (RuntimeError, ValueError) as exc:
+            raise ToolFailure(
+                "SESSION_LIMIT_REACHED", str(exc), category="runtime"
+            ) from exc
+        return {
+            "lease_id": record.lease_id,
+            "capability": record.capability,
+            "target": record.target,
+            "scope": record.scope,
+            "task_scope_id": record.task_scope_id,
+        }
+
+    def list_capability_leases(self, args: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "leases": self.capability_lease_registry.list_owner(
+                self._capability_owner_id(), task_scope_id=self._task_scope_id()
+            )
+        }
+
+    def revoke_capability_lease(self, args: dict[str, Any]) -> dict[str, Any]:
+        lease_id = str(args.get("lease_id", "")).strip()
+        if not lease_id:
+            raise ToolFailure(
+                "INVALID_ARGUMENT", "lease_id is required.", category="validation"
+            )
+        revoked = self.capability_lease_registry.revoke(
+            lease_id, owner_context_id=self._capability_owner_id()
+        )
+        if not revoked:
+            raise ToolFailure(
+                "NOT_FOUND", "Capability lease not found.", category="not_found"
+            )
+        return {"lease_id": lease_id, "status": "revoked"}
+
+    def end_task_scope(self, args: dict[str, Any]) -> dict[str, Any]:
+        task_scope_id = self._task_scope_id()
+        if not task_scope_id:
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                "end_task_scope requires the common task_scope_id argument.",
+                category="validation",
+            )
+        revoked = self.capability_lease_registry.clear_task(
+            self._capability_owner_id(), task_scope_id
+        )
+        return {
+            "task_scope_id": task_scope_id,
+            "status": "ended",
+            "revoked_leases": revoked,
         }
 
     def read_files(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -7137,28 +9049,132 @@ class Runtime:
         if not isinstance(raw_paths, list):
             raise ToolFailure(
                 "INVALID_ARGUMENT",
-                "paths argument must be a list of path strings.",
+                "paths argument must be a list of path strings or path request objects.",
                 category="validation",
             )
-        files = []
-        for raw_path in raw_paths:
-            res = self.workspace.resolve_existing(str(raw_path))
-            try:
-                content = res.path.read_text(encoding="utf-8")
-            except UnicodeDecodeError as exc:
-                raise ToolFailure(
-                    "UNSUPPORTED_ENCODING",
-                    "File is not valid utf-8.",
-                    category="validation",
-                ) from exc
-            files.append(
-                {
-                    "path": res.display,
-                    "content": content,
-                    "bytes": len(content.encode("utf-8")),
-                }
+        per_file_max_bytes = int(args.get("per_file_max_bytes", 131072))
+        per_file_max_lines = int(args.get("per_file_max_lines", DEFAULT_MAX_LINES))
+        total_max_bytes = int(args.get("total_max_bytes", 524288))
+        if per_file_max_bytes < 1 or per_file_max_lines < 1 or total_max_bytes < 1:
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                "read_files budgets must be positive integers.",
+                category="validation",
             )
-        return {"files": files}
+
+        files: list[dict[str, Any]] = []
+        consumed_bytes = 0
+        for item in raw_paths:
+            if isinstance(item, str):
+                request: dict[str, Any] = {"path": item}
+            elif isinstance(item, dict) and isinstance(item.get("path"), str):
+                request = dict(item)
+            else:
+                files.append(
+                    {
+                        "ok": False,
+                        "path": str(item),
+                        "error": {
+                            "code": "INVALID_ARGUMENT",
+                            "message": "Each read_files entry must be a path string or object with path.",
+                        },
+                    }
+                )
+                continue
+
+            remaining = total_max_bytes - consumed_bytes
+            if remaining <= 0:
+                files.append(
+                    {
+                        "ok": False,
+                        "path": str(request["path"]),
+                        "error": {
+                            "code": "OUTPUT_TOO_LARGE",
+                            "message": "Total read_files response budget exhausted before this file.",
+                        },
+                    }
+                )
+                continue
+            request["max_bytes"] = min(
+                int(request.get("max_bytes", per_file_max_bytes)),
+                per_file_max_bytes,
+                remaining,
+            )
+            if "end_line" not in request and "max_lines" not in request:
+                request["max_lines"] = per_file_max_lines
+            elif "max_lines" in request:
+                request["max_lines"] = min(
+                    int(request["max_lines"]), per_file_max_lines
+                )
+            try:
+                result = self.read_file(request)
+            except ToolFailure as exc:
+                files.append(
+                    {
+                        "ok": False,
+                        "path": str(request["path"]),
+                        "error": {
+                            "code": exc.code,
+                            "message": exc.message,
+                            "category": exc.category,
+                            "details": exc.details,
+                        },
+                    }
+                )
+                continue
+            consumed_bytes += int(result.get("bytes_read", 0))
+            files.append({"ok": True, **result})
+
+        successes = sum(1 for item in files if item.get("ok") is True)
+        return {
+            "files": files,
+            "success_count": successes,
+            "error_count": len(files) - successes,
+            "partial_success": 0 < successes < len(files),
+            "total_output_bytes": consumed_bytes,
+            "total_max_bytes": total_max_bytes,
+        }
+
+    def code_diagnostics(self, args: dict[str, Any]) -> dict[str, Any]:
+        text = str(args.get("text", ""))
+        provider = str(args.get("provider", "compiler-text"))
+        source = str(args.get("source", "compiler"))
+        max_results = int(args.get("max_results", 200))
+        try:
+            diagnostics = self.diagnostics_registry.normalize(
+                text,
+                source=source,
+                provider=provider,
+                max_results=max_results,
+            )
+        except KeyError as exc:
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                f"Unknown diagnostics provider: {provider}",
+                category="validation",
+                details={"providers": self.diagnostics_registry.providers()},
+            ) from exc
+        for diagnostic in diagnostics:
+            raw_path = diagnostic.get("path")
+            if not isinstance(raw_path, str) or not raw_path:
+                continue
+            normalized = normalize_diagnostic_path(raw_path, cwd=self.default_cwd)
+            diagnostic["normalized_path"] = normalized
+            try:
+                resolved = self.resolve_existing(normalized)
+            except ToolFailure as exc:
+                diagnostic["path_authorized"] = False
+                diagnostic["path_error"] = exc.code
+            else:
+                diagnostic["path_authorized"] = True
+                diagnostic["path"] = resolved.display
+        return {
+            "provider": provider,
+            "source": source,
+            "providers": self.diagnostics_registry.providers(),
+            "diagnostics": diagnostics,
+            "count": len(diagnostics),
+        }
 
     def preview_patch(self, args: dict[str, Any]) -> dict[str, Any]:
         patch_text = str(args.get("patch", ""))
@@ -7304,16 +9320,109 @@ class Runtime:
         }
         return self._execute_task_argv(cmd_argv, exec_args, granted_caps)
 
-    @staticmethod
-    def _task_env(raw_env: Any) -> dict[str, Any]:
+    def _project_environment_info(self) -> dict[str, Any]:
+        root = self.workspace.root
+        runtime_bin = Path(sys.executable).resolve().parent
+        runtime_is_isolated = (
+            Path(sys.prefix).resolve() != Path(sys.base_prefix).resolve()
+        )
+        raw_path = os.environ.get("PATH", os.defpath)
+        host_parts: list[str] = []
+        runtime_bin_removed = False
+        for raw_part in raw_path.split(os.pathsep):
+            if not raw_part:
+                continue
+            try:
+                resolved_part = Path(raw_part).expanduser().resolve()
+            except OSError:
+                resolved_part = Path(raw_part).expanduser()
+            if runtime_is_isolated and resolved_part == runtime_bin:
+                runtime_bin_removed = True
+                continue
+            text = str(resolved_part)
+            if text not in host_parts:
+                host_parts.append(text)
+
+        venv_bin = root / ".venv" / ("Scripts" if os.name == "nt" else "bin")
+        venv_python = venv_bin / ("python.exe" if os.name == "nt" else "python")
+        path_parts = list(host_parts)
+        if venv_python.is_file():
+            path_parts.insert(0, str(venv_bin.resolve()))
+
+        package_manager: str | None = None
+        manager_markers = (
+            ("uv", "uv.lock"),
+            ("poetry", "poetry.lock"),
+            ("pnpm", "pnpm-lock.yaml"),
+            ("npm", "package-lock.json"),
+            ("yarn", "yarn.lock"),
+        )
+        for manager, marker in manager_markers:
+            if (root / marker).is_file():
+                package_manager = manager
+                break
+
+        resolved_path = os.pathsep.join(path_parts) or os.defpath
+        interpreter = (
+            str(venv_python.resolve())
+            if venv_python.is_file()
+            else shutil.which("python3", path=resolved_path)
+            or shutil.which("python", path=resolved_path)
+        )
+        warnings: list[str] = []
+        if (root / "pyproject.toml").is_file() and not venv_python.is_file():
+            warnings.append(
+                "Python project has no usable .venv; project checks will fall back to sanitized host Python."
+            )
+        manager_path = (
+            shutil.which(package_manager, path=resolved_path)
+            if package_manager is not None
+            else None
+        )
+        if package_manager is not None and manager_path is None:
+            warnings.append(
+                f"{package_manager} project marker is present but {package_manager} is not available on sanitized PATH."
+            )
+        return {
+            "kind": "project-native",
+            "workspace": str(root),
+            "venv": str(root / ".venv") if (root / ".venv").is_dir() else None,
+            "interpreter": interpreter,
+            "package_manager": package_manager,
+            "package_manager_path": manager_path,
+            "runtime_python": str(Path(sys.executable).resolve()),
+            "runtime_bin_removed_from_path": runtime_bin_removed,
+            "path": resolved_path,
+            "warnings": warnings,
+        }
+
+    def _task_env(self, raw_env: Any) -> dict[str, Any]:
         env = dict(raw_env) if isinstance(raw_env, dict) else {}
         if "PATH" not in env:
-            runtime_bin = str(Path(sys.executable).parent)
-            env["PATH"] = runtime_bin + os.pathsep + os.environ.get("PATH", os.defpath)
+            project_env = self._project_environment_info()
+            env["PATH"] = str(project_env["path"])
+            venv = project_env.get("venv")
+            interpreter = project_env.get("interpreter")
+            if isinstance(venv, str) and venv and isinstance(interpreter, str):
+                env["VIRTUAL_ENV"] = venv
+            env.pop("PYTHONHOME", None)
         return env
 
     def job_status(self, args: dict[str, Any]) -> dict[str, Any]:
         session_id = args.get("session_id", "")
+        shared = self._shared_job_session(str(session_id))
+        if shared is not None:
+            shared.refresh_status()
+            poll = shared.process.poll()
+            status_str = (
+                "running" if poll is None else ("success" if poll == 0 else "failed")
+            )
+            return {
+                "status": status_str,
+                "session_id": session_id,
+                "exit_code": poll,
+                "command_success": None if poll is None else poll == 0,
+            }
         with self.sessions_lock:
             session = self.sessions.get(session_id) or self.output_sessions.get(
                 session_id
@@ -7325,7 +9434,12 @@ class Runtime:
             status_str = (
                 "running" if poll is None else ("success" if poll == 0 else "failed")
             )
-            return {"status": status_str, "session_id": session_id, "exit_code": poll}
+            return {
+                "status": status_str,
+                "session_id": session_id,
+                "exit_code": poll,
+                "command_success": None if poll is None else poll == 0,
+            }
 
     def job_output(self, args: dict[str, Any]) -> dict[str, Any]:
         args["output_ref"] = "session:" + args.get("session_id", "") + ":stdout"
@@ -8564,11 +10678,33 @@ def schema_type_name(expected_type: str | list[str]) -> str:
 def tool_definition(name: str, *, fake_readonly: bool = False) -> dict[str, Any]:
     schemas = input_schemas()
     annotations = tool_annotations(name, fake_readonly=fake_readonly)
+    input_schema = {
+        **schemas[name],
+        "properties": {
+            **schemas[name].get("properties", {}),
+            "context_id": {
+                "type": "string",
+                "minLength": 16,
+                "description": (
+                    "Opaque DevMCP logical-context capability. Reuse the context_id from a prior "
+                    "tool result when continuing across a new MCP HTTP session."
+                ),
+            },
+            "task_scope_id": {
+                "type": "string",
+                "minLength": 8,
+                "description": (
+                    "Opaque logical task scope for task-scoped capability leases. Reuse it across "
+                    "the operations that belong to the same coding task, then call end_task_scope."
+                ),
+            },
+        },
+    }
     return {
         "name": name,
         "title": annotations["title"],
         "description": TOOL_REGISTRY[name].description,
-        "inputSchema": schemas[name],
+        "inputSchema": input_schema,
         "outputSchema": tool_output_schema(),
         "annotations": annotations,
     }
@@ -8681,10 +10817,124 @@ def input_schemas() -> dict[str, dict[str, Any]]:
         ),
         "read_files": object_schema(
             {
-                "paths": string_array,
+                "paths": {
+                    "type": "array",
+                    "items": {
+                        "oneOf": [
+                            {**string, "minLength": 1},
+                            {
+                                "type": "object",
+                                "additionalProperties": False,
+                                "properties": {
+                                    "path": {**string, "minLength": 1},
+                                    "start_line": {**integer, "minimum": 1},
+                                    "end_line": {**integer, "minimum": 1},
+                                    "max_lines": {**integer, "minimum": 1},
+                                    "max_bytes": {**integer, "minimum": 1},
+                                },
+                                "required": ["path"],
+                            },
+                        ]
+                    },
+                },
+                "per_file_max_bytes": {
+                    **integer,
+                    "minimum": 1,
+                    "maximum": 1048576,
+                    "default": 131072,
+                },
+                "per_file_max_lines": {
+                    **integer,
+                    "minimum": 1,
+                    "maximum": 100000,
+                    "default": DEFAULT_MAX_LINES,
+                },
+                "total_max_bytes": {
+                    **integer,
+                    "minimum": 1,
+                    "maximum": 4194304,
+                    "default": 524288,
+                },
             },
             ["paths"],
         ),
+        "code_diagnostics": object_schema(
+            {
+                "text": {**string, "minLength": 1, "maxLength": 1048576},
+                "provider": {
+                    **string,
+                    "enum": ["compiler-text"],
+                    "default": "compiler-text",
+                },
+                "source": {**string, "maxLength": 128, "default": "compiler"},
+                "max_results": {
+                    **integer,
+                    "minimum": 1,
+                    "maximum": 2000,
+                    "default": 200,
+                },
+            },
+            ["text"],
+        ),
+        "grant_root": object_schema(
+            {
+                "path": {**string, "minLength": 1},
+                "access": {**string, "enum": ["read", "write"]},
+                "scope": {
+                    **string,
+                    "enum": ["once", "task", "session"],
+                    "default": "session",
+                },
+                "ttl_seconds": {
+                    **integer,
+                    "minimum": 1,
+                    "maximum": 86400,
+                    "default": 900,
+                },
+                "task_scope_id": string,
+                "approval_id": string,
+            },
+            ["path", "access"],
+        ),
+        "grant_capability": object_schema(
+            {
+                "capability": {
+                    **string,
+                    "enum": [
+                        "exec.arbitrary",
+                        "deps.install",
+                        "env.sensitive",
+                        "network.public",
+                        "network.host_local",
+                        "workspace.create",
+                        "workspace.delete",
+                        "workspace.move",
+                        "workspace.patch_small",
+                        "workspace.patch_destructive",
+                    ],
+                },
+                "target": {**string, "minLength": 1, "maxLength": 4096},
+                "scope": {
+                    **string,
+                    "enum": ["once", "task", "session"],
+                    "default": "once",
+                },
+                "ttl_seconds": {
+                    **integer,
+                    "minimum": 1,
+                    "maximum": 86400,
+                    "default": 900,
+                },
+                "task_scope_id": string,
+                "approval_id": string,
+            },
+            ["capability", "target"],
+        ),
+        "list_capability_leases": object_schema(),
+        "revoke_capability_lease": object_schema(
+            {"lease_id": {**string, "minLength": 1}}, ["lease_id"]
+        ),
+        "end_task_scope": object_schema(),
         "list_dir": object_schema(
             {
                 "path": {**string, "default": "."},
@@ -8957,6 +11207,15 @@ def input_schemas() -> dict[str, dict[str, Any]]:
         "exec_command": object_schema(
             {
                 "cmd": {**string, "minLength": 1},
+                "argv": {
+                    "type": "array",
+                    "items": {**string, "minLength": 1, "maxLength": 4096},
+                    "minItems": 1,
+                    "maxItems": 256,
+                    "description": (
+                        "Structured argv execution without a shell. Provide exactly one of cmd or argv."
+                    ),
+                },
                 "cwd": string,
                 "workdir": string,
                 "timeout_ms": {
@@ -8972,6 +11231,31 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                     "default": 10000,
                 },
                 "env": {"type": "object", "additionalProperties": {"type": "string"}},
+                "sensitive_env_names": {
+                    "type": "array",
+                    "items": {
+                        **string,
+                        "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+                    },
+                    "maxItems": 64,
+                    "description": "Exact host environment variable names to inject only when matching env.sensitive capability leases exist.",
+                },
+                "transaction_mode": {
+                    **string,
+                    "enum": ["discard", "apply"],
+                    "default": "discard",
+                    "description": "Compatibility default discards execution-snapshot file changes; apply performs a bounded transactional commit after exit 0.",
+                },
+                "executor_backend": {
+                    **string,
+                    "enum": [
+                        "auto",
+                        "local_sandbox",
+                        "inherited_sandbox",
+                        "ephemeral_container",
+                    ],
+                    "default": "auto",
+                },
                 "max_bytes": {
                     **integer,
                     "minimum": 1,
@@ -8994,10 +11278,90 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                     "default": 2048,
                 },
                 "network_required": boolean,
+                "network_targets": {
+                    "type": "array",
+                    "items": {**string, "minLength": 1, "maxLength": 255},
+                    "maxItems": 128,
+                    "description": "Optional host/domain targets. Requires a backend with enforceable network target filtering.",
+                },
+                "task_id": string,
+                "approval_id": string,
+            }
+        ),
+        "exec_argv": object_schema(
+            {
+                "argv": {
+                    "type": "array",
+                    "items": {**string, "minLength": 1, "maxLength": 4096},
+                    "minItems": 1,
+                    "maxItems": 256,
+                },
+                "cwd": string,
+                "workdir": string,
+                "timeout_ms": {
+                    **integer,
+                    "minimum": 1,
+                    "maximum": 300000,
+                    "default": 30000,
+                },
+                "yield_time_ms": {
+                    **integer,
+                    "minimum": 0,
+                    "maximum": 300000,
+                    "default": 10000,
+                },
+                "env": {"type": "object", "additionalProperties": {"type": "string"}},
+                "sensitive_env_names": {
+                    "type": "array",
+                    "items": {
+                        **string,
+                        "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+                    },
+                    "maxItems": 64,
+                    "description": "Exact host environment variable names to inject only when matching env.sensitive capability leases exist.",
+                },
+                "transaction_mode": {
+                    **string,
+                    "enum": ["discard", "apply"],
+                    "default": "apply",
+                    "description": "Structured execution defaults to transactional apply on the local secure sandbox; use discard for test/build-only commands.",
+                },
+                "executor_backend": {
+                    **string,
+                    "enum": [
+                        "auto",
+                        "local_sandbox",
+                        "inherited_sandbox",
+                        "ephemeral_container",
+                    ],
+                    "default": "auto",
+                },
+                "max_output_bytes": {
+                    **integer,
+                    "minimum": 1,
+                    "maximum": 1048576,
+                    "default": 262144,
+                },
+                "tty": {**boolean, "default": False},
+                "stdin": string,
+                "verbosity": {**integer, "minimum": 0, "maximum": 2, "default": 0},
+                "preview_bytes": {
+                    **integer,
+                    "minimum": 1,
+                    "maximum": 1048576,
+                    "default": 2048,
+                },
+                "network_required": boolean,
+                "network_targets": {
+                    "type": "array",
+                    "items": {**string, "minLength": 1, "maxLength": 255},
+                    "maxItems": 128,
+                    "description": "Optional host/domain targets. Requires a backend with enforceable network target filtering.",
+                },
                 "task_id": string,
                 "approval_id": string,
             },
-            ["cmd"],
+            ["argv"],
         ),
         "job_status": object_schema(
             {
@@ -9243,6 +11607,8 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
                     "ready": True,
                     "version": __version__,
                     "http_sessions": session_stats,
+                    "logical_contexts": self.server.logical_context_registry.stats(),  # type: ignore[attr-defined]
+                    "shared_jobs": self.server.shared_job_registry.stats(),  # type: ignore[attr-defined]
                 },
                 head_only=head_only,
             )
@@ -9953,13 +12319,20 @@ class RuntimeHTTPServer(http.server.ThreadingHTTPServer):
         handler: type[MCPHandler],
         control_runtime: Runtime,
         runtime_factory: Any,
+        logical_context_registry: LogicalContextRegistry,
+        shared_job_registry: SharedJobRegistry,
+        capability_lease_registry: CapabilityLeaseRegistry,
     ) -> None:
         super().__init__(address, handler)
         self.control_runtime = control_runtime
+        self.logical_context_registry = logical_context_registry
+        self.shared_job_registry = shared_job_registry
+        self.capability_lease_registry = capability_lease_registry
         self.sessions = HTTPSessionManager(runtime_factory)
 
     def server_close(self) -> None:
         self.sessions.close()
+        self.shared_job_registry.close()
         self.control_runtime.close()
         super().server_close()
 
@@ -9973,6 +12346,10 @@ def build_runtime(
     emit_warning: bool = True,
     project_context: ProjectContext | None = None,
     transport: str = "stdio",
+    logical_context_registry: LogicalContextRegistry | None = None,
+    shared_job_registry: SharedJobRegistry | None = None,
+    capability_lease_registry: CapabilityLeaseRegistry | None = None,
+    persist_project_selection: bool = True,
 ) -> Runtime:
     workspace = Path(
         args.workspace or os.environ.get(f"{ENV_PREFIX}_WORKSPACE") or os.getcwd()
@@ -9982,6 +12359,12 @@ def build_runtime(
         env_roots = os.environ.get("DEVMCP_PROJECT_ROOTS", "")
         raw_project_roots = [item for item in env_roots.split(os.pathsep) if item]
     project_roots = [Path(item) for item in raw_project_roots] or [workspace]
+    raw_grantable_roots = [
+        item
+        for item in os.environ.get("DEVMCP_GRANTABLE_ROOTS", "").split(os.pathsep)
+        if item
+    ]
+    grantable_roots = [Path(item) for item in raw_grantable_roots]
     policy_rules = policy_rules_from_config_file(
         os.environ.get("DEVMCP_POLICY_CONFIG_FILE"), runtime_policy.policy_profile
     )
@@ -10016,6 +12399,11 @@ def build_runtime(
             if os.environ.get("DEVMCP_ACTIVE_PROJECT_FILE")
             else None
         ),
+        logical_context_registry=logical_context_registry,
+        shared_job_registry=shared_job_registry,
+        capability_lease_registry=capability_lease_registry,
+        grantable_roots=grantable_roots,
+        persist_project_selection=persist_project_selection,
     )
     if emit_warning and runtime.capabilities.skip_all_permissions:
         print(
@@ -10213,12 +12601,41 @@ def run_http(args: argparse.Namespace) -> int:
         return 2
 
     try:
+        logical_context_ttl = int(
+            os.environ.get("DEVMCP_LOGICAL_CONTEXT_TTL_SECONDS", "3600")
+        )
+        completed_job_ttl = int(
+            os.environ.get("DEVMCP_COMPLETED_JOB_TTL_SECONDS", "300")
+        )
+    except ValueError:
+        print(
+            "ERROR: DEVMCP_LOGICAL_CONTEXT_TTL_SECONDS and DEVMCP_COMPLETED_JOB_TTL_SECONDS must be integers.",
+            file=sys.stderr,
+        )
+        return 2
+    if not 1 <= logical_context_ttl <= 86_400 or not 1 <= completed_job_ttl <= 86_400:
+        print(
+            "ERROR: logical-context/job TTL values must be between 1 and 86400 seconds.",
+            file=sys.stderr,
+        )
+        return 2
+    logical_context_registry = LogicalContextRegistry(ttl_seconds=logical_context_ttl)
+    shared_job_registry = SharedJobRegistry(
+        completed_ttl_seconds=completed_job_ttl,
+        context_registry=logical_context_registry,
+    )
+    capability_lease_registry = CapabilityLeaseRegistry()
+    try:
         runtime = build_runtime(
             args,
             runtime_policy,
             auth_token=auth_token,
             oauth_config=oauth_config,
             transport="http",
+            logical_context_registry=logical_context_registry,
+            shared_job_registry=shared_job_registry,
+            capability_lease_registry=capability_lease_registry,
+            persist_project_selection=False,
         )
     except (ToolFailure, ValueError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
@@ -10233,10 +12650,20 @@ def run_http(args: argparse.Namespace) -> int:
             emit_warning=False,
             project_context=runtime.project_context,
             transport="http",
+            logical_context_registry=logical_context_registry,
+            shared_job_registry=shared_job_registry,
+            capability_lease_registry=capability_lease_registry,
+            persist_project_selection=False,
         )
 
     server = RuntimeHTTPServer(
-        (args.host, args.port), MCPHandler, runtime, runtime_factory
+        (args.host, args.port),
+        MCPHandler,
+        runtime,
+        runtime_factory,
+        logical_context_registry,
+        shared_job_registry,
+        capability_lease_registry,
     )
     if oauth_config:
         url_label = oauth_config.server_url or "dynamic request URL"

@@ -501,11 +501,11 @@ class RuntimeHelperTests(unittest.TestCase):
                 "python3 -",
             ):
                 with self.subTest(command=command):
-                    with self.assertRaises(ToolFailure) as cm:
-                        runtime._check_command_policy(command, {})
-                    self.assertEqual(cm.exception.code, "PERMISSION_REQUIRED")
+                    runtime._check_command_policy(command, {})
+                    required = runtime._profile_command_capabilities(command, {})
+                    self.assertIn("exec.arbitrary", required)
                     self.assertEqual(
-                        cm.exception.details.get("permission"), "inline_script"
+                        runtime._policy_decision_for_capabilities(required), "ask"
                     )
 
     def test_command_policy_still_blocks_explicit_external_paths_and_network_tools(
@@ -514,14 +514,26 @@ class RuntimeHelperTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             runtime = Runtime(Path(tmp))
             for command in (
-                "cat /etc/passwd",
-                "echo hi > /tmp/out",
-                "curl https://example.com",
+                "cat /etc/shadow",
+                "cat /root/.ssh/id_rsa",
+                "cat ../outside-secret.txt",
             ):
                 with self.subTest(command=command):
                     with self.assertRaises(ToolFailure) as cm:
                         runtime._check_command_policy(command, {})
-                    self.assertEqual(cm.exception.code, "PERMISSION_REQUIRED")
+                    self.assertIn(
+                        cm.exception.code, {"PERMISSION_REQUIRED", "ACCESS_DENIED"}
+                    )
+            runtime._check_command_policy("cat /etc/passwd", {})
+            runtime._check_command_policy("echo hi > /tmp/out", {})
+            runtime._check_command_policy("curl https://example.com", {})
+            required = runtime._profile_command_capabilities(
+                "curl https://example.com", {}
+            )
+            self.assertIn("network.public", required)
+            self.assertEqual(
+                runtime.effective_capability_rules["network.public"], "ask"
+            )
 
     def test_command_policy_allows_standard_special_devices_only(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -537,11 +549,18 @@ class RuntimeHelperTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             runtime = Runtime(Path(tmp), allow_network=True)
             runtime._check_command_policy("curl https://example.com", {})
+            self.assertEqual(
+                runtime.effective_capability_rules["network.public"], "auto"
+            )
+            self.assertEqual(
+                runtime.effective_capability_rules["network.host_local"], "auto"
+            )
+            self.assertEqual(
+                runtime.effective_capability_rules["exec.arbitrary"], "ask"
+            )
             for command in ("git reset --hard", 'python3 -c "print(1)"'):
                 with self.subTest(command=command):
-                    with self.assertRaises(ToolFailure) as cm:
-                        runtime._check_command_policy(command, {})
-                    self.assertEqual(cm.exception.code, "PERMISSION_REQUIRED")
+                    runtime._check_command_policy(command, {})
 
     def test_command_env_core_is_not_windows_toolchain_specific(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -701,13 +720,13 @@ class RuntimeHelperTests(unittest.TestCase):
             self.assertEqual(info.get("network_allowed"), False)
             self.assertIsInstance(info.get("landlock"), dict)
             self.assertEqual(
-                info.get("exec_policy", {}).get("shell_expansion"), "blocked"
+                info.get("exec_policy", {}).get("shell_expansion"), "approval"
             )
             self.assertEqual(
-                info.get("exec_policy", {}).get("inline_script"), "blocked"
+                info.get("exec_policy", {}).get("inline_script"), "approval"
             )
             self.assertEqual(
-                info.get("exec_policy", {}).get("global_tmp_write"), "blocked"
+                info.get("exec_policy", {}).get("global_tmp_write"), "sandbox-private"
             )
             check = runtime.check_exec_environment({})
             self.assertTrue(check.get("ok"))
@@ -719,28 +738,31 @@ class RuntimeHelperTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             workspace = Path(tmp)
             safe = Runtime(workspace)
-            with self.assertRaises(ToolFailure):
-                safe._check_command_policy('python3 -c "print(1)"', {})
-            with self.assertRaises(ToolFailure):
-                safe._check_command_policy("echo $(pwd)", {})
-            with self.assertRaises(ToolFailure):
-                safe._check_command_policy("curl https://example.com", {})
+            self.assertEqual(safe.policy_profile, "safe")
+            self.assertEqual(safe.effective_capability_rules["exec.arbitrary"], "ask")
+            self.assertEqual(safe.effective_capability_rules["network.public"], "ask")
+            self.assertEqual(safe.global_tmp_write_policy(), "sandbox-private")
 
             trusted = Runtime(workspace, permission_mode="trusted")
-            trusted._check_command_policy('python3 -c "print(1)"', {})
-            trusted._check_command_policy("echo $(pwd)", {})
-            trusted._check_command_policy("curl https://example.com", {})
-            self.assertEqual(trusted.global_tmp_write_policy(), "tmp-prefix")
+            self.assertEqual(trusted.policy_profile, "power")
+            self.assertEqual(
+                trusted.effective_capability_rules["exec.arbitrary"], "auto"
+            )
+            self.assertEqual(
+                trusted.effective_capability_rules["network.public"], "auto"
+            )
+            self.assertEqual(trusted.global_tmp_write_policy(), "sandbox-private")
             self.assertEqual(trusted.command_tmp_dir().parent, trusted.runtime_dir)
             self.assertEqual(trusted.runtime_dir.parent.parent, runtime_parent_root())
-            with self.assertRaises(ToolFailure):
-                trusted._check_command_policy("git reset --hard", {})
 
             dangerous = Runtime(workspace, permission_mode="dangerous")
-            dangerous._check_command_policy("cat /etc/passwd", {})
-            dangerous._check_command_policy("git reset --hard", {})
-            self.assertFalse(dangerous.landlock_enabled())
-            self.assertEqual(dangerous.global_tmp_write_policy(), "allowed")
+            self.assertEqual(dangerous.policy_profile, "autonomous")
+            self.assertEqual(
+                dangerous.effective_capability_rules["exec.arbitrary"], "auto"
+            )
+            self.assertFalse(dangerous.dangerously_skip_all_permissions)
+            self.assertTrue(dangerous.landlock_enabled())
+            self.assertEqual(dangerous.global_tmp_write_policy(), "sandbox-private")
 
     def test_command_env_all_preserves_toolchain_environment_but_filters_sensitive_values(
         self,
@@ -771,7 +793,7 @@ class RuntimeHelperTests(unittest.TestCase):
             self.assertNotIn("PYTHONPATH", env)
             self.assertNotIn("DYLD_LIBRARY_PATH", env)
 
-    def test_command_env_dangerous_all_preserves_sensitive_inherited_environment(
+    def test_command_env_dangerous_all_still_filters_sensitive_inherited_environment(
         self,
     ) -> None:
         with TemporaryDirectory() as tmp:
@@ -787,8 +809,8 @@ class RuntimeHelperTests(unittest.TestCase):
             with patch.dict(server_module.os.environ, host_env, clear=True):
                 env = runtime._command_env({})
 
-            self.assertEqual(env.get("OPENAI_API_KEY"), "fixture-openai-key-value")
-            self.assertEqual(env.get("LD_PRELOAD"), "/tmp/injected.so")
+            self.assertNotIn("OPENAI_API_KEY", env)
+            self.assertNotIn("LD_PRELOAD", env)
 
     def test_runtime_root_stays_posix_tmp_when_process_tmpdir_is_workspace_local(
         self,
@@ -839,21 +861,23 @@ class RuntimeHelperTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             runtime = Runtime(Path(tmp))
             for command in (
-                "env cat /tmp/secret",
+                "env cat /etc/shadow",
                 "env FOO=bar cat ../outside-secret.txt",
-                "env -i --unset FOO cat /tmp/secret",
-                "env --chdir /tmp cat secret",
-                "env --ignore-signal cat /tmp/secret",
-                'env -S "cat /tmp/secret"',
+                "env -i --unset FOO cat /root/.ssh/id_rsa",
+                "env --chdir /root/.ssh cat id_rsa",
+                "env --ignore-signal cat /etc/gshadow",
+                'env -S "cat /etc/shadow"',
             ):
                 with self.subTest(command=command):
                     with self.assertRaises(ToolFailure) as cm:
                         runtime._check_command_policy(command, {})
-                    self.assertEqual(cm.exception.code, "PERMISSION_REQUIRED")
+                    self.assertIn(
+                        cm.exception.code, {"PERMISSION_REQUIRED", "ACCESS_DENIED"}
+                    )
 
     def test_exec_command_warns_and_runs_when_landlock_is_unavailable(self) -> None:
         with TemporaryDirectory() as tmp:
-            runtime = Runtime(Path(tmp))
+            runtime = Runtime(Path(tmp), policy_profile="autonomous")
             original = server_module.open_landlock_ruleset
 
             def unavailable(
@@ -881,7 +905,7 @@ class RuntimeHelperTests(unittest.TestCase):
 
     def test_exec_command_uses_landlock_wrapper_without_preexec_fn(self) -> None:
         with TemporaryDirectory() as tmp:
-            runtime = Runtime(Path(tmp))
+            runtime = Runtime(Path(tmp), policy_profile="autonomous")
             with fake_landlock_exec() as captured:
                 runtime.exec_command(
                     {"cmd": "printf ok", "timeout_ms": 5000, "yield_time_ms": 0}
@@ -914,7 +938,11 @@ class RuntimeHelperTests(unittest.TestCase):
                 self.subTest(permission_mode=permission_mode),
                 TemporaryDirectory() as tmp,
             ):
-                runtime = Runtime(Path(tmp), permission_mode=permission_mode)
+                runtime = Runtime(
+                    Path(tmp),
+                    permission_mode=permission_mode,
+                    policy_profile="autonomous",
+                )
                 with fake_landlock_exec() as captured:
                     runtime.exec_command(
                         {"cmd": "printf ok", "timeout_ms": 5000, "yield_time_ms": 0}
@@ -938,7 +966,8 @@ class RuntimeHelperTests(unittest.TestCase):
                 result = runtime.run_task(
                     {"task_id": "test.echo", "timeout_ms": 5000, "yield_time_ms": 5000}
                 )
-                self.assertEqual(result.get("status"), "exited", result)
+                self.assertEqual(result.get("status"), "success", result)
+                self.assertTrue(result.get("command_success"), result)
                 self.assertEqual(result.get("exit_code"), 0, result)
                 self.assertIsNone(runtime.sandbox)
                 sandbox_root = runtime.runtime_dir / "sandboxes"
@@ -955,7 +984,8 @@ class RuntimeHelperTests(unittest.TestCase):
                 result = runtime.exec_command(
                     {"cmd": "exit 7", "timeout_ms": 5000, "yield_time_ms": 5000}
                 )
-                self.assertEqual(result.get("status"), "exited", result)
+                self.assertEqual(result.get("status"), "failed", result)
+                self.assertFalse(result.get("command_success"), result)
                 self.assertEqual(result.get("exit_code"), 7, result)
                 self.assertIsNone(runtime.sandbox)
                 sandbox_root = runtime.runtime_dir / "sandboxes"
@@ -1296,18 +1326,25 @@ class RuntimeHelperTests(unittest.TestCase):
             self.assertEqual(list(owner_root.glob("sandbox-*")), [])
             self.assertEqual(list(owner_root.glob(".*.owner")), [])
 
-    def test_dangerously_skip_all_permissions_auto_grants_permission_gates(
+    def test_legacy_dangerous_maps_to_autonomous_without_disabling_host_floor(
         self,
     ) -> None:
         with TemporaryDirectory() as tmp:
             workspace = Path(tmp)
             default_runtime = Runtime(workspace)
-            with self.assertRaises(ToolFailure) as cm:
-                default_runtime._check_command_policy("curl https://example.com", {})
-            self.assertEqual(cm.exception.code, "PERMISSION_REQUIRED")
+            default_runtime._check_command_policy("curl https://example.com", {})
+            self.assertEqual(
+                default_runtime.effective_capability_rules["network.public"], "ask"
+            )
 
             dangerous_runtime = Runtime(workspace, permission_mode="dangerous")
             dangerous_runtime._check_command_policy("curl https://example.com", {})
+            self.assertEqual(dangerous_runtime.policy_profile, "autonomous")
+            self.assertEqual(
+                dangerous_runtime.effective_capability_rules["network.public"],
+                "auto",
+            )
+            self.assertFalse(dangerous_runtime.dangerously_skip_all_permissions)
 
             filtered_env = default_runtime._command_env(
                 {"OPENAI_API_KEY": "fixture-openai-key-value"}
@@ -1316,9 +1353,7 @@ class RuntimeHelperTests(unittest.TestCase):
                 {"OPENAI_API_KEY": "fixture-openai-key-value"}
             )
             self.assertNotIn("OPENAI_API_KEY", filtered_env)
-            self.assertEqual(
-                dangerous_env.get("OPENAI_API_KEY"), "fixture-openai-key-value"
-            )
+            self.assertNotIn("OPENAI_API_KEY", dangerous_env)
 
     def test_landlock_device_access_includes_truncate_and_ioctl_bits(self) -> None:
         handled = server_module.landlock_handled_access(5)
@@ -1362,7 +1397,7 @@ class RuntimeHelperTests(unittest.TestCase):
             self.skipTest("git is not available")
         with TemporaryDirectory() as tmp:
             workspace = Path(tmp)
-            runtime = Runtime(workspace)
+            runtime = Runtime(workspace, policy_profile="autonomous")
             with patch.dict(
                 server_module.os.environ,
                 {"PATH": os.environ.get("PATH", "")},
@@ -1381,7 +1416,8 @@ class RuntimeHelperTests(unittest.TestCase):
                         "max_output_bytes": 20000,
                     }
                 )
-        self.assertEqual(result.get("status"), "exited", result)
+        self.assertEqual(result.get("status"), "success", result)
+        self.assertTrue(result.get("command_success"), result)
         self.assertEqual(result.get("exit_code"), 0, result)
         self.assertNotIn(
             "unable to access '/etc/gitconfig'", str(result.get("stderr", ""))
@@ -1529,7 +1565,7 @@ Maven home: /usr/share/maven
                 {"cmd": "echo All checks completed.; exit 7", "timeout_ms": 10000},
             )
             model_text = self.agent_text(result)
-            self.assertIn("Status: exited", model_text)
+            self.assertIn("Status: failed", model_text)
             self.assertIn("exit code 7", model_text)
             self.assertIn("All checks completed.", model_text)
 
@@ -1818,7 +1854,8 @@ Maven home: /usr/share/maven
                     "preview_bytes": 64,
                 }
             )
-            self.assertEqual(result.get("status"), "exited", result)
+            self.assertEqual(result.get("status"), "success", result)
+            self.assertTrue(result.get("command_success"), result)
             self.assertEqual(result.get("exit_code"), 0, result)
             self.assertIn("summary", result)
             self.assertIn("preview", result)
@@ -1865,7 +1902,8 @@ Maven home: /usr/share/maven
                     }
                 )
                 stdout += str(result.get("stdout", ""))
-            self.assertEqual(result.get("status"), "exited", result)
+            self.assertEqual(result.get("status"), "success", result)
+            self.assertTrue(result.get("command_success"), result)
             self.assertIn("True True True", stdout)
 
     def test_completed_sessions_are_evicted_from_active_storage(self) -> None:
@@ -2126,8 +2164,8 @@ Maven home: /usr/share/maven
 
             # A here-string consumes only one word; chained commands stay live.
             with self.assertRaises(ToolFailure) as ctx:
-                runtime.exec_command({"cmd": "grep x <<< hi && cat /etc/passwd"})
-            self.assertEqual(ctx.exception.details.get("path"), "/etc/passwd")
+                runtime.exec_command({"cmd": "grep x <<< hi && cat /etc/shadow"})
+            self.assertEqual(ctx.exception.details.get("path"), "/etc/shadow")
 
     def test_git_helpers_use_command_environment(self) -> None:
         preflight_error = git_fixture_preflight_error()
@@ -2532,6 +2570,348 @@ Maven home: /usr/share/maven
             self.assertFalse(marker.exists())
 
     @unittest.skipIf(os.name == "nt", "fake executable fixture uses a POSIX shebang")
+    def test_antigravity_delegate_select_project_a_writes_only_a(self) -> None:
+        preflight_error = git_fixture_preflight_error()
+        if preflight_error is not None:
+            self.skipTest(preflight_error)
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo_a = root / "a"
+            repo_b = root / "b"
+            for repo in (repo_a, repo_b):
+                repo.mkdir()
+                (repo / "tracked.txt").write_text("base\n", encoding="utf-8")
+                init_git(repo)
+            fake = root / "agy"
+            fake.write_text(
+                "#!/usr/bin/env python3\n"
+                "import pathlib, sys\n"
+                "if '--version' in sys.argv:\n"
+                "    print('agy 9.9.9')\n"
+                "elif '--help' in sys.argv:\n"
+                "    print('--new-project --sandbox --output-format -p')\n"
+                "else:\n"
+                "    assert '--new-project' in sys.argv and '--sandbox' in sys.argv\n"
+                "    pathlib.Path('delegated.txt').write_text('a-only\\n', encoding='utf-8')\n"
+                '    print(\'{"status":"SUCCESS"}\')\n',
+                encoding="utf-8",
+            )
+            fake.chmod(0o700)
+            runtime = Runtime(repo_b, policy_profile="autonomous", project_roots=[root])
+            try:
+                runtime.select_project({"project": "a"})
+                with patch.object(
+                    runtime, "_antigravity_binary", return_value=str(fake)
+                ):
+                    result = runtime.antigravity_delegate({"prompt": "Write marker."})
+                self.assertTrue(result["task_ok"])
+                self.assertEqual((repo_a / "delegated.txt").read_text(), "a-only\n")
+                self.assertFalse((repo_b / "delegated.txt").exists())
+            finally:
+                runtime.close()
+
+    @unittest.skipIf(os.name == "nt", "fake executable fixture uses a POSIX shebang")
+    def test_antigravity_delegate_reselects_b_and_writes_only_b(self) -> None:
+        preflight_error = git_fixture_preflight_error()
+        if preflight_error is not None:
+            self.skipTest(preflight_error)
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo_a = root / "a"
+            repo_b = root / "b"
+            for repo in (repo_a, repo_b):
+                repo.mkdir()
+                (repo / "tracked.txt").write_text("base\n", encoding="utf-8")
+                init_git(repo)
+            fake = root / "agy"
+            fake.write_text(
+                "#!/usr/bin/env python3\n"
+                "import pathlib, sys\n"
+                "if '--version' in sys.argv:\n"
+                "    print('agy 9.9.9')\n"
+                "elif '--help' in sys.argv:\n"
+                "    print('--new-project --sandbox --output-format -p')\n"
+                "else:\n"
+                "    pathlib.Path('delegated.txt').write_text('b-only\\n', encoding='utf-8')\n"
+                '    print(\'{"status":"SUCCESS"}\')\n',
+                encoding="utf-8",
+            )
+            fake.chmod(0o700)
+            runtime = Runtime(repo_a, policy_profile="autonomous", project_roots=[root])
+            try:
+                runtime.select_project({"project": "a"})
+                runtime.select_project({"project": "b"})
+                with patch.object(
+                    runtime, "_antigravity_binary", return_value=str(fake)
+                ):
+                    runtime.antigravity_delegate({"prompt": "Write marker."})
+                self.assertFalse((repo_a / "delegated.txt").exists())
+                self.assertEqual((repo_b / "delegated.txt").read_text(), "b-only\n")
+            finally:
+                runtime.close()
+
+    @unittest.skipIf(os.name == "nt", "fake executable fixture uses a POSIX shebang")
+    def test_antigravity_delegate_ignores_persisted_other_session_project(self) -> None:
+        preflight_error = git_fixture_preflight_error()
+        if preflight_error is not None:
+            self.skipTest(preflight_error)
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo_a = root / "a"
+            repo_b = root / "b"
+            state_file = root / "active-project"
+            for repo in (repo_a, repo_b):
+                repo.mkdir()
+                (repo / "tracked.txt").write_text("base\n", encoding="utf-8")
+                init_git(repo)
+            fake = root / "agy"
+            fake.write_text(
+                "#!/usr/bin/env python3\n"
+                "import pathlib, sys\n"
+                "if '--version' in sys.argv:\n"
+                "    print('agy 9.9.9')\n"
+                "elif '--help' in sys.argv:\n"
+                "    print('--new-project --sandbox --output-format -p')\n"
+                "else:\n"
+                "    pathlib.Path('delegated.txt').write_text('session-a\\n', encoding='utf-8')\n"
+                '    print(\'{"status":"SUCCESS"}\')\n',
+                encoding="utf-8",
+            )
+            fake.chmod(0o700)
+            session_a = Runtime(
+                repo_a,
+                policy_profile="autonomous",
+                project_roots=[root],
+                active_project_file=state_file,
+            )
+            session_b = Runtime(
+                repo_a,
+                policy_profile="autonomous",
+                project_roots=[root],
+                active_project_file=state_file,
+            )
+            try:
+                session_a.select_project({"project": "a"})
+                session_b.select_project({"project": "b"})
+                self.assertEqual(state_file.read_text().strip(), str(repo_b.resolve()))
+                self.assertEqual(session_a.current_project({})["relative_path"], "a")
+                with patch.object(
+                    session_a, "_antigravity_binary", return_value=str(fake)
+                ):
+                    session_a.antigravity_delegate({"prompt": "Write marker."})
+                self.assertEqual((repo_a / "delegated.txt").read_text(), "session-a\n")
+                self.assertFalse((repo_b / "delegated.txt").exists())
+            finally:
+                session_a.close()
+                session_b.close()
+
+    @unittest.skipIf(os.name == "nt", "fake executable fixture uses a POSIX shebang")
+    def test_antigravity_cwd_guard_fails_before_agent_exec(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            actual = root / "actual"
+            expected = root / "expected"
+            actual.mkdir()
+            expected.mkdir()
+            marker = root / "agent-started"
+            fake = root / "agy"
+            fake.write_text(
+                "#!/usr/bin/env python3\n"
+                "import pathlib\n"
+                f"pathlib.Path({str(marker)!r}).write_text('started')\n",
+                encoding="utf-8",
+            )
+            fake.chmod(0o700)
+            guarded = Runtime._antigravity_guarded_argv([str(fake)], expected)
+            result = processes_module.run_bounded_process(
+                guarded, cwd=str(actual), timeout=5
+            )
+            self.assertEqual(result.returncode, 125)
+            self.assertIn("DEVMCP_AGY_CWD_MISMATCH", result.stderr)
+            self.assertFalse(marker.exists())
+
+    def test_antigravity_env_replaces_stale_workspace_and_state_hints(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            runtime = Runtime(repo)
+            try:
+                with patch.dict(
+                    os.environ,
+                    {
+                        "PATH": os.environ.get("PATH", os.defpath),
+                        "HOME": str(root / "home"),
+                        "PWD": "/home/jar/Documents/projects/TicketWise",
+                        "OLDPWD": "/home/jar/Documents/projects/TicketWise-old",
+                        "XDG_CONFIG_HOME": str(root / "config"),
+                        "XDG_CACHE_HOME": str(root / "ambient-cache"),
+                        "XDG_STATE_HOME": str(root / "ambient-state"),
+                        "AGY_LAST_PROJECT": "/home/jar/Documents/projects/TicketWise",
+                    },
+                    clear=True,
+                ):
+                    env = runtime._antigravity_env(repo)
+                self.assertEqual(env["PWD"], str(repo.resolve()))
+                self.assertEqual(env["OLDPWD"], str(repo.resolve()))
+                self.assertEqual(env["HOME"], str(root / "home"))
+                self.assertEqual(env["XDG_CONFIG_HOME"], str(root / "config"))
+                self.assertNotEqual(env["XDG_CACHE_HOME"], str(root / "ambient-cache"))
+                self.assertNotEqual(env["XDG_STATE_HOME"], str(root / "ambient-state"))
+                self.assertTrue(
+                    Path(env["XDG_CACHE_HOME"]).is_relative_to(runtime.runtime_dir)
+                )
+                self.assertTrue(
+                    Path(env["XDG_STATE_HOME"]).is_relative_to(runtime.runtime_dir)
+                )
+                self.assertNotIn("AGY_LAST_PROJECT", env)
+            finally:
+                runtime.close()
+
+    @unittest.skipIf(os.name == "nt", "fake executable fixture uses a POSIX shebang")
+    def test_antigravity_dirty_a_does_not_block_clean_selected_b(self) -> None:
+        preflight_error = git_fixture_preflight_error()
+        if preflight_error is not None:
+            self.skipTest(preflight_error)
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo_a = root / "a"
+            repo_b = root / "b"
+            for repo in (repo_a, repo_b):
+                repo.mkdir()
+                (repo / "tracked.txt").write_text("base\n", encoding="utf-8")
+                init_git(repo)
+            (repo_a / "tracked.txt").write_text("dirty-a\n", encoding="utf-8")
+            fake = root / "agy"
+            fake.write_text(
+                "#!/usr/bin/env python3\n"
+                "import pathlib, sys\n"
+                "if '--version' in sys.argv:\n"
+                "    print('agy 9.9.9')\n"
+                "elif '--help' in sys.argv:\n"
+                "    print('--new-project --sandbox --output-format -p')\n"
+                "else:\n"
+                "    pathlib.Path('delegated.txt').write_text('clean-b\\n', encoding='utf-8')\n"
+                '    print(\'{"status":"SUCCESS"}\')\n',
+                encoding="utf-8",
+            )
+            fake.chmod(0o700)
+            runtime = Runtime(repo_a, policy_profile="autonomous", project_roots=[root])
+            try:
+                runtime.select_project({"project": "b"})
+                with patch.object(
+                    runtime, "_antigravity_binary", return_value=str(fake)
+                ):
+                    runtime.antigravity_delegate({"prompt": "Write marker."})
+                self.assertEqual((repo_b / "delegated.txt").read_text(), "clean-b\n")
+            finally:
+                runtime.close()
+
+    @unittest.skipIf(os.name == "nt", "fake executable fixture uses a POSIX shebang")
+    def test_antigravity_dirty_selected_b_blocks_before_launch(self) -> None:
+        preflight_error = git_fixture_preflight_error()
+        if preflight_error is not None:
+            self.skipTest(preflight_error)
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo_a = root / "a"
+            repo_b = root / "b"
+            for repo in (repo_a, repo_b):
+                repo.mkdir()
+                (repo / "tracked.txt").write_text("base\n", encoding="utf-8")
+                init_git(repo)
+            (repo_b / "tracked.txt").write_text("dirty-b\n", encoding="utf-8")
+            runtime = Runtime(repo_a, policy_profile="autonomous", project_roots=[root])
+            try:
+                runtime.select_project({"project": "b"})
+                with patch.object(runtime, "_antigravity_binary") as binary:
+                    with self.assertRaises(ToolFailure) as blocked:
+                        runtime.antigravity_delegate({"prompt": "Must not start."})
+                self.assertEqual(blocked.exception.code, "INVALID_STATE")
+                binary.assert_not_called()
+            finally:
+                runtime.close()
+
+    @unittest.skipIf(os.name == "nt", "fake executable fixture uses a POSIX shebang")
+    def test_antigravity_exit_zero_status_error_is_task_failure(self) -> None:
+        preflight_error = git_fixture_preflight_error()
+        if preflight_error is not None:
+            self.skipTest(preflight_error)
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            (repo / "tracked.txt").write_text("base\n", encoding="utf-8")
+            init_git(repo)
+            fake = root / "agy"
+            fake.write_text(
+                "#!/usr/bin/env python3\n"
+                "import sys\n"
+                "if '--version' in sys.argv:\n"
+                "    print('agy 9.9.9')\n"
+                "elif '--help' in sys.argv:\n"
+                "    print('--new-project --sandbox --output-format -p')\n"
+                "else:\n"
+                '    print(\'{"status":"ERROR","message":"logical failure"}\')\n',
+                encoding="utf-8",
+            )
+            fake.chmod(0o700)
+            runtime = Runtime(repo, policy_profile="autonomous", project_roots=[root])
+            try:
+                with patch.object(
+                    runtime, "_antigravity_binary", return_value=str(fake)
+                ):
+                    result = runtime.call_tool(
+                        "antigravity_delegate", {"prompt": "Report failure."}
+                    )
+                self.assertTrue(result["isError"])
+                structured = result["structuredContent"]
+                self.assertFalse(structured["ok"])
+                self.assertEqual(structured["error"]["code"], "AGENT_TASK_FAILED")
+                self.assertTrue(structured["error"]["details"]["process_ok"])
+                self.assertFalse(structured["error"]["details"]["task_ok"])
+            finally:
+                runtime.close()
+
+    @unittest.skipIf(os.name == "nt", "fake executable fixture uses a POSIX shebang")
+    def test_antigravity_fails_closed_without_workspace_sandbox(self) -> None:
+        preflight_error = git_fixture_preflight_error()
+        if preflight_error is not None:
+            self.skipTest(preflight_error)
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            (repo / "tracked.txt").write_text("base\n", encoding="utf-8")
+            init_git(repo)
+            outside = root / "outside-selected-workspace.txt"
+            fake = root / "agy"
+            fake.write_text(
+                "#!/usr/bin/env python3\n"
+                "import pathlib, sys\n"
+                f"outside = pathlib.Path({str(outside)!r})\n"
+                "if '--version' in sys.argv:\n"
+                "    print('agy 9.9.9')\n"
+                "elif '--help' in sys.argv:\n"
+                "    print('--new-project --output-format -p')\n"
+                "else:\n"
+                "    outside.write_text('escaped', encoding='utf-8')\n",
+                encoding="utf-8",
+            )
+            fake.chmod(0o700)
+            runtime = Runtime(repo, policy_profile="autonomous", project_roots=[root])
+            try:
+                with patch.object(
+                    runtime, "_antigravity_binary", return_value=str(fake)
+                ):
+                    with self.assertRaises(ToolFailure) as blocked:
+                        runtime.antigravity_delegate({"prompt": "Try to escape."})
+                self.assertEqual(blocked.exception.code, "SERVICE_UNAVAILABLE")
+                self.assertFalse(outside.exists())
+            finally:
+                runtime.close()
+
+    @unittest.skipIf(os.name == "nt", "fake executable fixture uses a POSIX shebang")
     def test_antigravity_hanging_process_times_out_and_cleans_worktree(self) -> None:
         preflight_error = git_fixture_preflight_error()
         if preflight_error is not None:
@@ -2550,7 +2930,7 @@ Maven home: /usr/share/maven
                 "if '--version' in sys.argv:\n"
                 "    print('agy 9.9.9')\n"
                 "elif '--help' in sys.argv:\n"
-                "    print('--sandbox --output-format -p')\n"
+                "    print('--new-project --sandbox --output-format -p')\n"
                 "else:\n"
                 "    child = \"import pathlib,time; time.sleep(2); pathlib.Path(%r).write_text('survived')\"\n"
                 "    subprocess.Popen([sys.executable, '-c', child])\n"
@@ -2608,7 +2988,7 @@ Maven home: /usr/share/maven
                 "if '--version' in sys.argv:\n"
                 "    print('agy 9.9.9')\n"
                 "elif '--help' in sys.argv:\n"
-                "    print('--sandbox --output-format -p')\n"
+                "    print('--new-project --sandbox --output-format -p')\n"
                 "else:\n"
                 "    attempt = int(counter.read_text()) + 1 if counter.exists() else 1\n"
                 "    counter.write_text(str(attempt))\n"
@@ -2669,7 +3049,7 @@ Maven home: /usr/share/maven
                 "if '--version' in sys.argv:\n"
                 "    print('agy 9.9.9')\n"
                 "elif '--help' in sys.argv:\n"
-                "    print('--sandbox --output-format -p')\n"
+                "    print('--new-project --sandbox --output-format -p')\n"
                 "else:\n"
                 "    attempt = int(counter.read_text()) + 1 if counter.exists() else 1\n"
                 "    counter.write_text(str(attempt))\n"
@@ -2717,7 +3097,7 @@ Maven home: /usr/share/maven
                 "if '--version' in sys.argv:\n"
                 "    print('agy 9.9.9')\n"
                 "elif '--help' in sys.argv:\n"
-                "    print('--sandbox --output-format -p')\n"
+                "    print('--new-project --sandbox --output-format -p')\n"
                 "else:\n"
                 '    print(\'{"result":"ok"}\')\n',
                 encoding="utf-8",
@@ -2771,7 +3151,7 @@ Maven home: /usr/share/maven
                 "if '--version' in sys.argv:\n"
                 "    print('agy 9.9.9')\n"
                 "elif '--help' in sys.argv:\n"
-                "    print('--sandbox --output-format -p')\n"
+                "    print('--new-project --sandbox --output-format -p')\n"
                 "else:\n"
                 "    pathlib.Path('agent-added.txt').write_text('delegated\\n', encoding='utf-8')\n"
                 '    print(\'{\\"result\\":\\"ok\\"}\')\n',
@@ -2802,6 +3182,98 @@ Maven home: /usr/share/maven
                 runtime.close()
 
     @unittest.skipIf(os.name == "nt", "fake executable fixture uses a POSIX shebang")
+    def test_antigravity_does_not_apply_over_concurrent_selected_repo_changes(self) -> None:
+        preflight_error = git_fixture_preflight_error()
+        if preflight_error is not None:
+            self.skipTest(preflight_error)
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            tracked = repo / "tracked.txt"
+            tracked.write_text("base\n", encoding="utf-8")
+            init_git(repo)
+            fake = root / "agy"
+            fake.write_text(
+                "#!/usr/bin/env python3\n"
+                "import pathlib, sys\n"
+                f"authoritative = pathlib.Path({str(repo)!r})\n"
+                "if '--version' in sys.argv:\n"
+                "    print('agy 9.9.9')\n"
+                "elif '--help' in sys.argv:\n"
+                "    print('--new-project --sandbox --output-format -p')\n"
+                "else:\n"
+                "    pathlib.Path('agent-added.txt').write_text('delegated\\n', encoding='utf-8')\n"
+                "    (authoritative / 'tracked.txt').write_text('concurrent-user-change\\n', encoding='utf-8')\n"
+                "    print('{\"status\":\"SUCCESS\"}')\n",
+                encoding="utf-8",
+            )
+            fake.chmod(0o700)
+            runtime = Runtime(repo, policy_profile="autonomous", project_roots=[root])
+            try:
+                with patch.object(
+                    runtime, "_antigravity_binary", return_value=str(fake)
+                ):
+                    with self.assertRaises(ToolFailure) as conflict:
+                        runtime.antigravity_delegate(
+                            {"prompt": "Add a delegated marker file.", "timeout_seconds": 30}
+                        )
+                self.assertEqual(conflict.exception.code, "TRANSACTION_CONFLICT")
+                self.assertEqual(
+                    tracked.read_text(encoding="utf-8"), "concurrent-user-change\n"
+                )
+                self.assertFalse((repo / "agent-added.txt").exists())
+            finally:
+                runtime.close()
+
+    @unittest.skipIf(os.name == "nt", "fake executable fixture uses a POSIX shebang")
+    def test_antigravity_does_not_apply_after_same_commit_branch_switch(self) -> None:
+        preflight_error = git_fixture_preflight_error()
+        if preflight_error is not None:
+            self.skipTest(preflight_error)
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            (repo / "tracked.txt").write_text("base\n", encoding="utf-8")
+            init_git(repo)
+            subprocess.run(
+                ["git", "-C", str(repo), "branch", "other"],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            fake = root / "agy"
+            fake.write_text(
+                "#!/usr/bin/env python3\n"
+                "import pathlib, subprocess, sys\n"
+                f"authoritative = pathlib.Path({str(repo)!r})\n"
+                "if '--version' in sys.argv:\n"
+                "    print('agy 9.9.9')\n"
+                "elif '--help' in sys.argv:\n"
+                "    print('--new-project --sandbox --output-format -p')\n"
+                "else:\n"
+                "    pathlib.Path('agent-added.txt').write_text('delegated\\n', encoding='utf-8')\n"
+                "    subprocess.run(['git', '-C', str(authoritative), 'switch', 'other'], check=True, stdout=subprocess.DEVNULL)\n"
+                "    print('{\"status\":\"SUCCESS\"}')\n",
+                encoding="utf-8",
+            )
+            fake.chmod(0o700)
+            runtime = Runtime(repo, policy_profile="autonomous", project_roots=[root])
+            try:
+                with patch.object(
+                    runtime, "_antigravity_binary", return_value=str(fake)
+                ):
+                    with self.assertRaises(ToolFailure) as conflict:
+                        runtime.antigravity_delegate(
+                            {"prompt": "Add a delegated marker file.", "timeout_seconds": 30}
+                        )
+                self.assertEqual(conflict.exception.code, "TRANSACTION_CONFLICT")
+                self.assertFalse((repo / "agent-added.txt").exists())
+            finally:
+                runtime.close()
+
+    @unittest.skipIf(os.name == "nt", "fake executable fixture uses a POSIX shebang")
     def test_antigravity_delegate_discards_delete_attempts(self) -> None:
         preflight_error = git_fixture_preflight_error()
         if preflight_error is not None:
@@ -2819,7 +3291,7 @@ Maven home: /usr/share/maven
                 "if '--version' in sys.argv:\n"
                 "    print('agy 9.9.9')\n"
                 "elif '--help' in sys.argv:\n"
-                "    print('--sandbox --output-format -p')\n"
+                "    print('--new-project --sandbox --output-format -p')\n"
                 "else:\n"
                 "    pathlib.Path('tracked.txt').unlink()\n"
                 '    print(\'{\\"result\\":\\"ignored-injection\\"}\')\n',
@@ -2885,7 +3357,7 @@ Maven home: /usr/share/maven
                 "if '--version' in sys.argv:\n"
                 "    print('agy 9.9.9')\n"
                 "elif '--help' in sys.argv:\n"
-                "    print('--sandbox --output-format -p')\n"
+                "    print('--new-project --sandbox --output-format -p')\n"
                 "else:\n"
                 "    pathlib.Path('tracked.txt').write_text('changed\\n', encoding='utf-8')\n"
                 '    print(\'{\\"result\\":\\"ok\\"}\')\n',
@@ -3165,7 +3637,8 @@ class FakeReadonlyAnnotationTests(unittest.TestCase):
                     "yield_time_ms": 30000,
                 }
             )
-            self.assertEqual(result.get("status"), "exited", result)
+            self.assertEqual(result.get("status"), "success", result)
+            self.assertTrue(result.get("command_success"), result)
             self.assertEqual(result.get("stdout"), "ran\n")
             self.assertIsNone(runtime.sandbox)
 

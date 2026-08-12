@@ -87,7 +87,7 @@ class FileBaseline:
 class StagedFile:
     display: str
     path: Path
-    content: str | None
+    content: bytes | str | None
     baseline: FileBaseline
     mode: int | None
 
@@ -255,7 +255,12 @@ def _prepare_file(change: StagedFile) -> Path:
     temp_path = Path(raw_path)
     try:
         with os.fdopen(fd, "wb") as handle:
-            handle.write(change.content.encode("utf-8"))
+            data = (
+                change.content.encode("utf-8")
+                if isinstance(change.content, str)
+                else change.content
+            )
+            handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())
         os.chmod(temp_path, change.mode if change.mode is not None else 0o644)
