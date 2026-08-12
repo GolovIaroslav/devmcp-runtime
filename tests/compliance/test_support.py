@@ -13,7 +13,7 @@ from tests.compliance.mcp_client import MCPClient, MCPError
 class ComplianceTestCase(unittest.TestCase):
     fixture_name = "tiny-js-project"
     permission_mode = "trusted"
-    policy_profile = "balanced"
+    policy_profile: str | None = None
 
     def setUp(self) -> None:
         self.workspace_cm = workspace_from_fixture(self.fixture_name)

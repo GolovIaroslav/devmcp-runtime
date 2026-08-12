@@ -20,7 +20,7 @@ from coding_tools_mcp import server as server_module
 from coding_tools_mcp import processes as processes_module
 from coding_tools_mcp.approval import ApprovalEngine
 from coding_tools_mcp.patching import AtomicPatchCommitter, FileBaseline, StagedFile
-from coding_tools_mcp.sandbox import ExecutionSandbox
+from coding_tools_mcp.sandbox import ExecutionSandbox, SandboxBackend
 from coding_tools_mcp.server import (
     LANDLOCK_ACCESS_FS_IOCTL_DEV,
     LANDLOCK_ACCESS_FS_TRUNCATE,
@@ -652,6 +652,9 @@ class RuntimeHelperTests(unittest.TestCase):
             workspace = Path(tmp)
             runtime = Runtime(workspace, shell_env_policy=ShellEnvPolicy(inherit="all"))
             runtime._legacy_windows_process_fallback = True
+            runtime.sandbox_backend = SandboxBackend(
+                "bwrap", True, False, "bwrap unavailable on Windows"
+            )
             host_env = {
                 "PATH": "host-path",
                 "TMP": "host-tmp",
@@ -659,7 +662,7 @@ class RuntimeHelperTests(unittest.TestCase):
                 "TMPDIR": "host-tmpdir",
             }
             with patch.dict(server_module.os.environ, host_env, clear=True):
-                env = runtime._command_env({})
+                env = runtime._command_env({}, sandboxed=True)
 
             self.assertEqual(env.get("TMP"), "host-tmp")
             self.assertEqual(env.get("TEMP"), "host-temp")

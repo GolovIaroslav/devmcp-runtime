@@ -6068,7 +6068,11 @@ class Runtime:
                 ):
                     continue
                 env[key_text] = value_text
-        if sandboxed and self.sandbox_backend.name == "bwrap":
+        if (
+            sandboxed
+            and self.sandbox_backend.name == "bwrap"
+            and self.sandbox_backend.available
+        ):
             # bwrap mounts a fresh tmpfs at /tmp. Do not point a child at the
             # host-side runtime directory: it is not mounted in the namespace.
             # These private directories are inside the already-authorized
@@ -6338,10 +6342,9 @@ class Runtime:
                 if session.completed_at is not None and session.completed_at < cutoff
             ]
             for session_id in expired:
-                session = self.output_sessions.pop(session_id, None)
-                if session is not None:
-                    session.close_process_streams()
-                    session.release_owned_resources()
+                session = self.output_sessions.pop(session_id)
+                session.close_process_streams()
+                session.release_owned_resources()
             self._evict_retained_locked()
 
     def _shared_job_session(self, session_id: str) -> ExecSession | None:
