@@ -2144,21 +2144,17 @@ class Runtime:
         return "runtime-private-host-dir"
 
     def shell_expansion_policy(self) -> str:
-        if not self._profile_managed:
-            return "allowed"
-        decision = self.effective_capability_rules["exec.arbitrary"]
-        return {"auto": "allowed", "ask": "approval", "deny": "blocked"}[decision]
+        return "allowed" if self.execution_mode == "build" else "plan-mode; read-only"
 
     def inline_script_policy(self) -> str:
-        if not self._profile_managed:
-            return "allowed"
-        decision = self.effective_capability_rules["exec.arbitrary"]
-        return {"auto": "allowed", "ask": "approval", "deny": "blocked"}[decision]
+        return "allowed" if self.execution_mode == "build" else "plan-mode; read-only"
 
     def secret_env_filter_policy(self) -> str:
-        if not self._profile_managed and self.permission_mode == "dangerous":
-            return "inherited-host-environment"
-        return "always-filtered; exact-name lease required for host secret injection"
+        return (
+            "inherited-host-environment"
+            if self.execution_mode == "build"
+            else "plan-mode; read-only"
+        )
 
     def landlock_enabled(self) -> bool:
         return self._profile_managed and self.sandbox_backend.name not in {
@@ -2555,7 +2551,14 @@ class Runtime:
                 "global_tmp_write": self.global_tmp_write_policy(),
                 "secret_env_filter": self.secret_env_filter_policy(),
             },
-            "permission_policy": AUTO_ALLOW_POLICY,
+            "permission_policy": {
+                "execution_mode": self.execution_mode,
+                "effective_access": self.effective_access,
+                "legacy_permission_mode_compat": self.permission_mode,
+                "status": "BUILD execution mode: direct host OS user authority (no in-process approval or command deny policy applied)"
+                if self.execution_mode == "build"
+                else "PLAN execution mode: read-only confinement",
+            },
             "shell_env_inherit": self.shell_env_policy.inherit,
             "shell_env_include_only": list(self.shell_env_policy.include_only),
             "shell_env_exclude": list(self.shell_env_policy.exclude),

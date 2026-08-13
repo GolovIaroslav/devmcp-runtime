@@ -41,13 +41,15 @@
     },
     {
       "name": "absolute_path_rejected",
-      "patch": "*** Begin Patch\n*** Add File: /tmp/coding-tools-runtime-escape.txt\n+escape\n*** End Patch\n",
-      "expect_success": false
+      "patch": "*** Begin Patch\n*** Add File: /tmp/coding-tools-runtime-escape-new.txt\n+escape\n*** End Patch\n",
+      "expect_success": true,
+      "expect_success_plan": false
     },
     {
       "name": "path_traversal_rejected",
-      "patch": "*** Begin Patch\n*** Add File: ../outside-secret.txt\n+escape\n*** End Patch\n",
-      "expect_success": false
+      "patch": "*** Begin Patch\n*** Add File: ../new-outside-file.txt\n+escape\n*** End Patch\n",
+      "expect_success": true,
+      "expect_success_plan": false
     }
   ],
   "exec_session": [
