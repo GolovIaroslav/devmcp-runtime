@@ -87,7 +87,7 @@ class WindowsMsvcEnvironmentSmokeTests(unittest.TestCase):
             self.skipTest("requires Windows with vcvars initialized for cl.exe")
 
     def test_workspace_write_preserves_host_msvc_toolchain_with_core_env(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             workspace = Path(tmp)
             write_hello_c(workspace)
             with StdioMCPClient(
@@ -117,7 +117,7 @@ class WindowsMsvcEnvironmentSmokeTests(unittest.TestCase):
     def test_inherit_all_preserves_msvc_environment_for_single_file_compile(
         self,
     ) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             workspace = Path(tmp)
             write_hello_c(workspace)
             with StdioMCPClient(
