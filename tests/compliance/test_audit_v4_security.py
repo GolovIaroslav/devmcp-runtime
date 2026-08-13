@@ -18,93 +18,66 @@ from tests.compliance.test_support import ComplianceTestCase
 
 
 class AuditV4SecurityTests(ComplianceTestCase):
-    def test_host_mirror_replaces_sandbox_symlink_without_following_target(
-        self,
-    ) -> None:
+    def test_read_only_workspace_cannot_create_symlink(self) -> None:
         if shutil.which("bwrap") is None:
-            self.skipTest("bwrap is required for the host-mirror regression")
+            self.skipTest("bwrap is required for the read-only regression")
         sentinel = self.workspace.root.parent / "host-sentinel.txt"
         sentinel.write_text("must remain byte-identical\n", encoding="utf-8")
         link_script = self.workspace.root / "make_link.py"
         link_script.write_text(
             "import os\n"
-            "import time\n"
-            f"os.symlink({str(sentinel)!r}, 'future-file.txt')\n"
-            "print('READY', flush=True)\n"
-            "time.sleep(30)\n",
+            f"os.symlink({str(sentinel)!r}, 'future-file.txt')\n",
             encoding="utf-8",
         )
         runtime = Runtime(self.workspace.root)
-        session_id = ""
         try:
             result = runtime.exec_command(
                 {
                     "cmd": "python3 make_link.py",
-                    "timeout_ms": 30000,
-                    "yield_time_ms": 1000,
+                    "timeout_ms": 5000,
+                    "yield_time_ms": 5000,
                 }
             )
-            self.assertEqual(result.get("status"), "running", result)
-            self.assertIn("READY", result.get("stdout", ""))
-            session_id = str(result["session_id"])
-            sandbox = runtime.sandbox
-            self.assertIsNotNone(sandbox)
-            assert sandbox is not None
-            patch = "*** Begin Patch\n*** Add File: future-file.txt\n+safe mirror content\n*** End Patch\n"
-            applied = runtime.apply_patch({"patch": patch})
-            self.assertEqual(applied.get("risk"), "ALLOW", applied)
+            self.assertNotEqual(result.get("exit_code"), 0, result)
             self.assertEqual(
                 sentinel.read_text(encoding="utf-8"), "must remain byte-identical\n"
             )
-            self.assertEqual(
-                (sandbox.sandbox_dir / "future-file.txt").read_text(encoding="utf-8"),
-                "safe mirror content\n",
-            )
-            self.assertFalse((sandbox.sandbox_dir / "future-file.txt").is_symlink())
+            self.assertFalse((self.workspace.root / "future-file.txt").exists())
+            self.assertIsNone(runtime.sandbox)
         finally:
-            if session_id:
-                runtime.cancel_session(session_id)
             runtime.close()
 
-    def test_snapshot_hides_secrets_from_a_normal_script(self) -> None:
+    def test_read_only_uses_authoritative_workspace_without_snapshot(self) -> None:
         if shutil.which("bwrap") is None:
-            self.skipTest("bwrap is required for the snapshot regression")
+            self.skipTest("bwrap is required for the read-only regression")
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
-            (root / ".env").write_text(
-                "AUDIT_V4_SECRET=must-not-leak\n", encoding="utf-8"
-            )
-            (root / ".env.local").write_text(
-                "AUDIT_V4_SECRET=must-not-leak\n", encoding="utf-8"
-            )
-            (root / "certificate.pem").write_text(
-                "private material\n", encoding="utf-8"
-            )
-            (root / "example.key").write_text("private material\n", encoding="utf-8")
-            (root / ".env.example").write_text(
-                "AUDIT_V4_SECRET=example\n", encoding="utf-8"
-            )
-            (root / "read_secret.py").write_text(
+            target = root / "tracked.txt"
+            target.write_text("authoritative\n", encoding="utf-8")
+            (root / "read_only_probe.py").write_text(
                 "from pathlib import Path\n"
-                "path = Path('.env')\n"
-                "print(path.exists())\n"
-                "print(path.read_text() if path.exists() else 'missing')\n"
-                "print(Path('.env.example').exists())\n",
+                "path = Path('tracked.txt')\n"
+                "print(path.read_text().strip())\n"
+                "try:\n"
+                "    path.write_text('changed\\n')\n"
+                "except OSError:\n"
+                "    print('READ_ONLY')\n"
+                "else:\n"
+                "    raise AssertionError('read-only workspace accepted a write')\n",
                 encoding="utf-8",
             )
             runtime = Runtime(root)
             try:
                 result = runtime.exec_command(
                     {
-                        "cmd": "python3 read_secret.py",
+                        "cmd": "python3 read_only_probe.py",
                         "timeout_ms": 5000,
                         "yield_time_ms": 5000,
                     }
                 )
                 self.assertEqual(result.get("exit_code"), 0, result)
-                self.assertNotIn("AUDIT_V4_SECRET", result.get("stdout", ""))
-                self.assertNotIn("must-not-leak", result.get("stdout", ""))
-                self.assertEqual(result.get("stdout"), "False\nmissing\nTrue\n")
+                self.assertEqual(result.get("stdout"), "authoritative\nREAD_ONLY\n")
+                self.assertEqual(target.read_text(encoding="utf-8"), "authoritative\n")
                 self.assertIsNone(runtime.sandbox)
             finally:
                 runtime.close()

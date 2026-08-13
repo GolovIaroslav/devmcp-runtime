@@ -249,6 +249,10 @@ def _status(_: argparse.Namespace) -> int:
     healthy, ready = _tunnel_health_flags(tunnel)
     pending = len(ApprovalEngine(selected.approvals_db).list_pending())
     print(f"DevMCP Runtime {__version__}")
+    print(f"runtime sha: {config.get('installed_runtime_sha') or 'unknown'}")
+    print(
+        f"development runtime: {'yes' if config.get('installed_runtime_development_mode') else 'no'}"
+    )
     print(f"MCP process: {'running' if _active(MCP_SERVICE) else 'stopped'}")
     print(f"MCP health: {'ok' if _mcp_health(config, selected) else 'fail'}")
     print(f"MCP workspace: {config.get('workspace')}")
@@ -786,10 +790,11 @@ def _service_update(args: argparse.Namespace) -> int:
     if git is None:
         print("git is required to update the installed DevMCP runtime", file=sys.stderr)
         return 1
-    for command, expected in (
-        ([git, "-C", str(source), "rev-parse", "HEAD"], expected_sha),
-        ([git, "-C", str(source), "branch", "--show-current"], "main"),
-    ):
+    development_mode = bool(args.development_mode)
+    checks = [([git, "-C", str(source), "rev-parse", "HEAD"], expected_sha)]
+    if not development_mode:
+        checks.append(([git, "-C", str(source), "branch", "--show-current"], "main"))
+    for command, expected in checks:
         check_result = subprocess.run(
             command,
             text=True,
@@ -803,6 +808,23 @@ def _service_update(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 1
+    if development_mode:
+        branch_result = subprocess.run(
+            [git, "-C", str(source), "branch", "--show-current"],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=30,
+        )
+        if branch_result.returncode != 0 or not branch_result.stdout.strip():
+            print(
+                "DevMCP development update requires a named local branch",
+                file=sys.stderr,
+            )
+            return 1
+        source_branch = branch_result.stdout.strip()
+    else:
+        source_branch = "main"
     for diff_args in (("diff", "--quiet"), ("diff", "--cached", "--quiet")):
         dirty_result = subprocess.run(
             [git, "-C", str(source), *diff_args],
@@ -838,6 +860,12 @@ def _service_update(args: argparse.Namespace) -> int:
         sys.stderr.write(install.stdout)
         return install.returncode
 
+    selected, config = _config()
+    config["installed_runtime_sha"] = expected_sha
+    config["installed_runtime_branch"] = source_branch
+    config["installed_runtime_development_mode"] = development_mode
+    save_config(config, selected)
+
     refreshed_python = Path(sys.executable)
     if not refreshed_python.is_file():
         print(
@@ -871,6 +899,11 @@ def _serve(_: argparse.Namespace) -> int:
 
     os.environ["DEVMCP_POLICY_CONFIG_FILE"] = str(selected.config_file)
     os.environ["DEVMCP_ACTIVE_PROJECT_FILE"] = str(selected.root / "active-project")
+    installed_sha = str(config.get("installed_runtime_sha", "")).strip().lower()
+    if len(installed_sha) == 40 and all(
+        ch in "0123456789abcdef" for ch in installed_sha
+    ):
+        os.environ["DEVMCP_INSTALLED_RUNTIME_SHA"] = installed_sha
     if secret_status(selected)["git_credentials_configured"]:
         os.environ["DEVMCP_GIT_CREDENTIALS_FILE"] = str(selected.git_credentials)
     server_args = [
@@ -1021,6 +1054,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     service_update.add_argument("--source", required=True)
     service_update.add_argument("--expected-sha", required=True)
+    service_update.add_argument(
+        "--development-mode",
+        action="store_true",
+        help="permit a clean named non-main branch while still pinning the exact source HEAD",
+    )
     service_sub.add_parser("uninstall")
     return parser
 

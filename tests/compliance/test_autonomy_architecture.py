@@ -91,7 +91,7 @@ class AutonomyArchitectureTests(unittest.TestCase):
                     finally:
                         runtime.close()
 
-    def test_legacy_dangerous_mode_does_not_disable_host_security_floor(self) -> None:
+    def test_legacy_dangerous_mode_is_full_access_for_shell_only(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / ".env").write_text("SECRET=x\n", encoding="utf-8")
@@ -102,7 +102,12 @@ class AutonomyArchitectureTests(unittest.TestCase):
             )
             try:
                 self.assertEqual(runtime.policy_profile, "autonomous")
-                self.assertFalse(runtime.dangerously_skip_all_permissions)
+                self.assertTrue(runtime.dangerously_skip_all_permissions)
+                executed = runtime.exec_command(
+                    {"cmd": "cat .env", "timeout_ms": 5000, "yield_time_ms": 5000}
+                )
+                self.assertEqual(executed.get("exit_code"), 0, executed)
+                self.assertEqual(executed.get("stdout"), "SECRET=x\n")
                 with self.assertRaises(ToolFailure) as blocked:
                     runtime.read_file({"path": str(root / ".env")})
                 self.assertEqual(blocked.exception.code, "ACCESS_DENIED")

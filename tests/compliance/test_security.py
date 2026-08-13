@@ -395,16 +395,15 @@ class SecurityComplianceTests(ComplianceTestCase):
         self.assertEqual(payload.get("matches"), [])
         self.assertEqual(payload.get("total_matches"), 0)
 
-    def test_risky_operations_return_local_approval_records(self) -> None:
+    def test_safe_read_only_blocks_destructive_git_mutation(self) -> None:
         result = self.client.call_tool(
             "exec_command",
             {"cmd": "curl https://example.com", "network_required": True},
         )
-        payload = self.assert_tool_error("exec_command", {"cmd": "git reset --hard"})
-        self.assertEqual(payload.get("status"), "approval_required")
-        self.assertIsInstance(payload.get("approval_id"), str)
-        self.assertIn("operation_summary", payload)
-        self.assertIn("capabilities", payload)
+        reset = self.client.call_tool("exec_command", {"cmd": "git reset --hard"})
+        payload = self.assert_tool_success(reset)
+        self.assertNotEqual(payload.get("exit_code"), 0, payload)
+        self.assertEqual(payload.get("execution_mode"), "read-only")
         self.assertNotEqual(result.get("status"), "unsupported")
 
     def test_stdout_json_rpc_pollution_is_absent(self) -> None:

@@ -734,7 +734,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     ),
     "service_update": ToolSpec(
         title="Update DevMCP service runtime",
-        description="Schedule a user-level update of the installed DevMCP runtime from a clean, synced local devmcp-runtime checkout, reinstall user services, and safely restart them.",
+        description="Schedule a user-level update of the installed DevMCP runtime from a clean pinned local checkout; development_mode explicitly permits a clean non-main branch for self-host testing.",
         destructive=True,
         open_world=True,
     ),
@@ -760,6 +760,12 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         read_only=True,
         idempotent=True,
     ),
+    "local_state_snapshot": ToolSpec(
+        title="Local state snapshot",
+        description="Return project, Git, dirty-path, runtime-version, service-SHA, and self-host execution state in one call.",
+        read_only=True,
+        idempotent=True,
+    ),
     "project_checks": ToolSpec(
         title="Project checks",
         description="Discover bounded project-native verification commands for the selected repository.",
@@ -769,6 +775,11 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     "run_project_check": ToolSpec(
         title="Run project check",
         description="Run one discovered project-native verification command in the selected repository sandbox.",
+        destructive=True,
+    ),
+    "run_checks_for_diff": ToolSpec(
+        title="Run checks for diff",
+        description="Detect changed files, select relevant discovered lint/typecheck/test checks, run them server-side, and return one aggregate result.",
         destructive=True,
     ),
     "read_file": ToolSpec(
@@ -822,6 +833,12 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     ),
     "search_text": ToolSpec(
         title="Search text", description="Search text.", read_only=True, idempotent=True
+    ),
+    "inspect_symbol": ToolSpec(
+        title="Inspect symbol",
+        description="Find a symbol definition, references, relevant tests, and bounded surrounding source in one call.",
+        read_only=True,
+        idempotent=True,
     ),
     "view_image": ToolSpec(
         title="View image",
@@ -1868,13 +1885,13 @@ class Runtime:
         self.effective_capability_rules = effective_rules(
             self.policy_profile, self.policy_rules
         )
-        # Compatibility-only startup switches are translated into the same
-        # capability matrix.  Execution code below this point must not consult
-        # an independent legacy permission model.
+        # Explicit policy profiles retain the legacy capability matrix as a
+        # compatibility path. Without one, permission_mode is only the thin
+        # adapter to read-only/workspace-write/full-access execution.
         if not self._explicit_policy_profile and allow_network:
             self.effective_capability_rules["network.public"] = "auto"
             self.effective_capability_rules["network.host_local"] = "auto"
-        self._profile_managed = True
+        self._profile_managed = self._explicit_policy_profile
         self.git_credentials_file = (
             git_credentials_file.expanduser().resolve()
             if git_credentials_file is not None and git_credentials_file.is_file()
@@ -1900,20 +1917,34 @@ class Runtime:
         self.max_removed_lines = max_removed_lines
         self.max_removed_percent = max_removed_percent
         self.capabilities = ModeCapabilities(
-            network=any(
-                self.effective_capability_rules[item] == "auto"
-                for item in ("network.public", "network.host_local")
+            network=(
+                any(
+                    self.effective_capability_rules[item] == "auto"
+                    for item in ("network.public", "network.host_local")
+                )
+                if self._profile_managed
+                else permission_mode in {"trusted", "dangerous"} or allow_network
             ),
-            shell_expansion=self.effective_capability_rules["exec.arbitrary"] == "auto",
-            inline_script=self.effective_capability_rules["exec.arbitrary"] == "auto",
-            landlock=self.sandbox_backend.name != "unsafe",
-            secret_env_filter=True,
-            global_tmp_write="sandbox-private",
-            skip_all_permissions=False,
+            shell_expansion=(
+                self.effective_capability_rules["exec.arbitrary"] == "auto"
+                if self._profile_managed
+                else True
+            ),
+            inline_script=(
+                self.effective_capability_rules["exec.arbitrary"] == "auto"
+                if self._profile_managed
+                else True
+            ),
+            landlock=self._profile_managed and self.sandbox_backend.name != "unsafe",
+            secret_env_filter=self._profile_managed or permission_mode != "dangerous",
+            global_tmp_write=(
+                "host" if not self._profile_managed and permission_mode == "dangerous" else "sandbox-private"
+            ),
+            skip_all_permissions=not self._profile_managed,
         )
-        # Retained only as a compatibility/diagnostic name.  The legacy
-        # dangerous mode no longer disables the host-security floor.
-        self.dangerously_skip_all_permissions = False
+        self.dangerously_skip_all_permissions = (
+            not self._profile_managed and permission_mode == "dangerous"
+        )
         # Faking annotations is only defensible where the caller has already
         # asserted the workspace is disposable, so bind it to that assertion
         # instead of letting it be set orthogonally.
@@ -2221,23 +2252,31 @@ class Runtime:
         return self.tmp_dir
 
     def global_tmp_write_policy(self) -> str:
+        if not self._profile_managed and self.permission_mode == "dangerous":
+            return "host"
         if self.sandbox_backend.name in {"bwrap", "inherited"}:
             return "sandbox-private"
         return "runtime-private-host-dir"
 
     def shell_expansion_policy(self) -> str:
+        if not self._profile_managed:
+            return "allowed"
         decision = self.effective_capability_rules["exec.arbitrary"]
         return {"auto": "allowed", "ask": "approval", "deny": "blocked"}[decision]
 
     def inline_script_policy(self) -> str:
+        if not self._profile_managed:
+            return "allowed"
         decision = self.effective_capability_rules["exec.arbitrary"]
         return {"auto": "allowed", "ask": "approval", "deny": "blocked"}[decision]
 
     def secret_env_filter_policy(self) -> str:
+        if not self._profile_managed and self.permission_mode == "dangerous":
+            return "inherited-host-environment"
         return "always-filtered; exact-name lease required for host secret injection"
 
     def landlock_enabled(self) -> bool:
-        return self.sandbox_backend.name not in {
+        return self._profile_managed and self.sandbox_backend.name not in {
             "unsafe",
             "inherited",
         }
@@ -2997,6 +3036,76 @@ class Runtime:
     def current_project(self, args: dict[str, Any]) -> dict[str, Any]:
         return dict(self.active_project)
 
+    def _installed_runtime_sha(self) -> str | None:
+        value = os.environ.get("DEVMCP_INSTALLED_RUNTIME_SHA", "").strip().lower()
+        if re.fullmatch(r"[0-9a-f]{40}", value):
+            return value
+        config_path = os.environ.get("DEVMCP_POLICY_CONFIG_FILE", "").strip()
+        if not config_path:
+            return None
+        try:
+            with Path(config_path).open("rb") as handle:
+                config = tomllib.load(handle)
+        except (OSError, tomllib.TOMLDecodeError):
+            return None
+        configured = str(config.get("installed_runtime_sha", "")).strip().lower()
+        return configured if re.fullmatch(r"[0-9a-f]{40}", configured) else None
+
+    def local_state_snapshot(self, args: dict[str, Any]) -> dict[str, Any]:
+        status = self.git_status({})
+        entries = status.get("entries", []) if status.get("is_repo") else []
+        dirty_paths = sorted(
+            {
+                str(item.get("path", ""))
+                for item in entries
+                if isinstance(item, dict) and item.get("path")
+            }
+        )
+        staged_paths = sorted(
+            {
+                str(item.get("path", ""))
+                for item in entries
+                if isinstance(item, dict)
+                and str(item.get("index_status", " ")) != " "
+                and item.get("path")
+            }
+        )
+        source_sha = str(status.get("head") or "") or None
+        installed_sha = self._installed_runtime_sha()
+        default_execution_mode = {
+            "safe": "read-only",
+            "trusted": "workspace-write",
+            "dangerous": "full-access",
+        }[self.permission_mode]
+        return {
+            "project": dict(self.active_project),
+            "branch": status.get("branch"),
+            "head": source_sha,
+            "upstream": status.get("upstream"),
+            "ahead": status.get("ahead", 0),
+            "behind": status.get("behind", 0),
+            "dirty_paths": dirty_paths,
+            "staged_paths": staged_paths,
+            "service": {
+                "version": __version__,
+                "installed_sha": installed_sha,
+            },
+            "self_host": {
+                "source_checkout_sha": source_sha,
+                "source_is_devmcp": self._is_devmcp_source_checkout(
+                    self.workspace.root
+                ),
+                "installed_matches_source": bool(
+                    installed_sha and source_sha and installed_sha == source_sha
+                ),
+                "nested_sandbox": os.environ.get("DEVMCP_INHERITED_SANDBOX") == "1",
+                "default_execution_mode": default_execution_mode,
+                "compatibility_policy_profile": (
+                    self.policy_profile if self._profile_managed else None
+                ),
+            },
+        }
+
     def select_project(self, args: dict[str, Any]) -> dict[str, Any]:
         requested = str(args.get("project", "")).strip()
         if not requested:
@@ -3184,6 +3293,96 @@ class Runtime:
         result["check_id"] = check_id
         result["execution_environment"] = execution_environment
         return result
+
+    def run_checks_for_diff(self, args: dict[str, Any]) -> dict[str, Any]:
+        status = self.git_status({})
+        changed_files = sorted(
+            {
+                str(item.get("path", ""))
+                for item in status.get("entries", [])
+                if isinstance(item, dict) and item.get("path")
+            }
+        )
+        if not changed_files:
+            return {
+                "status": "no_changes",
+                "changed_files": [],
+                "selected_checks": [],
+                "results": [],
+                "command_success": True,
+            }
+
+        discovered = self._discovered_project_checks()
+        available = {str(item["id"]): item for item in discovered}
+        suffixes = {Path(path).suffix.lower() for path in changed_files}
+        names = {Path(path).name for path in changed_files}
+        docs_only = all(
+            Path(path).suffix.lower() in {".md", ".rst", ".txt"}
+            or path.startswith("docs/")
+            for path in changed_files
+        )
+        python_related = bool(
+            suffixes & {".py", ".pyi"}
+            or names & {"pyproject.toml", "uv.lock", "requirements.txt"}
+        )
+        typed_or_compiled = bool(
+            suffixes
+            & {
+                ".py",
+                ".pyi",
+                ".js",
+                ".jsx",
+                ".ts",
+                ".tsx",
+                ".rs",
+                ".go",
+                ".java",
+                ".c",
+                ".cc",
+                ".cpp",
+                ".h",
+                ".hpp",
+            }
+        )
+        preferred: list[str]
+        if docs_only:
+            preferred = ["format-check", "lint"]
+        elif python_related:
+            preferred = ["format-check", "lint", "typecheck", "test"]
+        elif typed_or_compiled:
+            preferred = ["lint", "typecheck", "test"]
+        else:
+            preferred = ["lint", "test"]
+        selected = [check_id for check_id in preferred if check_id in available]
+        max_checks = int(args.get("max_checks", 4))
+        selected = selected[:max_checks]
+        if not selected and "test" in available and not docs_only:
+            selected = ["test"]
+
+        timeout_ms = int(args.get("timeout_ms", 120000))
+        max_output_bytes = int(args.get("max_output_bytes", 262144))
+        results: list[dict[str, Any]] = []
+        all_passed = True
+        for check_id in selected:
+            result = self.run_project_check(
+                {
+                    "check_id": check_id,
+                    "timeout_ms": timeout_ms,
+                    "yield_time_ms": timeout_ms,
+                    "max_output_bytes": max_output_bytes,
+                    "approval_id": args.get("approval_id"),
+                }
+            )
+            results.append(result)
+            if result.get("status") != "success" or result.get("exit_code") != 0:
+                all_passed = False
+        return {
+            "status": "success" if all_passed else "failed",
+            "changed_files": changed_files,
+            "selected_checks": selected,
+            "results": results,
+            "command_success": all_passed,
+        }
 
     def emit_tool_trace(
         self,
@@ -3700,6 +3899,84 @@ class Runtime:
             "warnings": ["result limit reached"] if total > len(matches) else [],
         }
 
+    def inspect_symbol(self, args: dict[str, Any]) -> dict[str, Any]:
+        symbol = str(args.get("symbol", "")).strip()
+        if not symbol:
+            raise ToolFailure(
+                "INVALID_ARGUMENT", "symbol is required.", category="validation"
+            )
+        context_lines = int(args.get("context_lines", 4))
+        max_results = int(args.get("max_results", 40))
+        searched = self.search_text(
+            {
+                "path": str(args.get("path", ".")),
+                "query": rf"\b{re.escape(symbol)}\b",
+                "is_regex": True,
+                "case_sensitive": True,
+                "context_lines": 0,
+                "max_results": max_results,
+            }
+        )
+        definition_re = re.compile(
+            rf"(?:\b(?:async\s+def|def|class|function|interface|type|const|let|var|fn|struct|enum|trait|static|func)\s+{re.escape(symbol)}\b|\bfunc\s+\([^)]*\)\s*{re.escape(symbol)}\b)"
+        )
+
+        def decorate(match: dict[str, Any]) -> dict[str, Any]:
+            path_text = str(match.get("path", ""))
+            line = int(match.get("line", 1))
+            resolved = self.resolve_existing(path_text)
+            start = max(1, line - context_lines)
+            end = line + context_lines
+            try:
+                lines = resolved.path.read_text(
+                    encoding="utf-8", errors="replace"
+                ).splitlines()
+            except OSError:
+                lines = []
+            end = min(end, len(lines)) if lines else line
+            surrounding = "\n".join(lines[start - 1 : end]) if lines else ""
+            preview = str(match.get("preview", ""))
+            return {
+                "path": path_text,
+                "line": line,
+                "column": match.get("column"),
+                "preview": preview,
+                "start_line": start,
+                "end_line": end,
+                "surrounding_source": surrounding,
+            }
+
+        definitions: list[dict[str, Any]] = []
+        references: list[dict[str, Any]] = []
+        tests: list[dict[str, Any]] = []
+        for raw_match in searched.get("matches", []):
+            if not isinstance(raw_match, dict):
+                continue
+            item = decorate(raw_match)
+            path_lower = str(item["path"]).lower()
+            is_test = (
+                "/test" in f"/{path_lower}"
+                or path_lower.startswith("test")
+                or Path(path_lower).name.startswith("test_")
+                or Path(path_lower).name.endswith("_test.py")
+                or Path(path_lower).name.endswith(".test.ts")
+                or Path(path_lower).name.endswith(".test.js")
+            )
+            if definition_re.search(str(item["preview"])):
+                definitions.append(item)
+            else:
+                references.append(item)
+            if is_test:
+                tests.append(item)
+        return {
+            "symbol": symbol,
+            "definitions": definitions,
+            "references": references,
+            "relevant_tests": tests,
+            "total_matches": searched.get("total_matches", len(definitions) + len(references)),
+            "truncated": bool(searched.get("truncated")),
+        }
+
     def _search_text_with_rg(
         self,
         resolved: ResolvedPath,
@@ -3913,6 +4190,9 @@ class Runtime:
                             category="security",
                         )
                     file_risk = "ASK" if decision == "ask" else "ALLOW"
+                elif self.permission_mode == "safe":
+                    policy_capabilities.add("workspace.create")
+                    file_risk = "ASK"
 
                 diff_lines = list(
                     difflib.unified_diff(
@@ -4013,6 +4293,10 @@ class Runtime:
                     removed_existing_lines > self.max_removed_lines
                     or pct_rem > self.max_removed_percent
                 ):
+                    policy_capabilities.add("workspace.patch_destructive")
+                    file_risk = "ASK"
+                elif self.permission_mode == "safe":
+                    policy_capabilities.add("workspace.patch_small")
                     file_risk = "ASK"
 
                 staged[source.display] = StagedFile(
@@ -4029,16 +4313,20 @@ class Runtime:
                         "Cannot delete a directory with Delete File.",
                         category="validation",
                     )
-                operation_decision = self._policy_decision_for_capabilities(
-                    {"workspace.delete"}
-                )
                 policy_capabilities.add("workspace.delete")
-                if operation_decision == "deny":
-                    raise ToolFailure(
-                        "ACCESS_DENIED",
-                        "Delete is disabled by the active policy profile.",
-                        category="security",
+                if self._profile_managed:
+                    operation_decision = self._policy_decision_for_capabilities(
+                        {"workspace.delete"}
                     )
+                    if operation_decision == "deny":
+                        raise ToolFailure(
+                            "ACCESS_DENIED",
+                            "Delete is disabled by the active policy profile.",
+                            category="security",
+                        )
+                    file_risk = "ASK" if operation_decision == "ask" else "ALLOW"
+                else:
+                    file_risk = "ASK"
                 baseline = FileBaseline.capture(source.path)
                 staged[source.display] = StagedFile(
                     source.display, source.path, None, baseline, None
@@ -4049,7 +4337,6 @@ class Runtime:
                 rem_lines = orig_lines
                 removed_existing_lines = orig_lines
                 pct_rem = 100.0 if orig_lines else 0.0
-                file_risk = "ASK" if operation_decision == "ask" else "ALLOW"
                 diff_chunks.append(
                     "".join(
                         difflib.unified_diff(
@@ -4084,16 +4371,22 @@ class Runtime:
                         "Move target already exists.",
                         category="validation",
                     )
-                operation_decision = self._policy_decision_for_capabilities(
-                    {"workspace.move"}
-                )
-                policy_capabilities.add("workspace.move")
-                if operation_decision == "deny":
-                    raise ToolFailure(
-                        "ACCESS_DENIED",
-                        "Move is disabled by the active policy profile.",
-                        category="security",
+                file_risk = "ALLOW"
+                if self._profile_managed:
+                    operation_decision = self._policy_decision_for_capabilities(
+                        {"workspace.move"}
                     )
+                    policy_capabilities.add("workspace.move")
+                    if operation_decision == "deny":
+                        raise ToolFailure(
+                            "ACCESS_DENIED",
+                            "Move is disabled by the active policy profile.",
+                            category="security",
+                        )
+                    file_risk = "ASK" if operation_decision == "ask" else "ALLOW"
+                elif self.permission_mode == "safe":
+                    policy_capabilities.add("workspace.move")
+                    file_risk = "ASK"
                 baseline = FileBaseline.capture(source.path)
                 staged[source.display] = StagedFile(
                     source.display, source.path, None, baseline, None
@@ -4110,7 +4403,6 @@ class Runtime:
                 rem_lines = orig_lines
                 removed_existing_lines = 0
                 pct_rem = 0.0
-                file_risk = "ASK" if operation_decision == "ask" else "ALLOW"
                 diff_chunks.append(
                     "".join(
                         difflib.unified_diff(
@@ -4711,17 +5003,23 @@ class Runtime:
                 "workspace-write execution requires permission_mode=trusted or dangerous.",
                 category="permission",
             )
-        if execution_mode in {"workspace-write", "full-access"}:
+        direct_read_only = execution_mode == "read-only" and not bool(
+            args.get("network_required") or args.get("network_targets")
+        )
+        use_fast_execution = not self._profile_managed and (
+            execution_mode in {"workspace-write", "full-access"} or direct_read_only
+        )
+        if use_fast_execution:
             internal_args = dict(args)
             internal_args.pop("approval_id", None)
             internal_args["cmd"] = action
             internal_args["transaction_mode"] = transaction_mode
             internal_args["_execution_mode"] = execution_mode
-            internal_args["_selected_executor"] = (
-                "workspace_host"
-                if execution_mode == "workspace-write"
-                else "unsafe_host"
-            )
+            internal_args["_selected_executor"] = {
+                "read-only": "read_only_workspace",
+                "workspace-write": "workspace_host",
+                "full-access": "unsafe_host",
+            }[execution_mode]
             internal_args["_resolved_workdir"] = self._operation_workdir(args).path
             internal_args["_approved_capabilities"] = []
             if isinstance(action, list):
@@ -5224,6 +5522,18 @@ class Runtime:
         task_args["approval_class"] = "ALLOW"
         task_args["_argv_task"] = True
         task_args["_approved_capabilities"] = sorted(capabilities)
+        if not self._profile_managed:
+            execution_mode = {
+                "safe": "read-only",
+                "trusted": "workspace-write",
+                "dangerous": "full-access",
+            }[self.permission_mode]
+            task_args["_execution_mode"] = execution_mode
+            task_args["_selected_executor"] = {
+                "read-only": "read_only_workspace",
+                "workspace-write": "workspace_host",
+                "full-access": "unsafe_host",
+            }[execution_mode]
         return self._execute_command_legacy(task_args)
 
     def _execute_command_legacy(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -8828,7 +9138,7 @@ class Runtime:
         return str(project.get("name", "")).strip() == "devmcp-runtime"
 
     def _validated_devmcp_update_source(
-        self, source_project: str | None
+        self, source_project: str | None, *, development_mode: bool = False
     ) -> tuple[Path, str]:
         candidates = [
             item
@@ -8860,11 +9170,19 @@ class Runtime:
         branch = self._run_git_text(
             [git, "-C", str(source), "branch", "--show-current"], timeout=30
         )
-        if branch.returncode != 0 or branch.stdout.strip() != "main":
+        branch_name = branch.stdout.strip() if branch.returncode == 0 else ""
+        if not branch_name:
             raise ToolFailure(
                 "INVALID_STATE",
-                "DevMCP service update requires the source checkout to be on main.",
+                "DevMCP service update requires a named local branch.",
                 category="runtime",
+            )
+        if not development_mode and branch_name != "main":
+            raise ToolFailure(
+                "INVALID_STATE",
+                "DevMCP service update requires main unless development_mode=true is explicitly requested.",
+                category="runtime",
+                details={"branch": branch_name},
             )
         for diff_args in (("diff", "--quiet"), ("diff", "--cached", "--quiet")):
             dirty = self._run_git_text([git, "-C", str(source), *diff_args], timeout=30)
@@ -8875,18 +9193,25 @@ class Runtime:
                     category="runtime",
                 )
         head = self._git_rev_parse(source, "HEAD")
-        upstream = self._git_rev_parse(source, "origin/main")
-        if not head or not upstream or head != upstream:
+        if not head:
             raise ToolFailure(
                 "INVALID_STATE",
-                "DevMCP service update requires local main to exactly match origin/main.",
+                "DevMCP service update could not resolve the source HEAD.",
                 category="runtime",
-                details={"head": head or None, "origin_main": upstream or None},
             )
+        if not development_mode:
+            upstream = self._git_rev_parse(source, "origin/main")
+            if not upstream or head != upstream:
+                raise ToolFailure(
+                    "INVALID_STATE",
+                    "DevMCP service update requires local main to exactly match origin/main.",
+                    category="runtime",
+                    details={"head": head, "origin_main": upstream or None},
+                )
         return source, head
 
     def _schedule_devmcp_update(
-        self, source: Path, expected_sha: str
+        self, source: Path, expected_sha: str, *, development_mode: bool = False
     ) -> dict[str, Any]:
         systemd_run = shutil.which("systemd-run")
         if systemd_run is None:
@@ -8896,25 +9221,28 @@ class Runtime:
                 category="environment",
             )
         unit = f"devmcp-self-update-{os.getpid()}-{secrets.token_hex(4)}"
+        command = [
+            systemd_run,
+            "--user",
+            "--quiet",
+            "--collect",
+            f"--unit={unit}",
+            "--on-active=1s",
+            f"--working-directory={source}",
+            sys.executable,
+            "-m",
+            "apps.devmcp.cli",
+            "service",
+            "update",
+            "--source",
+            str(source),
+            "--expected-sha",
+            expected_sha,
+        ]
+        if development_mode:
+            command.append("--development-mode")
         result = subprocess.run(
-            [
-                systemd_run,
-                "--user",
-                "--quiet",
-                "--collect",
-                f"--unit={unit}",
-                "--on-active=1s",
-                f"--working-directory={source}",
-                sys.executable,
-                "-m",
-                "apps.devmcp.cli",
-                "service",
-                "update",
-                "--source",
-                str(source),
-                "--expected-sha",
-                expected_sha,
-            ],
+            command,
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -8937,6 +9265,7 @@ class Runtime:
             "delay_seconds": 1,
             "source": str(source),
             "expected_sha": expected_sha,
+            "development_mode": development_mode,
         }
 
     def service_update(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -8946,12 +9275,21 @@ class Runtime:
         )
         if source_project == "":
             source_project = None
-        action = "update installed DevMCP runtime from synced local main"
+        development_mode = bool(args.get("development_mode", False))
+        action = (
+            "update installed DevMCP runtime from pinned clean development branch"
+            if development_mode
+            else "update installed DevMCP runtime from synced local main"
+        )
         pending = self._profile_authorize_operation("service.manage", args, action)
         if pending is not None:
             return pending
-        source, expected_sha = self._validated_devmcp_update_source(source_project)
-        return self._schedule_devmcp_update(source, expected_sha)
+        source, expected_sha = self._validated_devmcp_update_source(
+            source_project, development_mode=development_mode
+        )
+        return self._schedule_devmcp_update(
+            source, expected_sha, development_mode=development_mode
+        )
 
     def activate_policy_profile(self, args: dict[str, Any]) -> dict[str, Any]:
         profile = str(args.get("profile", "")).strip().lower()
@@ -10974,6 +11312,7 @@ def input_schemas() -> dict[str, dict[str, Any]]:
         "service_update": object_schema(
             {
                 "source_project": string,
+                "development_mode": {**boolean, "default": False},
                 "approval_id": string,
             }
         ),
@@ -10989,6 +11328,7 @@ def input_schemas() -> dict[str, dict[str, Any]]:
             {"project": {**string, "minLength": 1}}, ["project"]
         ),
         "current_project": object_schema(),
+        "local_state_snapshot": object_schema(),
         "project_checks": object_schema(),
         "run_project_check": object_schema(
             {
@@ -11009,6 +11349,24 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                 "approval_id": string,
             },
             ["check_id"],
+        ),
+        "run_checks_for_diff": object_schema(
+            {
+                "timeout_ms": {**integer, "minimum": 1, "default": 120000},
+                "max_output_bytes": {
+                    **integer,
+                    "minimum": 1,
+                    "maximum": 1048576,
+                    "default": 262144,
+                },
+                "max_checks": {
+                    **integer,
+                    "minimum": 1,
+                    "maximum": 8,
+                    "default": 4,
+                },
+                "approval_id": string,
+            }
         ),
         "read_file": object_schema(
             {
@@ -11199,6 +11557,25 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                 },
             },
             ["query"],
+        ),
+        "inspect_symbol": object_schema(
+            {
+                "symbol": {**string, "minLength": 1, "maxLength": 256},
+                "path": {**string, "default": "."},
+                "context_lines": {
+                    **integer,
+                    "minimum": 0,
+                    "maximum": 20,
+                    "default": 4,
+                },
+                "max_results": {
+                    **integer,
+                    "minimum": 1,
+                    "maximum": 100,
+                    "default": 40,
+                },
+            },
+            ["symbol"],
         ),
         "view_image": object_schema(
             {

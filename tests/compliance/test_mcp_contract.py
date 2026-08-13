@@ -135,8 +135,10 @@ class MCPContractTests(ComplianceTestCase):
             "list_projects": (True, False, True, False),
             "select_project": (False, False, True, False),
             "current_project": (True, False, True, False),
+            "local_state_snapshot": (True, False, True, False),
             "project_checks": (True, False, True, False),
             "run_project_check": (False, True, False, False),
+            "run_checks_for_diff": (False, True, False, False),
             "check_exec_environment": (True, False, True, False),
             "get_default_cwd": (True, False, True, False),
             "set_default_cwd": (False, False, True, False),
@@ -150,6 +152,7 @@ class MCPContractTests(ComplianceTestCase):
             "list_dir": (True, False, True, False),
             "list_files": (True, False, True, False),
             "search_text": (True, False, True, False),
+            "inspect_symbol": (True, False, True, False),
             "apply_patch": (False, True, False, False),
             "exec_command": (False, True, False, True),
             "exec_argv": (False, True, False, True),
@@ -264,7 +267,7 @@ class MCPContractTests(ComplianceTestCase):
         old_trace = os.environ.get("CODING_TOOLS_MCP_TRACE")
         os.environ["CODING_TOOLS_MCP_TRACE"] = "1"
         try:
-            with MCPClient(self.workspace.root) as traced:
+            with MCPClient(self.workspace.root, policy_profile="balanced") as traced:
                 traced.call_tool(
                     "exec_command",
                     {

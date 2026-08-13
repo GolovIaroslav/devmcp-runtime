@@ -741,10 +741,10 @@ class RuntimeHelperTests(unittest.TestCase):
             self.assertEqual(info.get("network_allowed"), False)
             self.assertIsInstance(info.get("landlock"), dict)
             self.assertEqual(
-                info.get("exec_policy", {}).get("shell_expansion"), "approval"
+                info.get("exec_policy", {}).get("shell_expansion"), "allowed"
             )
             self.assertEqual(
-                info.get("exec_policy", {}).get("inline_script"), "approval"
+                info.get("exec_policy", {}).get("inline_script"), "allowed"
             )
             self.assertEqual(
                 info.get("exec_policy", {}).get("global_tmp_write"), "sandbox-private"
@@ -781,9 +781,12 @@ class RuntimeHelperTests(unittest.TestCase):
             self.assertEqual(
                 dangerous.effective_capability_rules["exec.arbitrary"], "auto"
             )
-            self.assertFalse(dangerous.dangerously_skip_all_permissions)
-            self.assertTrue(dangerous.landlock_enabled())
-            self.assertEqual(dangerous.global_tmp_write_policy(), "sandbox-private")
+            self.assertTrue(dangerous.dangerously_skip_all_permissions)
+            self.assertFalse(dangerous.landlock_enabled())
+            self.assertEqual(dangerous.global_tmp_write_policy(), "host")
+            self.assertEqual(
+                dangerous.secret_env_filter_policy(), "inherited-host-environment"
+            )
 
     def test_command_env_all_preserves_toolchain_environment_but_filters_sensitive_values(
         self,
@@ -814,13 +817,12 @@ class RuntimeHelperTests(unittest.TestCase):
             self.assertNotIn("PYTHONPATH", env)
             self.assertNotIn("DYLD_LIBRARY_PATH", env)
 
-    def test_command_env_dangerous_all_still_filters_sensitive_inherited_environment(
-        self,
-    ) -> None:
+    def test_command_env_explicit_policy_still_filters_sensitive_environment(self) -> None:
         with TemporaryDirectory() as tmp:
             runtime = Runtime(
                 Path(tmp),
                 permission_mode="dangerous",
+                policy_profile="autonomous",
                 shell_env_policy=ShellEnvPolicy(inherit="all"),
             )
             host_env = {
@@ -953,7 +955,9 @@ class RuntimeHelperTests(unittest.TestCase):
             self.assertIsInstance(argv, list)
             self.assertTrue(any(str(a).endswith("landlock_exec.py") for a in argv))
 
-    def test_exec_command_passes_runtime_write_root_to_landlock(self) -> None:
+    def test_normal_exec_does_not_initialize_landlock(self) -> None:
+        if os.name == "nt" or shutil.which("bwrap") is None:
+            self.skipTest("bwrap is required")
         for permission_mode in ("safe", "trusted"):
             with (
                 self.subTest(permission_mode=permission_mode),
@@ -962,21 +966,19 @@ class RuntimeHelperTests(unittest.TestCase):
                 runtime = Runtime(
                     Path(tmp),
                     permission_mode=permission_mode,
-                    policy_profile="autonomous",
+                    sandbox_backend="bwrap",
                 )
-                with fake_landlock_exec() as captured:
-                    runtime.exec_command(
+                with patch.object(
+                    server_module,
+                    "open_landlock_ruleset",
+                    side_effect=AssertionError("normal execution must not use Landlock"),
+                ):
+                    result = runtime.exec_command(
                         {"cmd": "printf ok", "timeout_ms": 5000, "yield_time_ms": 0}
                     )
-
-                write_roots = captured.get("write_roots")
-                self.assertIsInstance(write_roots, list)
-                self.assertEqual(write_roots[1], runtime.runtime_dir)
-                self.assertEqual(
-                    write_roots[0].parent, runtime.runtime_dir / "sandboxes"
-                )
-                self.assertFalse(write_roots[0].exists())
+                self.assertIn(result.get("status"), {"running", "success"}, result)
                 self.assertIsNone(runtime.sandbox)
+                runtime.close()
 
     def test_completed_execution_releases_owned_sandbox(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -1094,7 +1096,14 @@ class RuntimeHelperTests(unittest.TestCase):
                 side_effect=KeyboardInterrupt(),
             ):
                 with self.assertRaises(KeyboardInterrupt):
-                    runtime.exec_command({"cmd": "printf unreachable"})
+                    runtime.exec_command(
+                        {
+                            "cmd": "printf unreachable",
+                            "transaction_mode": "apply",
+                            "timeout_ms": 5000,
+                            "yield_time_ms": 5000,
+                        }
+                    )
             self.assertIsNone(runtime.sandbox)
             self.assertEqual(runtime.sandbox_users, 0)
             runtime.close()
@@ -1298,48 +1307,49 @@ class RuntimeHelperTests(unittest.TestCase):
         session.release_owned_resources()
         self.assertEqual(cleanup_calls, 1)
 
-    def test_cancelled_execution_releases_owned_sandbox(self) -> None:
+    def test_cancelled_direct_execution_does_not_create_owned_sandbox(self) -> None:
         with TemporaryDirectory() as tmp:
-            runtime = Runtime(
-                Path(tmp), permission_mode="trusted", sandbox_backend="unsafe"
-            )
+            workspace = Path(tmp)
+            runtime = Runtime(workspace, permission_mode="trusted", sandbox_backend="unsafe")
             try:
-                started = runtime.exec_command(
-                    {"cmd": "sleep 30", "timeout_ms": 30000, "yield_time_ms": 0}
-                )
+                with patch.object(
+                    ExecutionSandbox,
+                    "create",
+                    side_effect=AssertionError("direct execution must not snapshot"),
+                ):
+                    started = runtime.exec_command(
+                        {"cmd": "sleep 30", "timeout_ms": 30000, "yield_time_ms": 0}
+                    )
                 self.assertEqual(started.get("status"), "running", started)
                 session_id = str(started["session_id"])
-                sandbox = runtime.sandbox
-                self.assertIsNotNone(sandbox)
-                assert sandbox is not None
-                sandbox_path = sandbox.sandbox_dir
-                self.assertTrue(sandbox_path.is_dir())
+                self.assertIsNone(runtime.sandbox)
 
                 runtime.cancel_session(session_id)
 
                 self.assertIsNone(runtime.sandbox)
-                self.assertFalse(sandbox_path.exists())
+                self.assertTrue(workspace.exists())
             finally:
                 runtime.close()
 
-    def test_runtime_close_releases_running_sandbox(self) -> None:
+    def test_runtime_close_reaps_direct_execution_without_snapshot(self) -> None:
         with TemporaryDirectory() as tmp:
-            runtime = Runtime(
-                Path(tmp), permission_mode="trusted", sandbox_backend="unsafe"
-            )
-            started = runtime.exec_command(
-                {"cmd": "sleep 30", "timeout_ms": 30000, "yield_time_ms": 0}
-            )
+            workspace = Path(tmp)
+            runtime = Runtime(workspace, permission_mode="trusted", sandbox_backend="unsafe")
+            with patch.object(
+                ExecutionSandbox,
+                "create",
+                side_effect=AssertionError("direct execution must not snapshot"),
+            ):
+                started = runtime.exec_command(
+                    {"cmd": "sleep 30", "timeout_ms": 30000, "yield_time_ms": 0}
+                )
             self.assertEqual(started.get("status"), "running", started)
-            sandbox = runtime.sandbox
-            self.assertIsNotNone(sandbox)
-            assert sandbox is not None
-            sandbox_path = sandbox.sandbox_dir
+            self.assertIsNone(runtime.sandbox)
 
             runtime.close()
 
             self.assertIsNone(runtime.sandbox)
-            self.assertFalse(sandbox_path.exists())
+            self.assertTrue(workspace.exists())
 
     def test_sandbox_cleanup_cannot_escape_owned_temp_boundary(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -1381,9 +1391,7 @@ class RuntimeHelperTests(unittest.TestCase):
             self.assertEqual(list(owner_root.glob("sandbox-*")), [])
             self.assertEqual(list(owner_root.glob(".*.owner")), [])
 
-    def test_legacy_dangerous_maps_to_autonomous_without_disabling_host_floor(
-        self,
-    ) -> None:
+    def test_legacy_dangerous_maps_to_full_access_shell_environment(self) -> None:
         with TemporaryDirectory() as tmp:
             workspace = Path(tmp)
             default_runtime = Runtime(workspace)
@@ -1399,16 +1407,21 @@ class RuntimeHelperTests(unittest.TestCase):
                 dangerous_runtime.effective_capability_rules["network.public"],
                 "auto",
             )
-            self.assertFalse(dangerous_runtime.dangerously_skip_all_permissions)
-
-            filtered_env = default_runtime._command_env(
-                {"OPENAI_API_KEY": "fixture-openai-key-value"}
-            )
-            dangerous_env = dangerous_runtime._command_env(
-                {"OPENAI_API_KEY": "fixture-openai-key-value"}
-            )
-            self.assertNotIn("OPENAI_API_KEY", filtered_env)
-            self.assertNotIn("OPENAI_API_KEY", dangerous_env)
+            self.assertTrue(dangerous_runtime.dangerously_skip_all_permissions)
+            with patch.dict(
+                server_module.os.environ,
+                {"OPENAI_API_KEY": "fixture-openai-key-value"},
+                clear=False,
+            ):
+                inherited = dangerous_runtime.exec_command(
+                    {
+                        "cmd": 'python -c "import os; print(os.environ[\'OPENAI_API_KEY\'])"',
+                        "timeout_ms": 5000,
+                        "yield_time_ms": 5000,
+                    }
+                )
+            self.assertEqual(inherited.get("exit_code"), 0, inherited)
+            self.assertEqual(inherited.get("stdout"), "fixture-openai-key-value\n")
 
     def test_landlock_device_access_includes_truncate_and_ioctl_bits(self) -> None:
         handled = server_module.landlock_handled_access(5)
@@ -3668,6 +3681,123 @@ Maven home: /usr/share/maven
                 self.assertNotEqual(test_check["argv"][0], "pytest")
             finally:
                 runtime.close()
+
+    def test_local_state_snapshot_aggregates_git_and_self_host_state(self) -> None:
+        preflight_error = git_fixture_preflight_error()
+        if preflight_error is not None:
+            self.skipTest(preflight_error)
+        with TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            tracked = repo / "tracked.py"
+            tracked.write_text("value = 1\n", encoding="utf-8")
+            init_git(repo)
+            tracked.write_text("value = 2\n", encoding="utf-8")
+            subprocess.run(["git", "add", "tracked.py"], cwd=repo, check=True)
+            installed_sha = "a" * 40
+            with patch.dict(
+                os.environ,
+                {"DEVMCP_INSTALLED_RUNTIME_SHA": installed_sha},
+                clear=False,
+            ):
+                runtime = Runtime(repo, permission_mode="trusted", sandbox_backend="unsafe")
+                try:
+                    snapshot = runtime.local_state_snapshot({})
+                finally:
+                    runtime.close()
+            self.assertEqual(snapshot["service"]["installed_sha"], installed_sha)
+            self.assertEqual(snapshot["self_host"]["default_execution_mode"], "workspace-write")
+            self.assertIn("tracked.py", snapshot["dirty_paths"])
+            self.assertIn("tracked.py", snapshot["staged_paths"])
+            self.assertEqual(len(str(snapshot["head"])), 40)
+
+    def test_inspect_symbol_returns_definition_references_and_tests(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "module.py").write_text(
+                "def target(value):\n    return value + 1\n\nresult = target(1)\n",
+                encoding="utf-8",
+            )
+            tests = root / "tests"
+            tests.mkdir()
+            (tests / "test_module.py").write_text(
+                "from module import target\n\ndef test_target():\n    assert target(1) == 2\n",
+                encoding="utf-8",
+            )
+            runtime = Runtime(root, permission_mode="trusted", sandbox_backend="unsafe")
+            try:
+                inspected = runtime.inspect_symbol(
+                    {"symbol": "target", "context_lines": 1, "max_results": 20}
+                )
+            finally:
+                runtime.close()
+            self.assertTrue(
+                any(item["path"] == "module.py" for item in inspected["definitions"]),
+                inspected,
+            )
+            self.assertTrue(inspected["references"], inspected)
+            self.assertTrue(
+                any(
+                    item["path"] == "tests/test_module.py"
+                    for item in inspected["relevant_tests"]
+                ),
+                inspected,
+            )
+
+    def test_run_checks_for_diff_selects_python_checks_and_aggregates(self) -> None:
+        with TemporaryDirectory() as tmp:
+            runtime = Runtime(
+                Path(tmp), permission_mode="trusted", sandbox_backend="unsafe"
+            )
+            discovered = [
+                {"id": check_id, "argv": ["true"]}
+                for check_id in ("format-check", "lint", "typecheck", "test")
+            ]
+
+            def successful_check(call_args: dict[str, object]) -> dict[str, object]:
+                return {
+                    "status": "success",
+                    "exit_code": 0,
+                    "command_success": True,
+                    "check_id": call_args["check_id"],
+                }
+
+            try:
+                with (
+                    patch.object(
+                        runtime,
+                        "git_status",
+                        return_value={
+                            "is_repo": True,
+                            "entries": [
+                                {
+                                    "path": "coding_tools_mcp/server.py",
+                                    "index_status": " ",
+                                    "worktree_status": "M",
+                                }
+                            ],
+                        },
+                    ),
+                    patch.object(
+                        runtime, "_discovered_project_checks", return_value=discovered
+                    ),
+                    patch.object(
+                        runtime, "run_project_check", side_effect=successful_check
+                    ) as run_check,
+                ):
+                    result = runtime.run_checks_for_diff(
+                        {"timeout_ms": 5000, "max_checks": 4}
+                    )
+            finally:
+                runtime.close()
+            self.assertEqual(
+                result["selected_checks"],
+                ["format-check", "lint", "typecheck", "test"],
+            )
+            self.assertTrue(result["command_success"], result)
+            self.assertEqual(run_check.call_count, 4)
+            for call in run_check.call_args_list:
+                self.assertEqual(call.args[0]["yield_time_ms"], 5000)
 
     def test_broken_generic_git_tasks_are_not_advertised(self) -> None:
         with TemporaryDirectory() as tmp:

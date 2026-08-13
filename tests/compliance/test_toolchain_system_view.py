@@ -106,6 +106,7 @@ class ToolchainSystemViewTests(unittest.TestCase):
                     f"host python -m venv unavailable: {host_venv.stderr[-300:]}"
                 )
             shutil.rmtree(host_probe, ignore_errors=True)
+            host_has_pip = self._host_version_works([python, "-m", "pip", "--version"])
 
             runtime = self._workspace_runtime(root)
             try:
@@ -115,9 +116,10 @@ class ToolchainSystemViewTests(unittest.TestCase):
                     timeout_ms=60_000,
                 )
                 self.assertEqual(venv["status"], "success", venv)
-                pip = self._run(runtime, [python, "-m", "pip", "--version"])
-                self.assertEqual(pip["status"], "success", pip)
-                self.assertIn("pip", pip["stdout"].lower())
+                if host_has_pip:
+                    pip = self._run(runtime, [python, "-m", "pip", "--version"])
+                    self.assertEqual(pip["status"], "success", pip)
+                    self.assertIn("pip", pip["stdout"].lower())
             finally:
                 runtime.close()
 

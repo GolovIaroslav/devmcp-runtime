@@ -95,7 +95,8 @@ registry cleanup terminate/release owned resources.
   directory below the operator-configured `DEVMCP_GRANTABLE_ROOTS` ceiling as
   an in-memory `once`, `task`, or `session` read/write capability lease. Grants
   never survive restart or expand the operator ceiling. Filesystem tools,
-  patching, command path checks, and execution snapshots use the same root set.
+  patching, and command path checks use the same root set. Normal shell
+  execution does not create a repository snapshot.
   Project discovery roots are not grant authority; when
   `DEVMCP_GRANTABLE_ROOTS` is unset, the additional-root ceiling is empty.
 - `apply_patch` parses and validates every operation before committing.
@@ -196,15 +197,23 @@ runtime bytes are bounded. Completed sessions have a TTL. POSIX `tty=true` uses
 a real pseudo-terminal; Windows reports `TTY_UNSUPPORTED` in this build instead
 of pretending pipes are a TTY.
 
-Execution snapshots have explicit runtime ownership. A sandbox is created only
-under the runtime's private `sandboxes/` directory and carries an ownership
-marker outside the writable snapshot. Active command sessions hold leases on
-the snapshot; normal exit, non-zero exit, timeout, kill/cancellation, startup
-failure, and runtime shutdown release those leases. The last lease removes the
-snapshot synchronously before terminal completion is reported. Cleanup verifies
-the canonical owned path and marker before removal, so it cannot delete the
-selected repository or an unrelated caller-owned path. Completed commands do
-not retain repository-sized sandbox copies for later commands.
+Normal non-transactional execution never creates a repository-sized snapshot.
+`read-only` executes against the authoritative workspace mounted read-only by
+bwrap on Linux, with a private writable `/tmp`. `workspace-write` executes
+against the authoritative workspace mounted read-write by bwrap and uses the
+project's real environment/toolchain. Those normal bwrap paths do not add a
+second Landlock filesystem policy. `full-access` executes directly as the
+current user without bwrap, Landlock, or a workspace snapshot; it inherits the
+normal host filesystem, environment, temporary directories, network, and
+available user-level container tooling. `full-access` does not imply root or
+privilege escalation, and `sudo`/`su`/`doas` remain rejected.
+
+Repository snapshots remain only for explicit `transaction_mode="apply"`
+compatibility execution. Those owned snapshots still carry runtime ownership
+markers and are synchronously cleaned on normal exit, command failure, timeout,
+cancellation, startup failure, or runtime shutdown. Transaction cleanup verifies
+the canonical owned path before removal and cannot delete the selected real
+workspace.
 
 ## HTTP authentication
 
@@ -287,21 +296,22 @@ successful MCP health probe, then restarts the tunnel if its unit is installed.
 
 ### service_update
 
-Inputs: `"source_project"`, `"approval_id"`.
+Inputs: `"source_project"`, `"development_mode"`, `"approval_id"`.
 
 Annotations: `{"title":"Update DevMCP service runtime","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
 
 Controlled by `service.manage`. Resolves exactly one discovered local Git
 checkout whose `pyproject.toml` declares `project.name = "devmcp-runtime"`.
-The source must be on `main`, have no tracked or staged changes, and satisfy
-`HEAD == origin/main`; untracked files do not block the update. DevMCP records
-the full source SHA and schedules a delayed user-systemd transient unit so the
-current MCP response can complete first. The trusted CLI revalidates the source
-path, branch, cleanliness, and expected SHA to close the scheduling race, then
-runs a user-level `uv tool install --force` from that local checkout, reinstalls
-the user systemd units using the newly installed runtime, and performs the same
-MCP-health-before-tunnel restart sequence as `service_restart`. No sudo or
-system-level package/service mutation is used.
+The normal source must be on `main`, have no tracked or staged changes, and
+satisfy `HEAD == origin/main`; untracked files do not block the update. Explicit
+`development_mode=true` still requires a clean named branch and pins the exact
+40-character source HEAD, but permits a non-main branch for self-host testing.
+The trusted CLI revalidates source path, branch, cleanliness, and expected SHA,
+records the installed SHA/branch in operator config, runs a user-level
+`uv tool install --force`, reinstalls the user systemd units using the newly
+installed runtime, and performs the same MCP-health-before-tunnel restart
+sequence as `service_restart`. No sudo or system-level package/service mutation
+is used.
 
 ### activate_policy_profile
 
@@ -372,6 +382,17 @@ Annotations: `{"title":"Current project","readOnlyHint":true,"destructiveHint":f
 Returns the selected repository, its operator root, relative path, and known
 root authority files.
 
+### local_state_snapshot
+
+Inputs: none.
+
+Annotations: `{"title":"Local state snapshot","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}`.
+
+Returns project, branch, HEAD, upstream/ahead/behind state, dirty/staged paths,
+runtime version and installed service SHA, plus self-host diagnostics including
+source checkout SHA, installed/source match, nested-sandbox state, default
+execution mode, and any compatibility policy profile in one MCP response.
+
 ### project_checks
 
 Inputs: none.
@@ -400,6 +421,17 @@ Runtime venv bin from PATH instead of shadowing the project's `python`,
 The result reports the resolved execution environment. A missing check
 executable fails preflight with `PROJECT_ENVIRONMENT_ERROR`; common missing
 module/tool output is classified as `PROJECT_DEPENDENCY_MISSING`.
+
+### run_checks_for_diff
+
+Inputs: `"timeout_ms"`, `"max_output_bytes"`, `"max_checks"`, `"approval_id"`.
+
+Annotations: `{"title":"Run checks for diff","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":false}`.
+
+Reads the current Git dirty paths, selects relevant discovered project checks
+for the changed file types, runs them synchronously server-side with bounded
+output, and returns one aggregate result. It never installs dependencies or
+invents commands not exposed by `project_checks`.
 
 ### read_file
 
@@ -506,19 +538,32 @@ Annotations: `{"title":"Search text","readOnlyHint":true,"destructiveHint":false
 Ripgrep output is consumed incrementally and the process stops once the result
 cap is known to be exceeded. `context_lines=0` does not reread matching files.
 
+### inspect_symbol
+
+Inputs: `"symbol"`, `"path"`, `"context_lines"`, `"max_results"`.
+
+Annotations: `{"title":"Inspect symbol","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}`.
+
+Performs one bounded whole-word search, classifies common declaration forms as
+definitions, separates other references and test-file matches, and returns
+bounded surrounding source. It is a lightweight cross-language inspection
+primitive rather than a language-server replacement.
+
 ### apply_patch
 
 Inputs: `"patch"`, `"dry_run"`, `"approval_id"`.
 
 Annotations: `{"title":"Apply patch","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":false}`.
 
-Supports `*** Add File` and `*** Update File` inside a
-`*** Begin Patch` / `*** End Patch` envelope. Delete and move operations are
-parsed by the release policy layer: Safe and Balanced require local approval,
-while Power may allow them. Preview returns a unified diff, line counts, removal
-percentage, and risk classification. Small updates execute immediately; an
-update above either configured destructive threshold requires a single-use
-local out-of-band approval.
+Supports Add/Update/Delete/Move operations inside a `*** Begin Patch` /
+`*** End Patch` envelope. Canonical path validation, baseline hashes/modes, and
+atomic replacement remain mandatory. In normal `workspace-write`, create,
+update, and move apply directly to the authoritative workspace when their
+preconditions still match; there is no whole-repository transaction snapshot.
+Delete and destructive-threshold patches retain explicit confirmation. Safe and
+explicit compatibility-policy profiles may impose stricter approval behavior.
+Preview returns a unified diff, line counts, removal percentage, and risk
+classification.
 
 ### exec_command
 
@@ -535,31 +580,23 @@ therefore means the tool call itself completed structurally; callers must use
 `command_success`/`status` for command outcome.
 
 Exactly one of `cmd` or `argv` is required. `cmd` retains the shell-string path
-for compatibility and defaults to `transaction_mode: "discard"`. Shell control
-syntax is classified as policy/risk data rather than treated as the primary
-security boundary; the namespace/root/network boundary enforces actual effects.
-Legacy `argv` remains accepted here for compatibility, but new callers should
-prefer `exec_argv`.
+for compatibility and defaults to non-transactional execution. The default
+execution mode follows the legacy compatibility mapping: `safe -> read-only`,
+`trusted -> workspace-write`, `dangerous -> full-access`. Normal read-only and
+workspace-write use the authoritative working tree through one bwrap filesystem
+boundary on Linux; normal workspace-write exposes the real project `.venv`,
+PATH/toolchain, and network rather than capability-by-capability approvals.
+`full-access` directly inherits the current user's environment, filesystem,
+temporary directories, and network, including sensitive environment values that
+the service itself inherited. Legacy `argv` remains accepted here for
+compatibility, but new callers should prefer `exec_argv`.
 
-Host sensitive environment values are never inherited wholesale. A caller must
-name exact `sensitive_env_names` and own matching `env.sensitive` leases.
-`network_targets` requires a backend with enforceable target filtering.
-`executor_backend` may request the local namespace or an operator-configured
-ephemeral container; unavailable requirements fail with
-`CAPABILITY_UNAVAILABLE` rather than falling back to weaker isolation. The
-host-side runner must be a single-link executable owned by root/the service user,
-must not be group/world writable (nor live in such a writable directory), and
-must not reside below project-discovery or grantable roots. The
-container manifest uses container-private HOME/TMP/XDG paths. A successful
-runner result is accepted only when it attests all requested enforcement
-properties (`filesystem_isolation`, `resource_limits`, `network_policy`,
-`private_tmp`, and `no_host_container_socket`); missing/false attestation is an
-`EXECUTOR_PROTOCOL_ERROR` and no extracted changes are applied.
-
-`approval_id` consumes one immutable approval for the exact command, normalized
-cwd, raw environment delta, task/session identity, network capability, and
-policy version. Approved capabilities are applied to the corresponding policy
-gates only.
+`transaction_mode="apply"` is explicit compatibility opt-in and is the only
+normal shell path that builds a repository snapshot/transaction. Explicit
+policy profiles continue to use the older approval/capability machinery as a
+compatibility layer. `network_targets` and `executor_backend` remain public
+compatibility inputs for those policy-managed/specialized executor paths; they
+are not additional permission layers around the normal real-workspace fast path.
 
 ### exec_argv
 
@@ -567,15 +604,12 @@ Inputs: `"argv"`, `"cwd"`, `"workdir"`, `"timeout_ms"`, `"yield_time_ms"`, `"env
 
 Annotations: `{"title":"Exec argv","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
 
-Preferred arbitrary developer execution primitive. It never invokes a shell to
-interpret `argv`. On the local secure namespace backend it defaults to
-`transaction_mode: "apply"`: the command runs on secret-filtered snapshots
-mounted at canonical root paths, exit 0 produces a structured changed-file/diff
-summary, mutation capabilities are evaluated against the actual delta, and a
-bounded atomic commit applies only files whose authoritative baselines are still
-unchanged. Non-zero/timeout output is discarded. `TRANSACTION_CONFLICT` fails
-closed rather than overwriting concurrent/user WIP. No rollback path uses
-`git reset --hard`.
+Preferred structured developer execution primitive. It never invokes a shell to
+interpret `argv` and has the same three execution modes and non-transactional
+default as `exec_command`. `transaction_mode="apply"` remains available as an
+explicit bounded snapshot/commit compatibility path; baseline conflicts fail
+with `TRANSACTION_CONFLICT` rather than overwriting concurrent/user WIP. No
+rollback path uses `git reset --hard`.
 
 ### run_task
 
@@ -583,11 +617,11 @@ Inputs: `"task_id"`, `"args"`, `"path"`, `"cwd"`, `"env"`, `"timeout_ms"`, `"yie
 
 Annotations: `{"title":"Run task","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
 
-Tasks use validated registry metadata and an argv-only subprocess path. Known
-non-network tasks such as pytest, unittest, Vitest, Jest, lint, typecheck, and
-build/check workflows execute automatically in the sandbox. Network and other
-approval-class capabilities are granted per operation and are never inherited
-from an unrelated command.
+Tasks use validated registry metadata and an argv-only subprocess path. In the
+normal compatibility modes they inherit the same read-only/workspace-write/
+full-access execution view as shell commands, so trusted development checks see
+the real project environment. Explicit policy profiles retain their policy
+authorization behavior.
 
 ### write_stdin
 

@@ -592,7 +592,70 @@ class ReleaseLifecycleTests(unittest.TestCase):
                         {"source_project": "devmcp-runtime"}
                     )
                 self.assertEqual(result["status"], "scheduled")
-                schedule.assert_called_once_with(source.resolve(), head)
+                schedule.assert_called_once_with(
+                    source.resolve(), head, development_mode=False
+                )
+            finally:
+                runtime.close()
+
+    def test_service_update_development_mode_allows_clean_feature_branch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            projects = root / "projects"
+            source = projects / "devmcp-runtime"
+            (source / "apps" / "devmcp").mkdir(parents=True)
+            (source / "pyproject.toml").write_text(
+                '[project]\nname = "devmcp-runtime"\nversion = "0.1.0"\n',
+                encoding="utf-8",
+            )
+            (source / "apps" / "devmcp" / "cli.py").write_text(
+                "# fixture\n", encoding="utf-8"
+            )
+            subprocess.run(
+                ["git", "init", "-qb", "feature/self-host"], cwd=source, check=True
+            )
+            subprocess.run(
+                ["git", "config", "user.email", "test@example.invalid"],
+                cwd=source,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "config", "user.name", "Release Test"],
+                cwd=source,
+                check=True,
+            )
+            subprocess.run(["git", "add", "-A"], cwd=source, check=True)
+            subprocess.run(["git", "commit", "-qm", "fixture"], cwd=source, check=True)
+            head = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=source,
+                check=True,
+                text=True,
+                stdout=subprocess.PIPE,
+            ).stdout.strip()
+            runtime = Runtime(
+                source,
+                policy_profile="autonomous",
+                project_roots=[projects],
+            )
+            try:
+                with self.assertRaises(ToolFailure):
+                    runtime.service_update({"source_project": "devmcp-runtime"})
+                with patch.object(
+                    runtime,
+                    "_schedule_devmcp_update",
+                    return_value={"status": "scheduled"},
+                ) as schedule:
+                    result = runtime.service_update(
+                        {
+                            "source_project": "devmcp-runtime",
+                            "development_mode": True,
+                        }
+                    )
+                self.assertEqual(result["status"], "scheduled")
+                schedule.assert_called_once_with(
+                    source.resolve(), head, development_mode=True
+                )
             finally:
                 runtime.close()
 
@@ -661,6 +724,8 @@ class ReleaseLifecycleTests(unittest.TestCase):
         source = Path("/tmp/devmcp-runtime-source")
         with (
             patch.object(cli, "_validated_runtime_source", return_value=source),
+            patch.object(cli, "_config", return_value=(object(), {})),
+            patch.object(cli, "save_config") as save_config,
             patch.object(
                 cli.shutil,
                 "which",
@@ -672,9 +737,14 @@ class ReleaseLifecycleTests(unittest.TestCase):
             patch.object(cli.subprocess, "run", side_effect=completed) as run,
         ):
             result = cli._service_update(
-                SimpleNamespace(source=str(source), expected_sha=expected_sha)
+                SimpleNamespace(
+                    source=str(source),
+                    expected_sha=expected_sha,
+                    development_mode=False,
+                )
             )
         self.assertEqual(result, 0)
+        save_config.assert_called_once()
         commands = [call.args[0] for call in run.call_args_list]
         self.assertEqual(commands[0][-2:], ["rev-parse", "HEAD"])
         self.assertEqual(commands[1][-2:], ["branch", "--show-current"])

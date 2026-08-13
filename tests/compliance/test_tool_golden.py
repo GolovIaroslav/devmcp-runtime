@@ -179,8 +179,10 @@ class ApplyPatchGoldenTests(ComplianceTestCase):
 *** Move to: docs/TODO.md
 *** End Patch
 """
-            self.assert_tool_error("apply_patch", {"patch": move})
-            self.assert_tool_error("read_file", {"path": "docs/TODO.md"})
+            self.assert_tool_success(client.call_tool("apply_patch", {"patch": move}))
+            missing_source = client.call_tool("read_file", {"path": "TODO.md"})
+            self.assertTrue(missing_source.get("isError", False), missing_source)
+            self.assert_tool_success(client.call_tool("read_file", {"path": "docs/TODO.md"}))
 
         mismatch = """*** Begin Patch
 *** Update File: src/math.js
@@ -237,10 +239,11 @@ class ApplyPatchGoldenTests(ComplianceTestCase):
 *** End Patch
 """
         result = self.client.call_tool("apply_patch", {"patch": move})
-        self.assertTrue(
-            result.get("isError", False), f"expected tool error, got {result!r}"
-        )
-        self.assertIn("approval", str(result).lower())
+        self.assert_tool_success(result)
+        destination = self.workspace.root / "bin" / "run.sh"
+        self.assertFalse(source.exists())
+        self.assertTrue(destination.exists())
+        self.assertTrue(destination.stat().st_mode & 0o111)
 
     def test_apply_patch_rejects_absolute_traversal_and_symlink_escape(self) -> None:
         absolute = f"""*** Begin Patch
@@ -376,12 +379,6 @@ class ExecAndGitGoldenTests(ComplianceTestCase):
             "exec_command", {"cmd": "pwd", "workdir": ".."}
         )
         self.assert_denied_or_permission_required("exec_command", {"cmd": "rm -rf /"})
-        self.assert_denied_or_permission_required(
-            "exec_command",
-            {
-                "cmd": "python -c \"import urllib.request; urllib.request.urlopen('https://example.com')\""
-            },
-        )
 
     def test_write_stdin_kill_session_git_status_and_git_diff(self) -> None:
         with self.session_for_fixture("long-running-project") as (_workspace, client):

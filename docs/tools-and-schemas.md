@@ -11,7 +11,7 @@ app remains a draft.
 
 ## Fixed inventory
 
-The default catalog contains exactly 62 tools:
+The default catalog contains exactly 65 tools:
 
 - `server_info`: Server info.
 - `health`: Health check.
@@ -20,13 +20,15 @@ The default catalog contains exactly 62 tools:
 - `service_doctor`: Run host-side DevMCP doctor diagnostics.
 - `host_cli_probe`: Run bounded host-side `path`, `--version`, or `--help` discovery for an executable inside the selected project using a sanitized environment.
 - `service_restart`: Schedule a delayed restart of the DevMCP user services.
-- `service_update`: Update the installed DevMCP runtime from a clean, synced local source checkout, reinstall user services, and safely restart.
+- `service_update`: Update the installed DevMCP runtime from a clean pinned local source checkout; explicit development mode permits a clean feature branch.
 - `activate_policy_profile`: Persist a policy profile and schedule a safe restart.
 - `list_projects`: Discover Git repositories under operator-approved project roots.
 - `select_project`: Select one writable repository for the current MCP session.
 - `current_project`: Show the repository selected for the current MCP session.
+- `local_state_snapshot`: Return project, branch, HEAD/upstream, dirty/staged paths, runtime SHA/version, and self-host state in one call.
 - `project_checks`: Discover bounded project-native verification commands.
 - `run_project_check`: Run one discovered project-native check in the sandbox.
+- `run_checks_for_diff`: Select relevant discovered checks from changed files and run them server-side in one MCP call.
 - `read_file`: Read file.
 - `read_files`: Read multiple files.
 - `code_diagnostics`: Normalize compiler/traceback diagnostics without requiring an IDE/LSP dependency.
@@ -38,6 +40,7 @@ The default catalog contains exactly 62 tools:
 - `list_dir`: List directory.
 - `list_files`: List files.
 - `search_text`: Search text.
+- `inspect_symbol`: Return a symbol definition, references, relevant tests, and bounded source context.
 - `view_image`: View image.
 - `preview_patch`: Preview patch.
 - `apply_patch`: Apply patch.
@@ -76,7 +79,7 @@ The default catalog contains exactly 62 tools:
 - `get_default_cwd`: Get default cwd.
 - `set_default_cwd`: Set default cwd.
 `view_image` may be disabled when an installation cannot accept binary image
-content. That capability gate is not a tool profile. The other 61 tools are
+content. That capability gate is not a tool profile. The other 64 tools are
 always advertised, and `listChanged` is `false`.
 
 ## Autonomous continuation primitives
@@ -108,13 +111,14 @@ running service is replaced.
 
 `service_update` uses the same `service.manage` capability. It accepts an
 optional `source_project` selector and only considers discovered local Git
-checkouts that identify themselves as the `devmcp-runtime` package. The source
-must be on `main`, have no tracked or staged changes, and exactly match
-`origin/main`; untracked files do not block it. A delayed updater revalidates the
-full expected SHA, performs a user-level `uv tool install --force` from the local
-checkout, refreshes the user systemd units from the newly installed runtime, and
-then performs the safe MCP-health-before-tunnel restart sequence. This makes
-future merged DevMCP releases self-updatable without an external bootstrap agent.
+checkouts that identify themselves as the `devmcp-runtime` package. The normal
+path must be on `main`, have no tracked or staged changes, and exactly match
+`origin/main`; untracked files do not block it. Explicit `development_mode=true`
+keeps the clean-tree and exact pinned-HEAD checks but permits a named non-main
+branch so DevMCP can install and test its own feature branch without first
+merging it. The updater records the installed SHA/branch in operator config,
+performs a user-level `uv tool install --force`, refreshes the user systemd units,
+and then performs the MCP-health-before-tunnel restart sequence.
 
 `activate_policy_profile` is the first-class bootstrap path for changing the
 persistent host policy without arbitrary shell access. It is controlled by the
@@ -158,28 +162,31 @@ session; it never survives a restart. Project discovery roots do not implicitly
 populate this ceiling; unset `DEVMCP_GRANTABLE_ROOTS` means no additional roots
 can be granted. Granting an ancestor of the primary
 workspace is rejected as too broad. Filesystem reads, writes, patching, command
-path checks, and execution snapshots use the same canonical root set. Additional
-roots are copied through the same secret-filtering snapshot path and are mounted
-at their canonical paths; host sibling directories are not directly bind-mounted
-into model-controlled commands.
+path checks use the same canonical root set. Normal non-transactional shell
+execution does not copy the selected repository. Additional-root leases remain
+available to high-level tools and compatibility policy paths, but they are not a
+reason to rebuild the selected workspace on every command.
 
 ## Permission and capability model
 
-The runtime has one authoritative user-facing decision matrix: policy profiles
-(`safe`, `balanced`, `power`, `autonomous`, `custom`) resolve every named
-capability to `auto`, `ask`, or `deny` at Runtime startup. Legacy
-`permission_mode=safe|trusted|dangerous` remains only as a compatibility adapter
-to `safe|power|autonomous`; low-level execution does not consult a second legacy
-permission matrix after initialization. `server_info` and
-`check_exec_environment` expose the effective capability decisions.
+The normal execution model is the three-mode compatibility surface:
+`safe -> read-only`, `trusted -> workspace-write`, and
+`dangerous -> full-access`. Ordinary shell execution in those modes does not
+perform per-capability approval evaluation. Explicit policy profiles
+(`safe`, `balanced`, `power`, `autonomous`, `custom`) remain supported as a
+compatibility path and may still resolve named capabilities to `auto`, `ask`, or
+`deny`. `server_info` and `check_exec_environment` expose which compatibility
+policy is active.
 
-The policy matrix is separate from an immutable host-security floor. Profiles
-and leases cannot authorize host Docker/Podman control, privilege escalation,
-arbitrary host filesystem access, protected credential paths, model-supplied
-sandbox-attestation state, or an unenforced network target. Ambient host secrets
-are always filtered. A specific host secret is injected only when the command
-names it in `sensitive_env_names` and the current context owns an exact-name
-`env.sensitive` lease.
+High-level file and Git tools retain their canonical repository/path guardrails
+regardless of execution mode, and no mode grants sudo/root or automatic force
+push. Shell guarantees are intentionally mode-specific: read-only keeps a
+read-only workspace boundary; workspace-write grants direct selected-workspace
+writes and normal development network/toolchain access; full-access additionally
+inherits arbitrary user-readable/writable host filesystem access, ambient
+environment secrets, normal host network/TMP/HOME, and Docker/Podman access when
+the current user already has it. Explicit policy profiles may still apply the
+older capability/secret/network restrictions as a compatibility path.
 
 `grant_capability` creates an opaque `lease_...` record for a bounded capability
 and target. Supported targets include executable/command patterns, dependency
@@ -190,11 +197,11 @@ operation that uses them, not halfway through internal preflight. Task-scoped
 leases use an opaque `task_scope_id`; `end_task_scope` revokes all leases for
 that task immediately. The model cannot create a permanent grant.
 
-The local namespace sandbox cannot truthfully enforce `github.com`-only egress,
-so destination-scoped network leases fail with `CAPABILITY_UNAVAILABLE` unless
-an operator-configured executor with real network-target filtering is available.
-Broad network still follows the normal `network.public`/`network.host_local`
-capability decision.
+The local bwrap namespace cannot truthfully enforce `github.com`-only egress, so
+destination-scoped network leases remain meaningful only on explicit
+policy-managed/specialized executor paths with real target filtering. Normal
+workspace-write and full-access intentionally use ordinary development network
+access rather than per-destination approval.
 
 ## Bounded Antigravity delegation
 
@@ -315,19 +322,17 @@ Mode bits, BOM, and newline style are preserved.
 
 `exec_command` retains the compatibility shell-string surface and still accepts
 legacy `argv`. `exec_argv` is the preferred first-class structured execution
-primitive. It passes the argument vector without shell parsing while retaining
-the same capability, root, sandbox, network, secret-environment, and approval
-enforcement. Registered tasks remain a fast path for common known-safe commands,
-not a requirement or an ecosystem whitelist.
+primitive. It passes the argument vector without shell parsing and otherwise
+uses the same three execution modes as `exec_command`. Registered tasks and
+project checks reuse that process/session lifecycle rather than introducing a
+second executor.
 
-Shell syntax is not itself the security boundary. Top-level pipeline,
-conditional, and sequence segments are classified independently for policy/risk
-signals, but `$()`, pipes, redirection, heredocs, `&&`, and ordinary inline
-scripts are usable when the effective capability policy permits execution. The
-namespace/root/network boundary enforces effects. Privilege escalation, direct
-host Docker/Podman control, protected credentials, and workspace/root escape
-remain hard-denied. Bubblewrap drops all capabilities and disables creation of
-nested user namespaces in model-controlled processes.
+Shell syntax is not itself the security boundary. `$()`, pipes, redirection,
+heredocs, `&&`, and ordinary inline scripts are ordinary shell behavior. In
+read-only/workspace-write the bwrap mount layout supplies the filesystem
+boundary; full-access deliberately has no shell filesystem/network sandbox.
+Privilege escalation remains rejected and bwrap drops capabilities where bwrap
+is used.
 
 Inside `bwrap`, `/tmp` is a writable private tmpfs and `TMPDIR`, `TMP`, and
 `TEMP` all point to `/tmp`; host `/tmp` is not the command's writable namespace.
@@ -336,26 +341,22 @@ OS/linker/toolchain metadata is mounted read-only, CA/DNS metadata is added when
 network is granted, and sensitive account/credential files such as
 `/etc/shadow`, SSH, cloud, and package-registry credentials are excluded.
 
-`exec_argv` defaults to `transaction_mode: "apply"` on the local secure
-namespace backend. Commands run against filtered snapshots mounted at canonical
-root paths. On exit 0 the runtime calculates the actual changed files, evaluates
-their create/update/delete capabilities, re-checks each authoritative baseline,
-and atomically applies the bounded staged set. Non-zero exit/timeout discards the
-snapshot. Concurrent edits produce `TRANSACTION_CONFLICT`; the runtime never
-uses `git reset --hard` or replaces a user's pre-existing dirty state with HEAD.
-`exec_command` retains `transaction_mode: "discard"` by default for backward
-compatibility; callers may opt in to transactional apply.
+Both `exec_command` and `exec_argv` default to non-transactional execution.
+Read-only mounts the authoritative workspace read-only; workspace-write mounts
+that same tree read-write; full-access launches directly on the host as the
+current user. None of those normal paths copies `.venv` or the repository.
+`transaction_mode: "apply"` remains explicit opt-in: only that compatibility
+path creates a filtered snapshot, checks authoritative baselines, and applies a
+bounded staged delta. Concurrent edits produce `TRANSACTION_CONFLICT`; no path
+uses `git reset --hard` or erases pre-existing dirty WIP.
 
-Execution goes through an internal backend scheduler. `local_sandbox` is the
-default secure backend; an attested `inherited_sandbox` avoids unsupported nested
-user namespaces during DevMCP self-hosting. `ephemeral_container` is optional
-and exists only when the operator configures an absolute trusted runner in
-`DEVMCP_EPHEMERAL_CONTAINER_RUNNER`. The runner receives a bounded manifest and
-runtime-owned filtered snapshots, never a model-visible host Docker/Podman socket
-or direct writable workspace mount. CPU, memory, PID, time, network, and mount
-requirements are explicit in the runner protocol, and extracted changes still
-pass transaction/baseline checks. Missing/insufficient backends fail once with
-`CAPABILITY_UNAVAILABLE` instead of producing a series of opaque command errors.
+The normal local path is intentionally simple: bwrap-only for read-only and
+workspace-write on Linux, direct subprocess for full-access. Specialized
+`inherited_sandbox`/`ephemeral_container` executor inputs remain compatibility
+features for explicit policy-managed deployments; they are not layered on top
+of the normal development fast path. Self-host state is exposed by
+`local_state_snapshot`, and explicit development service updates may install a
+clean pinned feature-branch HEAD for testing without first merging it.
 
 `exec_command` and `write_stdin` default `yield_time_ms` to `10000` and honor
 requested initial waits up to the schema maximum of 300 seconds. Short commands
@@ -374,13 +375,10 @@ owner-context checked across `job_status`, `job_output`, `job_input`,
 bound active commands, retained completed jobs/sessions, per-session output,
 total output, and retention time.
 
-Repository snapshots used for execution are temporary leases, not session-long
-workspace copies. They live only below the runtime's private `sandboxes/`
-directory. Terminal completion, failure, timeout, cancellation, and runtime
-shutdown release the lease; the final lease removes the snapshot after checking
-its owned path and ownership marker. A later command starts from a fresh
-authoritative repository snapshot, so repeated checks do not accumulate
-repository-sized `/tmp` trees.
+Repository snapshots are not part of normal execution. The private `sandboxes/`
+lease lifecycle applies only to explicit transactional compatibility execution;
+terminal completion, failure, timeout, cancellation, and runtime shutdown still
+clean those owned snapshots safely.
 
 Use `tty: true` only when a program requires a terminal. POSIX receives a real
 PTY (`isatty()` is true). This build returns `TTY_UNSUPPORTED` on Windows rather
@@ -388,14 +386,12 @@ than labeling pipes as a TTY.
 
 ## Legacy permission-mode compatibility
 
-`permission_mode=safe|trusted|dangerous` is no longer a second live permission
-engine. At startup it maps to policy profile `safe|power|autonomous` when an
-explicit profile was not supplied. After initialization the Runtime consults
-only the effective capability matrix plus the immutable host-security floor.
-Legacy `dangerous` therefore means autonomous policy decisions; it does **not**
-disable secret filtering, root confinement, protected paths, sandbox attestation,
-or the Docker/privilege hard boundary. These compatibility names do not change
-the tool list.
+`permission_mode=safe|trusted|dangerous` is the thin compatibility adapter for
+the new execution model: read-only, workspace-write, and full-access
+respectively. An explicitly selected policy profile keeps the older capability
+matrix behavior instead. `dangerous`/full-access disables the shell sandbox and
+secret filtering by design but still does not grant root, sudo, or automatic
+force-push. These compatibility names do not change the tool list.
 
 `activate_policy_profile` is idempotent: requesting the already-effective
 profile returns `status: "unchanged"` and does not schedule a service restart.

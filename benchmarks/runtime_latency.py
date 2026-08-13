@@ -70,7 +70,38 @@ def prepare_workspace(root: Path) -> Path:
     (workspace / "src" / "target.txt").write_text(
         "TARGET_NEEDLE\n" + common, encoding="utf-8"
     )
+    (workspace / "test_smoke.py").write_text(
+        "def test_smoke():\n    assert 1 + 1 == 2\n", encoding="utf-8"
+    )
+    git = shutil.which("git")
+    if git:
+        subprocess.run([git, "init", "-q"], cwd=workspace, check=True)
+        subprocess.run(
+            [git, "config", "user.email", "benchmark@example.invalid"],
+            cwd=workspace,
+            check=True,
+        )
+        subprocess.run(
+            [git, "config", "user.name", "DevMCP Benchmark"],
+            cwd=workspace,
+            check=True,
+        )
+        subprocess.run([git, "add", "-A"], cwd=workspace, check=True)
+        subprocess.run(
+            [git, "commit", "-qm", "benchmark fixture"], cwd=workspace, check=True
+        )
     return workspace
+
+
+def add_unrelated_tree(workspace: Path, *, files: int, bytes_per_file: int) -> int:
+    root = workspace / ".benchmark-unrelated"
+    root.mkdir()
+    payload = b"x" * bytes_per_file
+    for index in range(files):
+        bucket = root / f"{index // 200:03d}"
+        bucket.mkdir(exist_ok=True)
+        (bucket / f"payload-{index:05d}.bin").write_bytes(payload)
+    return files * bytes_per_file
 
 
 def start_server(command: str, workspace: Path, port: int) -> subprocess.Popen[bytes]:
@@ -135,6 +166,11 @@ def assert_command_ok(result: dict[str, Any]) -> None:
     raise AssertionError(f"exec_command did not report exit_code=0: {result!r}")
 
 
+def assert_tool_ok(result: dict[str, Any], name: str) -> None:
+    if result.get("isError") is True:
+        raise AssertionError(f"{name} returned an MCP error: {result!r}")
+
+
 def native_search(workspace: Path) -> None:
     rg = shutil.which("rg")
     if rg:
@@ -167,19 +203,27 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
     try:
         client = connect(endpoint, args.startup_timeout)
         tools = {tool.get("name") for tool in client.list_tools()}
-        required = {"tools/list", "read_file", "search_text", "exec_command"}
+        required = {
+            "tools/list",
+            "read_file",
+            "search_text",
+            "exec_command",
+            "git_status",
+        }
         missing = sorted(required - (tools | {"tools/list"}))
         if missing:
             raise RuntimeError(f"missing benchmark tools: {missing}")
 
-        metrics = [
-            measure(
+        metrics: list[Metric] = []
+        metrics.extend(
+            [
+                measure(
                 "mcp.tools_list",
                 args.iterations,
                 args.warmup,
                 lambda: client.list_tools(),
-            ),
-            measure(
+                ),
+                measure(
                 "mcp.read_file",
                 args.iterations,
                 args.warmup,
@@ -187,8 +231,8 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
                     client.call_tool("read_file", {"path": "src/target.txt"}),
                     "TARGET_NEEDLE",
                 ),
-            ),
-            measure(
+                ),
+                measure(
                 "mcp.search_text",
                 args.iterations,
                 args.warmup,
@@ -198,41 +242,79 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
                     ),
                     "TARGET_NEEDLE",
                 ),
-            ),
-            measure(
-                "mcp.exec_command",
+                ),
+                measure(
+                "mcp.exec_true",
                 args.exec_iterations,
                 args.warmup,
                 lambda: assert_command_ok(
                     client.call_tool(
                         "exec_command",
                         {
-                            "cmd": "printf ok",
+                            "cmd": "true",
                             "timeout_ms": 5000,
                             "yield_time_ms": 5000,
                             "max_output_bytes": 4000,
                         },
                     )
                 ),
-            ),
-            measure(
+                ),
+                measure(
+                "mcp.exec_python_pass",
+                args.exec_iterations,
+                args.warmup,
+                lambda: assert_command_ok(
+                    client.call_tool(
+                        "exec_command",
+                        {
+                            "cmd": 'python -c "pass"',
+                            "timeout_ms": 5000,
+                            "yield_time_ms": 5000,
+                            "max_output_bytes": 4000,
+                        },
+                    )
+                ),
+                ),
+                measure(
+                "mcp.git_status",
+                args.exec_iterations,
+                args.warmup,
+                lambda: assert_tool_ok(client.call_tool("git_status", {}), "git_status"),
+                ),
+                measure(
+                "mcp.exec_pytest_small",
+                args.exec_iterations,
+                args.warmup,
+                lambda: assert_command_ok(
+                    client.call_tool(
+                        "exec_command",
+                        {
+                            "cmd": "python -m pytest -q test_smoke.py",
+                            "timeout_ms": 15000,
+                            "yield_time_ms": 15000,
+                            "max_output_bytes": 8000,
+                        },
+                    )
+                ),
+                ),
+                measure(
                 "native.read_text",
                 args.iterations,
                 args.warmup,
                 lambda: (workspace / "src" / "target.txt").read_text(encoding="utf-8"),
-            ),
-            measure(
+                ),
+                measure(
                 "native.search",
                 args.iterations,
                 args.warmup,
                 lambda: native_search(workspace),
-            ),
-            measure(
-                "native.exec_command",
+                ),
+                measure(
+                "native.exec_true",
                 args.exec_iterations,
                 args.warmup,
                 lambda: subprocess.run(
-                    ["printf", "ok"],
+                    ["true"],
                     cwd=str(workspace),
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
@@ -240,8 +322,32 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
                     timeout=5,
                     check=True,
                 ),
-            ),
-        ]
+                ),
+            ]
+        )
+        unrelated_bytes = add_unrelated_tree(
+            workspace,
+            files=args.unrelated_files,
+            bytes_per_file=args.unrelated_file_bytes,
+        )
+        metrics.append(
+            measure(
+                "mcp.exec_true_after_unrelated_tree",
+                args.exec_iterations,
+                args.warmup,
+                lambda: assert_command_ok(
+                    client.call_tool(
+                        "exec_command",
+                        {
+                            "cmd": "true",
+                            "timeout_ms": 5000,
+                            "yield_time_ms": 5000,
+                            "max_output_bytes": 4000,
+                        },
+                    )
+                ),
+            )
+        )
     finally:
         server.terminate()
         try:
@@ -252,11 +358,20 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
 
     summaries = {metric.name: metric.summary() for metric in metrics}
     comparisons = comparison_rows(summaries)
+    true_before = float(summaries["mcp.exec_true"]["p50_ms"])
+    true_after = float(summaries["mcp.exec_true_after_unrelated_tree"]["p50_ms"])
+    size_growth_ratio = round(true_after / true_before, 3) if true_before else None
+    size_growth_ms = round(true_after - true_before, 3)
     failures = [
         f"{name} p95 {summary['p95_ms']}ms exceeded {args.max_p95_ms}ms"
         for name, summary in summaries.items()
         if name.startswith("mcp.") and float(summary["p95_ms"]) > args.max_p95_ms
     ]
+    if true_after > true_before * args.max_size_growth_ratio + args.max_size_growth_ms:
+        failures.append(
+            "exec true startup regressed after unrelated tree: "
+            f"p50 {true_before}ms -> {true_after}ms"
+        )
     return {
         "conclusion": "PASS" if not failures else "FAIL",
         "endpoint": endpoint,
@@ -265,6 +380,12 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         "exec_iterations": args.exec_iterations,
         "warmup": args.warmup,
         "max_p95_ms": args.max_p95_ms,
+        "unrelated_tree": {
+            "files": args.unrelated_files,
+            "bytes": unrelated_bytes,
+            "p50_growth_ms": size_growth_ms,
+            "p50_ratio": size_growth_ratio,
+        },
         "metrics": summaries,
         "comparisons": comparisons,
         "failures": failures,
@@ -279,7 +400,7 @@ def comparison_rows(summaries: dict[str, dict[str, Any]]) -> list[dict[str, Any]
     pairs = [
         ("read_file", "mcp.read_file", "native.read_text"),
         ("search_text", "mcp.search_text", "native.search"),
-        ("exec_command", "mcp.exec_command", "native.exec_command"),
+        ("exec_true", "mcp.exec_true", "native.exec_true"),
     ]
     rows = []
     for operation, mcp_name, native_name in pairs:
@@ -315,6 +436,8 @@ def render_markdown(report: dict[str, Any]) -> str:
         f"- Exec iterations: `{report['exec_iterations']}`",
         f"- Warmup iterations: `{report['warmup']}`",
         f"- Max MCP p95 threshold: `{report['max_p95_ms']} ms`",
+        f"- Unrelated tree: `{report['unrelated_tree']['files']}` files / `{report['unrelated_tree']['bytes']}` bytes",
+        f"- `true` p50 after unrelated tree: `{report['unrelated_tree']['p50_growth_ms']} ms` delta / `{report['unrelated_tree']['p50_ratio']}` ratio",
         "",
         "## Metrics",
         "",
@@ -351,14 +474,18 @@ def render_markdown(report: dict[str, Any]) -> str:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--iterations", type=int, default=8)
-    parser.add_argument("--exec-iterations", type=int, default=4)
+    parser.add_argument("--exec-iterations", type=int, default=12)
     parser.add_argument("--warmup", type=int, default=2)
     parser.add_argument("--port", type=int, default=0)
     parser.add_argument("--startup-timeout", type=float, default=10)
     parser.add_argument("--max-p95-ms", type=float, default=5000)
+    parser.add_argument("--unrelated-files", type=int, default=4000)
+    parser.add_argument("--unrelated-file-bytes", type=int, default=2048)
+    parser.add_argument("--max-size-growth-ratio", type=float, default=2.0)
+    parser.add_argument("--max-size-growth-ms", type=float, default=100.0)
     parser.add_argument(
         "--server-command",
-        default="{python} -m coding_tools_mcp --workspace {workspace} --host 127.0.0.1 --port {port}",
+        default="{python} -m coding_tools_mcp --workspace {workspace} --host 127.0.0.1 --port {port} --permission-mode trusted",
     )
     parser.add_argument(
         "--report-json", type=Path, default=ROOT / "reports/benchmark/mcp-latency.json"

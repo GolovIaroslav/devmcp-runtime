@@ -114,7 +114,7 @@ class ApprovalWorkflowV5Tests(unittest.TestCase):
         ):
             workspace = Path(tmp) / "workspace"
             workspace.mkdir()
-            runtime = Runtime(workspace)
+            runtime = Runtime(workspace, policy_profile="balanced")
             try:
                 command = 'python3 -c "print(42)"'
                 requested = structured_payload(
