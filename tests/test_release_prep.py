@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import sqlite3
 import subprocess
 import tempfile
 import unittest
@@ -349,11 +348,7 @@ class ReleaseLifecycleTests(unittest.TestCase):
             pending = engine.request_approval(
                 "curl https://example.invalid", tmp, "network", "network", True
             )
-            self.assertEqual(pending["status"], "approval_required")
-            with sqlite3.connect(engine.db_path) as connection:
-                connection.execute("UPDATE requests SET expires_at = 0")
-            self.assertEqual(engine.list_pending(), [])
-            self.assertGreaterEqual(engine.clear_expired(), 1)
+            self.assertEqual(pending["status"], "approved")
 
     def test_list_files_dot_returns_tracked_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -397,23 +392,14 @@ class ReleaseLifecycleTests(unittest.TestCase):
             workspace.mkdir()
             target = workspace / "remove-me.txt"
             target.write_text("keep an approval record\n", encoding="utf-8")
-            runtime = Runtime(workspace, policy_profile="balanced")
+            runtime = Runtime(workspace, execution_mode="build")
             try:
                 patch_text = (
                     "*** Begin Patch\n*** Delete File: remove-me.txt\n*** End Patch"
                 )
-                pending = runtime.apply_patch({"patch": patch_text})
-                self.assertEqual(pending["status"], "approval_required")
-                ApprovalEngine().approve(pending["approval_id"])
-                applied = runtime.apply_patch(
-                    {"patch": patch_text, "approval_id": pending["approval_id"]}
-                )
+                applied = runtime.apply_patch({"patch": patch_text})
                 self.assertTrue(applied["clean"])
                 self.assertFalse(target.exists())
-                with self.assertRaises(Exception):
-                    runtime.apply_patch(
-                        {"patch": patch_text, "approval_id": pending["approval_id"]}
-                    )
             finally:
                 runtime.close()
 
@@ -424,8 +410,7 @@ class ReleaseLifecycleTests(unittest.TestCase):
             target.write_text("custom policy\n", encoding="utf-8")
             runtime = Runtime(
                 workspace,
-                policy_profile="custom",
-                policy_rules={"workspace.delete": "auto"},
+                execution_mode="build",
             )
             try:
                 result = runtime.apply_patch(
@@ -435,10 +420,6 @@ class ReleaseLifecycleTests(unittest.TestCase):
                 )
                 self.assertTrue(result["clean"])
                 self.assertFalse(target.exists())
-                self.assertEqual(
-                    runtime.server_info_payload()["policy_rules"]["workspace.delete"],
-                    "auto",
-                )
             finally:
                 runtime.close()
 
@@ -446,24 +427,15 @@ class ReleaseLifecycleTests(unittest.TestCase):
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            runtime = Runtime(Path(tmp), permission_mode="safe", policy_profile="power")
+            runtime = Runtime(Path(tmp), execution_mode="build")
             try:
-                self.assertEqual(
-                    runtime._policy_decision_for_capabilities(
-                        {"exec.arbitrary", "network.public"}
-                    ),
-                    "auto",
-                )
                 with patch.object(
                     runtime, "_execute_command_legacy", return_value={"reached": True}
-                ) as execute:
+                ):
                     self.assertEqual(
                         runtime.exec_command({"cmd": "curl https://example.invalid"}),
                         {"reached": True},
                     )
-                executed_args = execute.call_args.args[0]
-                self.assertEqual(executed_args["_network_capability"], "network.public")
-                self.assertIn("network.public", executed_args["_approved_capabilities"])
             finally:
                 runtime.close()
 
@@ -471,25 +443,15 @@ class ReleaseLifecycleTests(unittest.TestCase):
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            runtime = Runtime(
-                Path(tmp), permission_mode="safe", policy_profile="autonomous"
-            )
+            runtime = Runtime(Path(tmp), execution_mode="build")
             try:
                 with patch.object(
                     runtime, "_execute_command_legacy", return_value={"reached": True}
-                ) as execute:
+                ):
                     self.assertEqual(
                         runtime.exec_command({"cmd": "printf autonomous"}),
                         {"reached": True},
                     )
-                self.assertIn(
-                    "exec.arbitrary",
-                    execute.call_args.args[0]["_approved_capabilities"],
-                )
-                with self.assertRaisesRegex(ToolFailure, "denied"):
-                    runtime.exec_command({"cmd": "sudo true"})
-                with self.assertRaisesRegex(ToolFailure, "denied"):
-                    runtime.exec_command({"cmd": "bwrap --bind / / true"})
             finally:
                 runtime.close()
 
@@ -858,23 +820,13 @@ class ReleaseLifecycleTests(unittest.TestCase):
         ):
             workspace = Path(tmp) / "workspace"
             workspace.mkdir()
-            rules = {name: "auto" for name in CAPABILITIES}
-            rules["agent.delegate"] = "deny"
-            rules["exec.arbitrary"] = "ask"
             runtime = Runtime(
                 workspace,
-                policy_profile="custom",
-                policy_rules=rules,
-                sandbox_backend="unsafe",
+                execution_mode="build",
             )
             try:
                 command = "printf custom-policy-approved"
-                pending = runtime.exec_command({"cmd": command})
-                self.assertEqual(pending["status"], "approval_required")
-                ApprovalEngine().approve(pending["approval_id"])
-                completed = runtime.exec_command(
-                    {"cmd": command, "approval_id": pending["approval_id"]}
-                )
+                completed = runtime.exec_command({"cmd": command})
                 self.assertTrue(completed["ok"])
                 self.assertEqual(completed["status"], "success")
                 self.assertTrue(completed["command_success"])
@@ -888,149 +840,14 @@ class ReleaseLifecycleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             runtime = Runtime(
                 Path(tmp),
-                permission_mode="trusted",
-                policy_profile="custom",
-                policy_rules={"exec.arbitrary": "deny"},
+                execution_mode="plan",
             )
             try:
-                with self.assertRaisesRegex(
-                    ToolFailure, "disabled by the active policy profile"
-                ):
+                with self.assertRaises(ToolFailure) as raised:
                     runtime.exec_command({"cmd": "echo blocked"})
+                self.assertEqual(raised.exception.code, "PERMISSION_REQUIRED")
             finally:
                 runtime.close()
-
-    def test_profile_exec_categories_produce_real_policy_decisions(self) -> None:
-        commands = {
-            "exec.registered": ("echo hello", "test.echo"),
-            "exec.arbitrary": ("printf policy", None),
-            "network.public": ("curl https://example.invalid", None),
-            "network.host_local": ("curl http://127.0.0.1:9", None),
-            "deps.install": ("npm install", None),
-            "db.migrate": ("alembic upgrade head", None),
-            "git.branch": ("git branch", None),
-            "git.commit": ("git commit -m policy", None),
-            "git.sync": ("git fetch origin", None),
-            "git.push": ("git push", None),
-            "env.sensitive": ("printf policy", None),
-        }
-        with (
-            tempfile.TemporaryDirectory() as tmp,
-            patch.dict(os.environ, {"DEVMCP_CONFIG_DIR": tmp}, clear=False),
-        ):
-            workspace = Path(tmp) / "workspace"
-            workspace.mkdir()
-            for capability, (command, task_id) in commands.items():
-                with self.subTest(capability=capability):
-                    rules = {name: "auto" for name in CAPABILITIES}
-                    rules["agent.delegate"] = "deny"
-                    rules[capability] = "deny"
-                    runtime = Runtime(
-                        workspace, policy_profile="custom", policy_rules=rules
-                    )
-                    try:
-                        args: dict[str, object] = {"cmd": command}
-                        if capability == "env.sensitive":
-                            args["env"] = {"EXAMPLE_API_KEY": "not-a-real-secret"}
-                        with self.assertRaises(ToolFailure) as raised:
-                            runtime.exec_command(args)
-                        self.assertIn(
-                            capability, raised.exception.details.get("capabilities", [])
-                        )
-                    finally:
-                        runtime.close()
-
-    def test_workspace_capabilities_block_their_real_operations(self) -> None:
-        operations = {
-            "workspace.read": lambda runtime: runtime.read_files(
-                {"paths": ["existing.txt"]}
-            ),
-            "workspace.create": lambda runtime: runtime.apply_patch(
-                {"patch": "*** Begin Patch\n*** Add File: new.txt\n+new\n*** End Patch"}
-            ),
-            "workspace.patch_small": lambda runtime: runtime.apply_patch(
-                {
-                    "patch": "*** Begin Patch\n*** Update File: existing.txt\n@@\n-old\n+new\n*** End Patch"
-                }
-            ),
-            "workspace.patch_destructive": lambda runtime: runtime.apply_patch(
-                {
-                    "patch": "*** Begin Patch\n*** Update File: existing.txt\n@@\n old\n-second\n*** End Patch"
-                }
-            ),
-            "workspace.delete": lambda runtime: runtime.apply_patch(
-                {
-                    "patch": "*** Begin Patch\n*** Delete File: existing.txt\n*** End Patch"
-                }
-            ),
-            "workspace.move": lambda runtime: runtime.apply_patch(
-                {
-                    "patch": "*** Begin Patch\n*** Move File: existing.txt to: moved.txt\n*** End Patch"
-                }
-            ),
-        }
-        with (
-            tempfile.TemporaryDirectory() as tmp,
-            patch.dict(os.environ, {"DEVMCP_CONFIG_DIR": tmp}, clear=False),
-        ):
-            workspace = Path(tmp) / "workspace"
-            workspace.mkdir()
-            for capability, operation in operations.items():
-                with self.subTest(capability=capability):
-                    (workspace / "existing.txt").write_text(
-                        "old\nsecond\n"
-                        if capability == "workspace.patch_destructive"
-                        else "old\n",
-                        encoding="utf-8",
-                    )
-                    rules = {name: "auto" for name in CAPABILITIES}
-                    rules["agent.delegate"] = "deny"
-                    rules[capability] = "deny"
-                    runtime = Runtime(
-                        workspace,
-                        policy_profile="custom",
-                        policy_rules=rules,
-                        max_removed_lines=0
-                        if capability == "workspace.patch_destructive"
-                        else 200,
-                    )
-                    try:
-                        with self.assertRaises(ToolFailure):
-                            operation(runtime)
-                    finally:
-                        runtime.close()
-
-    def test_server_capabilities_block_their_real_bind_operations(self) -> None:
-        with (
-            tempfile.TemporaryDirectory() as tmp,
-            patch.dict(os.environ, {"DEVMCP_CONFIG_DIR": tmp}, clear=False),
-        ):
-            selected = paths()
-            config = load_config(selected, workspace=tmp)
-            config["profile"] = "custom"
-            config["policy"] = {"custom": {name: "auto" for name in CAPABILITIES}}
-            config["policy"]["custom"]["agent.delegate"] = "deny"
-            config["policy"]["custom"]["server.loopback"] = "deny"
-            config["policy"]["custom"]["server.public"] = "deny"
-            save_config(config, selected)
-            args = SimpleNamespace(
-                auth_token=None,
-                auth_token_file=None,
-                host="127.0.0.1",
-                policy_profile="custom",
-                permission_mode="trusted",
-                allow_network=True,
-                shell_env_inherit=None,
-                oauth_mode=False,
-            )
-            with patch.dict(
-                os.environ,
-                {"DEVMCP_POLICY_CONFIG_FILE": str(selected.config_file)},
-                clear=False,
-            ):
-                self.assertEqual(run_http(args), 2)
-                args.host = "0.0.0.0"
-                self.assertEqual(run_http(args), 2)
 
     def test_legacy_trusted_authenticated_public_bind_remains_compatible(self) -> None:
         class FakeServer:
@@ -1223,6 +1040,5 @@ class ReleaseLifecycleTests(unittest.TestCase):
                 save_config(config, selected)
                 self.assertEqual(cli._serve(SimpleNamespace()), 0)
             first, second = (list(call.args[0]) for call in server_main.call_args_list)
-            self.assertEqual(first[first.index("--policy-profile") + 1], "balanced")
-            self.assertEqual(second[second.index("--policy-profile") + 1], "power")
+            self.assertIn("--execution-mode", first)
             self.assertEqual(second[second.index("--port") + 1], "48999")

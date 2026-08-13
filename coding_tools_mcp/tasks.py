@@ -160,12 +160,13 @@ TASK_REGISTRY = [
     ),
     _task("vitest.run", "javascript", "Run Vitest tests.", "vitest", ["run"]),
     _task("jest.run", "javascript", "Run Jest tests.", "jest"),
-    _task("pytest.all", "python", "Run all pytest tests.", "pytest"),
+    _task("pytest.all", "python", "Run all pytest tests.", "python3", ["-m", "pytest"]),
     _task(
         "pytest.file",
         "python",
         "Run pytest on a file.",
-        "pytest",
+        "python3",
+        ["-m", "pytest"],
         arguments={
             "args": {"type": "string_array", "required": False},
             "path": {"type": "path", "required": True},

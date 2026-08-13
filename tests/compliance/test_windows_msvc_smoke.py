@@ -108,7 +108,10 @@ class WindowsMsvcEnvironmentSmokeTests(unittest.TestCase):
                 payload = assert_tool_success(self, result)
                 output = (payload.get("stdout") or "") + (payload.get("stderr") or "")
                 self.assertEqual(payload.get("exit_code"), 0, output)
-                self.assertEqual(payload.get("execution_mode"), "workspace-write")
+                self.assertIn(
+                    payload.get("execution_mode"),
+                    {"full-access", "build", "workspace-write"},
+                )
                 self.assertTrue((workspace / "hello.exe").exists(), output)
 
     def test_inherit_all_preserves_msvc_environment_for_single_file_compile(

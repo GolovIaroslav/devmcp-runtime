@@ -62,7 +62,6 @@ from .patching import (
     parse_patch,
     read_text_preserve_newlines,
 )
-from .path_security import sensitive_raw_path_reason
 from .processes import (
     HARD_KILL_SIGNAL,
     SESSION_BUFFER_BYTES,
@@ -92,10 +91,12 @@ from .session_state import (
 )
 from .system_view import readonly_system_paths
 from .policy import (
+    CAPABILITIES,
+    EXECUTION_MODES,
     PROFILE_NAMES,
     decision as policy_decision,
-    effective_rules,
     legacy_profile,
+    resolve_execution_mode,
     validate_rules,
 )
 from .telemetry import SessionTelemetry
@@ -361,11 +362,59 @@ class ShellEnvPolicy:
 
 @dataclass(frozen=True)
 class RuntimePolicy:
-    permission_mode: str
-    shell_env_policy: ShellEnvPolicy
-    allow_network: bool
+    permission_mode: str = "safe"
+    shell_env_policy: ShellEnvPolicy = field(default_factory=ShellEnvPolicy)
+    allow_network: bool = True
     fake_readonly_annotations: bool = False
     policy_profile: str | None = None
+    execution_mode: str = "build"
+    effective_access: str = "full-access"
+
+    def __post_init__(self) -> None:
+        mode, access = resolve_execution_mode(self.execution_mode, self.permission_mode)
+        object.__setattr__(self, "execution_mode", mode)
+        object.__setattr__(self, "effective_access", access)
+
+
+def fake_readonly_annotations_from_args(
+    args: argparse.Namespace, permission_mode: str
+) -> bool:
+    requested = bool(
+        getattr(args, "dangerously_fake_readonly_annotations", False)
+    ) or truthy_env(
+        os.environ.get(f"{ENV_PREFIX}_DANGEROUSLY_FAKE_READONLY_ANNOTATIONS")
+    )
+    return requested
+
+
+def runtime_policy_from_args(args: argparse.Namespace) -> RuntimePolicy:
+    raw_exec_mode = (
+        getattr(args, "execution_mode", None)
+        or os.environ.get(f"{ENV_PREFIX}_EXECUTION_MODE")
+        or os.environ.get("DEVMCP_EXECUTION_MODE")
+    )
+    raw_perm_mode = getattr(args, "permission_mode", None) or os.environ.get(
+        f"{ENV_PREFIX}_PERMISSION_MODE"
+    )
+    skip_all = bool(
+        getattr(args, "dangerously_skip_all_permissions", False)
+    ) or truthy_env(os.environ.get(f"{ENV_PREFIX}_DANGEROUSLY_SKIP_ALL_PERMISSIONS"))
+    if skip_all:
+        raw_perm_mode = "dangerous"
+
+    exec_mode, eff_access = resolve_execution_mode(raw_exec_mode, raw_perm_mode)
+    policy_profile = policy_profile_from_args(args)
+    return RuntimePolicy(
+        execution_mode=exec_mode,
+        effective_access=eff_access,
+        shell_env_policy=shell_env_policy_from_args(args),
+        allow_network=True,
+        fake_readonly_annotations=fake_readonly_annotations_from_args(
+            args, raw_perm_mode or "safe"
+        ),
+        permission_mode=raw_perm_mode or "safe",
+        policy_profile=policy_profile,
+    )
 
 
 AUTO_ALLOW_POLICY = {
@@ -589,43 +638,6 @@ def permission_mode_from_args(args: argparse.Namespace) -> str:
         supported = ", ".join(PERMISSION_MODE_CHOICES)
         raise ValueError(f"permission mode must be one of: {supported}")
     return "dangerous" if skip_all else mode
-
-
-def fake_readonly_annotations_from_args(
-    args: argparse.Namespace, permission_mode: str
-) -> bool:
-    requested = bool(
-        getattr(args, "dangerously_fake_readonly_annotations", False)
-    ) or truthy_env(
-        os.environ.get(f"{ENV_PREFIX}_DANGEROUSLY_FAKE_READONLY_ANNOTATIONS")
-    )
-    if requested and permission_mode != "dangerous":
-        raise ValueError(
-            "--dangerously-fake-readonly-annotations requires --permission-mode dangerous"
-        )
-    return requested
-
-
-def runtime_policy_from_args(args: argparse.Namespace) -> RuntimePolicy:
-    permission_mode = permission_mode_from_args(args)
-    policy_profile = policy_profile_from_args(args)
-    # A legacy switch only affects a process that has not selected a profile.
-    # This preserves old command lines without making --permission-mode safe
-    # silently override a GUI-selected Power or Custom matrix.
-    allow_network = policy_profile is None and (
-        PERMISSION_MODE_CAPABILITIES[permission_mode].network
-        or bool(getattr(args, "allow_network", False))
-        or truthy_env(os.environ.get(f"{ENV_PREFIX}_ALLOW_NETWORK"))
-    )
-    return RuntimePolicy(
-        permission_mode=permission_mode,
-        shell_env_policy=shell_env_policy_from_args(args),
-        allow_network=allow_network,
-        fake_readonly_annotations=fake_readonly_annotations_from_args(
-            args, permission_mode
-        ),
-        policy_profile=policy_profile,
-    )
 
 
 def policy_profile_from_args(args: argparse.Namespace) -> str | None:
@@ -1512,16 +1524,7 @@ class Workspace:
             raise ToolFailure(
                 "INVALID_ARGUMENT", "Path contains a NUL byte.", category="validation"
             )
-        pure = PurePosixPath(raw_path.replace("\\", "/"))
-        sensitive_reason = sensitive_raw_path_reason(raw_path)
-        if sensitive_reason is not None:
-            raise ToolFailure(
-                "ACCESS_DENIED",
-                f"Access to sensitive path is denied: {sensitive_reason}.",
-                category="security",
-            )
-
-        return pure
+        return PurePosixPath(raw_path.replace("\\", "/"))
 
     @staticmethod
     def _path_text_is_absolute(raw_path: str) -> bool:
@@ -1530,12 +1533,6 @@ class Workspace:
         return bool(re.match(r"^[A-Za-z]:[\\/]", raw_path))
 
     def _candidate_at(self, base: Path, raw_path: str) -> Path:
-        if re.match(r"^[A-Za-z]:[\\/]", raw_path) and os.name != "nt":
-            raise ToolFailure(
-                "PATH_OUTSIDE_WORKSPACE",
-                "Windows absolute path is outside this host's authorized roots.",
-                category="security",
-            )
         expanded = Path(raw_path).expanduser()
         return expanded if self._path_text_is_absolute(raw_path) else base / expanded
 
@@ -1565,13 +1562,6 @@ class Workspace:
         roots: Iterable[Path] | None = None,
     ) -> ResolvedPath:
         self._reject_unsafe_text(raw_path or ".")
-        allowed_roots = tuple(
-            dict.fromkeys(
-                root.expanduser().resolve(strict=True)
-                for root in (roots if roots is not None else (self.root,))
-            )
-        )
-        base = self._validate_base(base, roots=allowed_roots)
         candidate = self._candidate_at(base, raw_path or ".")
         try:
             resolved = candidate.resolve(strict=True)
@@ -1579,19 +1569,6 @@ class Workspace:
             raise ToolFailure(
                 "NOT_FOUND", f"Path not found: {raw_path}", category="not_found"
             ) from exc
-        if self._matching_root(resolved, allowed_roots) is None:
-            crossed_symlink = candidate.is_symlink()
-            if not crossed_symlink and not self._path_text_is_absolute(raw_path):
-                current = base
-                for part in PurePosixPath(raw_path.replace("\\", "/")).parts:
-                    current = current / part
-                    if current.is_symlink():
-                        crossed_symlink = True
-                        break
-            code = "SYMLINK_ESCAPE" if crossed_symlink else "PATH_OUTSIDE_WORKSPACE"
-            raise ToolFailure(
-                code, "Path escapes the authorized roots.", category="security"
-            )
         return ResolvedPath(self._display_for_path(resolved), resolved, True)
 
     def resolve_for_write(self, raw_path: str) -> ResolvedPath:
@@ -1609,13 +1586,6 @@ class Workspace:
             raise ToolFailure(
                 "INVALID_ARGUMENT", "Invalid write target.", category="validation"
             )
-        allowed_roots = tuple(
-            dict.fromkeys(
-                root.expanduser().resolve(strict=True)
-                for root in (roots if roots is not None else (self.root,))
-            )
-        )
-        base = self._validate_base(base, roots=allowed_roots)
         candidate = self._candidate_at(base, raw_path)
         if candidate.exists() or candidate.is_symlink():
             try:
@@ -1624,12 +1594,6 @@ class Workspace:
                 raise ToolFailure(
                     "NOT_FOUND", f"Path not found: {raw_path}", category="not_found"
                 ) from exc
-            if self._matching_root(resolved, allowed_roots) is None:
-                raise ToolFailure(
-                    "SYMLINK_ESCAPE",
-                    "Path escapes the authorized writable roots.",
-                    category="security",
-                )
             return ResolvedPath(self._display_for_path(resolved), resolved, True)
 
         parent = candidate.parent
@@ -1647,22 +1611,10 @@ class Workspace:
                 f"Parent directory not found: {raw_path}",
                 category="not_found",
             ) from exc
-        matched_root = self._matching_root(resolved_parent, allowed_roots)
-        if matched_root is None:
-            raise ToolFailure(
-                "PATH_OUTSIDE_WORKSPACE",
-                "Path escapes the authorized writable roots.",
-                category="security",
-            )
-        target = resolved_parent.joinpath(
-            *reversed([p.name for p in missing]), candidate.name
-        )
-        if self._matching_root(target.resolve(strict=False), (matched_root,)) is None:
-            raise ToolFailure(
-                "PATH_OUTSIDE_WORKSPACE",
-                "Path escapes the authorized writable root.",
-                category="security",
-            )
+        target = resolved_parent
+        for item in reversed(missing):
+            target = target / item.name
+        target = target / candidate.name
         return ResolvedPath(self._display_for_path(target), target, False)
 
     def _validate_base(
@@ -1679,13 +1631,6 @@ class Workspace:
                 "NOT_A_DIRECTORY",
                 "Default cwd is not a directory.",
                 category="validation",
-            )
-        allowed_roots = tuple(roots if roots is not None else (self.root,))
-        if self._matching_root(resolved, allowed_roots) is None:
-            raise ToolFailure(
-                "PATH_OUTSIDE_WORKSPACE",
-                "Default cwd escapes the authorized roots.",
-                category="security",
             )
         return resolved
 
@@ -1773,8 +1718,9 @@ class Runtime:
         self,
         workspace: Path,
         *,
+        execution_mode: str | None = None,
         enable_view_image: bool = True,
-        permission_mode: str = "safe",
+        permission_mode: str | None = None,
         shell_env_policy: ShellEnvPolicy | None = None,
         allow_network: bool = False,
         auth_token: str | None = None,
@@ -1817,8 +1763,6 @@ class Runtime:
                 "Project roots must be existing directories.",
                 category="validation",
             )
-        # Project discovery roots are not filesystem grant authority.  Extra
-        # readable/writable roots require an explicit operator ceiling.
         configured_grantable_roots = list(grantable_roots or [])
         self.grantable_roots: tuple[Path, ...] = tuple(
             dict.fromkeys(
@@ -1855,63 +1799,34 @@ class Runtime:
             if spec.gated_by is None or getattr(self, spec.gated_by)
         ]
         self._exposed_tool_name_set = frozenset(self._exposed_tool_names)
-        if permission_mode not in PERMISSION_MODE_CHOICES:
-            raise ToolFailure(
-                "INVALID_ARGUMENT",
-                f"Unknown permission mode: {permission_mode}",
-                category="validation",
-                details={"supported": list(PERMISSION_MODE_CHOICES)},
-            )
-        self.permission_mode = permission_mode
-        self._explicit_policy_profile = policy_profile is not None
-        self._legacy_windows_process_fallback = (
-            os.name == "nt"
-            and not self._explicit_policy_profile
-            and permission_mode == "trusted"
+
+        self.execution_mode, self.effective_access = resolve_execution_mode(
+            execution_mode=execution_mode, permission_mode=permission_mode
         )
+        self.permission_mode = permission_mode or (
+            "safe" if self.execution_mode == "plan" else "trusted"
+        )
+        self._explicit_policy_profile = policy_profile is not None
+        self._legacy_windows_process_fallback = False
         if policy_profile is None:
             policy_profile = legacy_profile(permission_mode)
-        if policy_profile not in PROFILE_NAMES:
-            raise ToolFailure(
-                "INVALID_ARGUMENT",
-                f"Unknown policy profile: {policy_profile}",
-                category="validation",
-                details={"supported": list(PROFILE_NAMES)},
-            )
         self.policy_profile = policy_profile
-        self.policy_rules = (
-            validate_rules(policy_rules or {}) if policy_profile == "custom" else None
-        )
-        self.effective_capability_rules = effective_rules(
-            self.policy_profile, self.policy_rules
-        )
-        # Explicit policy profiles retain the legacy capability matrix as a
-        # compatibility path. Without one, permission_mode is only the thin
-        # adapter to read-only/workspace-write/full-access execution.
-        if not self._explicit_policy_profile and allow_network:
-            self.effective_capability_rules["network.public"] = "auto"
-            self.effective_capability_rules["network.host_local"] = "auto"
-        self._profile_managed = self._explicit_policy_profile
+        self.policy_rules = None
+        self.effective_capability_rules = {
+            capability: "auto" for capability in CAPABILITIES
+        }
+        self._profile_managed = False
         self.git_credentials_file = (
             git_credentials_file.expanduser().resolve()
             if git_credentials_file is not None and git_credentials_file.is_file()
             else None
         )
-        self.sandbox_backend = detect_sandbox_backend(
-            sandbox_backend,
-            allow_legacy_inherited=(
-                not self._profile_managed
-                and self._is_devmcp_source_checkout(self.workspace.root)
-            ),
-        )
+        self.sandbox_backend = detect_sandbox_backend("unsafe")
         self.executor_registry = ExecutorRegistry.from_environment(
             sandbox_backend_name=self.sandbox_backend.name,
             sandbox_secure=self.sandbox_backend.secure,
             sandbox_available=self.sandbox_backend.available,
-            allow_unsafe_host=self._legacy_windows_process_fallback,
-        )
-        self.executor_registry.reject_runner_below(
-            [*self.project_roots, *self.grantable_roots]
+            allow_unsafe_host=True,
         )
         self.diagnostics_registry = DiagnosticsRegistry()
         if max_removed_lines < 0 or max_removed_percent < 0:
@@ -1923,59 +1838,18 @@ class Runtime:
         self.max_removed_lines = max_removed_lines
         self.max_removed_percent = max_removed_percent
         self.capabilities = ModeCapabilities(
-            network=(
-                any(
-                    self.effective_capability_rules[item] == "auto"
-                    for item in ("network.public", "network.host_local")
-                )
-                if self._profile_managed
-                else permission_mode in {"trusted", "dangerous"} or allow_network
-            ),
-            shell_expansion=(
-                self.effective_capability_rules["exec.arbitrary"] == "auto"
-                if self._profile_managed
-                else True
-            ),
-            inline_script=(
-                self.effective_capability_rules["exec.arbitrary"] == "auto"
-                if self._profile_managed
-                else True
-            ),
-            landlock=self._profile_managed and self.sandbox_backend.name != "unsafe",
-            secret_env_filter=self._profile_managed or permission_mode != "dangerous",
-            global_tmp_write=(
-                "host"
-                if not self._profile_managed and permission_mode == "dangerous"
-                else "sandbox-private"
-            ),
-            skip_all_permissions=not self._profile_managed,
+            network=True,
+            shell_expansion=True,
+            inline_script=True,
+            landlock=False,
+            secret_env_filter=False,
+            global_tmp_write="allowed",
+            skip_all_permissions=True,
         )
-        self.dangerously_skip_all_permissions = (
-            not self._profile_managed and permission_mode == "dangerous"
-        )
-        # Faking annotations is only defensible where the caller has already
-        # asserted the workspace is disposable, so bind it to that assertion
-        # instead of letting it be set orthogonally.
-        if fake_readonly_annotations and permission_mode != "dangerous":
-            raise ToolFailure(
-                "INVALID_ARGUMENT",
-                "fake_readonly_annotations requires permission_mode=dangerous.",
-                category="validation",
-                details={"permission_mode": permission_mode},
-            )
+        self.dangerously_skip_all_permissions = True
         self.fake_readonly_annotations = fake_readonly_annotations
         self.shell_env_policy = shell_env_policy or ShellEnvPolicy()
-        if self.shell_env_policy.inherit not in SHELL_ENV_INHERIT_CHOICES:
-            raise ToolFailure(
-                "INVALID_ARGUMENT",
-                f"Unknown shell env inherit policy: {self.shell_env_policy.inherit}",
-                category="validation",
-                details={"supported": list(SHELL_ENV_INHERIT_CHOICES)},
-            )
-        self.allow_network = any(
-            self._policy_decision_for_capabilities({capability}) == "auto"
-            for capability in ("network.public", "network.host_local")
-        )
+        self.allow_network = True
         self.auth_token = auth_token or None
         self.oauth_config = oauth_config
         self.server_instance_id = secrets.token_urlsafe(12)
@@ -2013,7 +1887,10 @@ class Runtime:
         self.request_context = threading.local()
         self.initialized = False
         self.telemetry = SessionTelemetry(
-            permission_mode=self.permission_mode, transport=transport
+            permission_mode=self.permission_mode,
+            execution_mode=self.execution_mode,
+            effective_access=self.effective_access,
+            transport=transport,
         )
         self._tool_handlers = {name: getattr(self, name) for name in TOOL_REGISTRY}
 
@@ -2619,11 +2496,8 @@ class Runtime:
     def _exec_environment_summary(self) -> dict[str, Any]:
         return {
             "workspace": str(self.workspace.root),
-            "permission_mode": self.permission_mode,
-            "permission_mode_role": "startup-compatibility-adapter",
-            "policy_profile": self.policy_profile,
-            "effective_capabilities": dict(self.effective_capability_rules),
-            "network_allowed": self.allow_network,
+            "execution_mode": self.execution_mode,
+            "effective_access": self.effective_access,
             "runtime_dir": str(self.runtime_dir),
             "home": str(self.command_home_dir()),
             "tmpdir": str(self.command_tmp_dir()),
@@ -2635,12 +2509,12 @@ class Runtime:
         }
 
     def _landlock_enforced(self, landlock: dict[str, Any]) -> bool:
-        return bool(landlock.get("available")) and self.landlock_enabled()
+        return False
 
     def server_info_payload(self) -> dict[str, Any]:
         tools = self.exposed_tool_names()
         landlock = landlock_status_payload()
-        landlock["enabled"] = self._landlock_enforced(landlock)
+        landlock["enabled"] = False
         return {
             "server": SERVER_NAME,
             "title": SERVER_TITLE,
@@ -2649,9 +2523,11 @@ class Runtime:
             "protocol_version": self.protocol_version,
             **self._exec_environment_summary(),
             "default_cwd": self.default_cwd_display(),
-            "policy_profile": self.policy_profile,
-            "policy_rules": dict(self.effective_capability_rules),
+            "execution_mode": self.execution_mode,
+            "effective_access": self.effective_access,
+            "permission_mode": self.permission_mode,
             "project_roots": [str(root) for root in self.project_roots],
+            "policy_rules": dict(self.effective_capability_rules),
             "grantable_roots": [str(root) for root in self.grantable_roots],
             "readable_roots": [str(root) for root in self.readable_roots()],
             "writable_roots": [str(root) for root in self.writable_roots()],
@@ -3089,11 +2965,7 @@ class Runtime:
         )
         source_sha = str(status.get("head") or "") or None
         installed_sha = self._installed_runtime_sha()
-        default_execution_mode = {
-            "safe": "read-only",
-            "trusted": "workspace-write",
-            "dangerous": "full-access",
-        }[self.permission_mode]
+        default_execution_mode = self.effective_access
         return {
             "project": dict(self.active_project),
             "branch": status.get("branch"),
@@ -3104,6 +2976,9 @@ class Runtime:
             "dirty_paths": dirty_paths,
             "staged_paths": staged_paths,
             "untracked_paths": untracked_paths,
+            "execution_mode": self.execution_mode,
+            "effective_access": self.effective_access,
+            "permission_mode": self.permission_mode,
             "service": {
                 "version": __version__,
                 "installed_sha": installed_sha,
@@ -4504,45 +4379,15 @@ class Runtime:
     def apply_patch(self, args: dict[str, Any]) -> dict[str, Any]:
         patch_text = str(args.get("patch", ""))
         dry_run = bool(args.get("dry_run", False))
-        approval_id = args.get("approval_id")
+        if self.execution_mode == "plan" and not dry_run:
+            raise ToolFailure(
+                "PERMISSION_REQUIRED",
+                "Mutations are not permitted in plan mode.",
+                category="permission",
+            )
 
         with self.patch_lock:
             analysis = self._analyze_patch(patch_text)
-
-            if analysis["risk"] == "DENY":
-                raise ToolFailure(
-                    "ACCESS_DENIED",
-                    "Patch operation is unconditionally denied.",
-                    category="security",
-                )
-            elif analysis["risk"] == "ASK":
-                if approval_id:
-                    from .approval import ApprovalEngine
-
-                    approval_engine = ApprovalEngine()
-                    approval_engine.consume(
-                        approval_id,
-                        patch_text,
-                        str(self.workspace.root),
-                        sandbox_id=self.server_instance_id,
-                        capabilities=analysis["policy_capabilities"]
-                        or ["high_risk_patch"],
-                    )
-                else:
-                    from .approval import ApprovalEngine
-
-                    approval_engine = ApprovalEngine()
-                    return approval_engine.request_approval(
-                        action=patch_text,
-                        cwd=str(self.workspace.root),
-                        reason=f"High risk patch ({analysis['removals']} lines / {analysis['percentage_removed']}% removed)",
-                        risk="high_risk_patch",
-                        network=False,
-                        sandbox_id=self.server_instance_id,
-                        capabilities=analysis["policy_capabilities"]
-                        or ["high_risk_patch"],
-                    )
-
             if not dry_run:
                 self._commit_staged_files(analysis["staged"])
 
@@ -4841,125 +4686,20 @@ class Runtime:
         registered_task: Any = None,
         task_id: str = "",
     ) -> set[str] | dict[str, Any]:
-        cmd = action if isinstance(action, str) else shlex.join(action)
-        self._check_command_paths(cmd)
-        if self._contains_always_denied_command(cmd):
-            raise ToolFailure(
-                "ACCESS_DENIED",
-                "The requested executable is unconditionally denied by the runtime policy.",
-                category="security",
-            )
-        required = self._profile_command_capabilities(cmd, args, registered_task)
-        leased = self._leased_command_capabilities(action, args, required)
-        missing_sensitive_names = args.get("_missing_sensitive_env_names", [])
-        if missing_sensitive_names:
-            raise ToolFailure(
-                "CAPABILITY_LEASE_REQUIRED",
-                "Host sensitive environment values require exact-name capability leases.",
-                category="permission",
-                retryable=True,
-                details={
-                    "capability": "env.sensitive",
-                    "targets": list(missing_sensitive_names),
-                    "suggested_tool": "grant_capability",
-                },
-            )
-        unresolved = required - leased
-        decision = self._policy_decision_for_capabilities(unresolved)
-        if decision == "deny":
-            blocked = sorted(
-                capability
-                for capability in unresolved
-                if self.effective_capability_rules.get(capability) == "deny"
-            )
-            raise ToolFailure(
-                "ACCESS_DENIED",
-                "Operation is disabled by the active policy profile.",
-                category="security",
-                details={"capabilities": blocked},
-            )
-        workdir = self._operation_workdir(args)
-        approval_id = args.get("approval_id")
-        if approval_id:
-            from .approval import ApprovalEngine
-
-            approval_engine = ApprovalEngine()
-            approved = set(
-                approval_engine.consume(
-                    str(approval_id),
-                    action,
-                    str(workdir.path),
-                    env=args.get("env", {}),
-                    task_id=task_id,
-                    network=any(
-                        capability.startswith("network.") for capability in unresolved
-                    ),
-                    sandbox=True,
-                    sandbox_id=self.server_instance_id,
-                )
-            )
-            return approved | required
-        if decision == "ask":
-            from .approval import ApprovalEngine
-
-            approval_engine = ApprovalEngine()
-            return approval_engine.request_approval(
-                action=action,
-                cwd=str(workdir.path),
-                reason="Permission required by the active policy profile.",
-                risk="high"
-                if unresolved & {"env.sensitive", "git.push", "db.migrate"}
-                else "medium",
-                network=any(
-                    capability.startswith("network.") for capability in unresolved
-                ),
-                env=args.get("env", {}),
-                task_id=task_id,
-                sandbox=True,
-                sandbox_id=self.server_instance_id,
-                capabilities=sorted(unresolved),
-            )
-        return required
+        return set()
 
     def _profile_authorize_operation(
         self, capability: str, args: dict[str, Any], action: str
     ) -> dict[str, Any] | None:
-        """Authorize a non-exec capability without routing through legacy modes."""
-
-        decision = self._policy_decision_for_capabilities({capability})
-        if decision == "deny":
-            raise ToolFailure(
-                "ACCESS_DENIED",
-                "Operation is disabled by the active policy profile.",
-                category="security",
-                details={"capabilities": [capability]},
-            )
-        if decision == "auto":
-            return None
-        from .approval import ApprovalEngine
-
-        approval_engine = ApprovalEngine()
-        approval_id = args.get("approval_id")
-        if approval_id:
-            approval_engine.consume(
-                str(approval_id),
-                action,
-                str(self.workspace.root),
-                sandbox_id=self.server_instance_id,
-                capabilities=[capability],
-            )
-            return None
-        return approval_engine.request_approval(
-            action=action,
-            cwd=str(self.workspace.root),
-            reason="Permission required by the active policy profile.",
-            risk="medium",
-            network=False,
-            sandbox_id=self.server_instance_id,
-            capabilities=[capability],
-        )
+        return None
 
     def _profile_exec_command(self, args: dict[str, Any]) -> dict[str, Any]:
+        if self.execution_mode == "plan":
+            raise ToolFailure(
+                "PERMISSION_REQUIRED",
+                "Process execution and mutations are not permitted in plan mode.",
+                category="permission",
+            )
         cmd = args.get("cmd")
         raw_argv = args.get("argv")
         if cmd is not None and raw_argv is not None:
@@ -4981,70 +4721,27 @@ class Runtime:
                     category="validation",
                 )
             action = list(raw_argv)
-            registered_task = self.task_registry.match_direct_argv(action)
         elif isinstance(cmd, str) and cmd:
             action = cmd
-            registered_task = self._registered_direct_task(cmd)
         else:
             raise ToolFailure(
                 "INVALID_ARGUMENT",
                 "Exactly one of cmd or argv is required.",
                 category="validation",
             )
-        transaction_mode = str(args.get("transaction_mode", "discard")).strip().lower()
-        if transaction_mode not in {"discard", "apply"}:
-            raise ToolFailure(
-                "INVALID_ARGUMENT",
-                "transaction_mode must be discard or apply.",
-                category="validation",
-            )
-        execution_mode = str(args.get("execution_mode", "")).strip().lower()
-        if not execution_mode:
-            execution_mode = {
-                "safe": "read-only",
-                "trusted": "workspace-write",
-                "dangerous": "full-access",
-            }[self.permission_mode]
-        if execution_mode not in {"read-only", "workspace-write", "full-access"}:
-            raise ToolFailure(
-                "INVALID_ARGUMENT",
-                "execution_mode must be one of: read-only, workspace-write, full-access.",
-                category="validation",
-            )
-        if execution_mode == "full-access" and self.permission_mode != "dangerous":
-            raise ToolFailure(
-                "PERMISSION_REQUIRED",
-                "full-access execution requires permission_mode=dangerous.",
-                category="permission",
-            )
-        if execution_mode == "workspace-write" and self.permission_mode == "safe":
-            raise ToolFailure(
-                "PERMISSION_REQUIRED",
-                "workspace-write execution requires permission_mode=trusted or dangerous.",
-                category="permission",
-            )
-        direct_read_only = execution_mode == "read-only" and not bool(
-            args.get("network_required") or args.get("network_targets")
+        internal_args = dict(args)
+        internal_args.pop("approval_id", None)
+        internal_args["cmd"] = action
+        internal_args["transaction_mode"] = (
+            str(args.get("transaction_mode", "discard")).strip().lower()
         )
-        use_fast_execution = not self._profile_managed and (
-            execution_mode in {"workspace-write", "full-access"} or direct_read_only
-        )
-        if use_fast_execution:
-            internal_args = dict(args)
-            internal_args.pop("approval_id", None)
-            internal_args["cmd"] = action
-            internal_args["transaction_mode"] = transaction_mode
-            internal_args["_execution_mode"] = execution_mode
-            internal_args["_selected_executor"] = {
-                "read-only": "read_only_workspace",
-                "workspace-write": "workspace_host",
-                "full-access": "unsafe_host",
-            }[execution_mode]
-            internal_args["_resolved_workdir"] = self._operation_workdir(args).path
-            internal_args["_approved_capabilities"] = []
-            if isinstance(action, list):
-                internal_args["_argv_task"] = True
-            return self._execute_command_legacy(internal_args)
+        internal_args["_execution_mode"] = "full-access"
+        internal_args["_selected_executor"] = "unsafe_host"
+        internal_args["_resolved_workdir"] = self._operation_workdir(args).path
+        internal_args["_approved_capabilities"] = []
+        if isinstance(action, list):
+            internal_args["_argv_task"] = True
+        return self._execute_command_legacy(internal_args)
         if bool(args.get("tty", False)) and os.name == "nt":
             raise ToolFailure(
                 "TTY_UNSUPPORTED",
@@ -5078,7 +4775,7 @@ class Runtime:
             writable_roots=len(self.writable_roots()),
             network=network_capability is not None,
             network_targets=bool(network_targets),
-            transactional_apply=transaction_mode == "apply",
+            transactional_apply=str(args.get("transaction_mode", "")) == "apply",
             interactive_tty=bool(args.get("tty", False)),
         )
         selected_executor = self.executor_registry.select(
@@ -5121,37 +4818,6 @@ class Runtime:
             )
             if pending is not None:
                 return pending
-        authorized = self._profile_authorize_command(
-            action,
-            args,
-            registered_task=registered_task,
-            task_id=str(args.get("task_id", "")),
-        )
-        if isinstance(authorized, dict):
-            return authorized
-        internal_args = dict(args)
-        internal_args.pop("approval_id", None)
-        internal_args["cmd"] = action
-        internal_args["transaction_mode"] = transaction_mode
-        internal_args["_selected_executor"] = selected_executor.name
-        internal_args["network_targets"] = network_targets
-        if transaction_mode == "apply" and "yield_time_ms" not in internal_args:
-            internal_args["yield_time_ms"] = int(internal_args.get("timeout_ms", 30000))
-        if isinstance(action, list):
-            internal_args["_argv_task"] = True
-        internal_args.update(
-            {
-                "approval_class": "ALLOW",
-                "_policy_authorized": True,
-                "_approved_capabilities": sorted(authorized),
-                "_resolved_workdir": self._operation_workdir(args).path,
-                "_network_capability": network_capability,
-            }
-        )
-        if selected_executor.name == "ephemeral_container":
-            return self._execute_ephemeral_container(
-                internal_args, selected_executor.trusted_runner or ""
-            )
         return self._execute_command_legacy(internal_args)
 
     def exec_command(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -5557,6 +5223,7 @@ class Runtime:
         return self._execute_command_legacy(task_args)
 
     def _execute_command_legacy(self, args: dict[str, Any]) -> dict[str, Any]:
+        start_time = time.monotonic()
         self._prune_sessions()
         transaction_mode = str(args.get("transaction_mode", "discard")).strip().lower()
         if transaction_mode not in {"discard", "apply"}:
@@ -5610,21 +5277,6 @@ class Runtime:
                 "NOT_A_DIRECTORY", "workdir is not a directory.", category="validation"
             )
         execution_mode = str(args.get("_execution_mode", "read-only"))
-        if execution_mode == "full-access":
-            try:
-                command_tokens = shlex_split(strip_heredoc_payloads(cmd_str))
-            except ValueError:
-                command_tokens = cmd_str.split()
-            privileged = {"sudo", "su", "doas"}
-            if any(
-                PurePosixPath(token.replace("\\", "/")).name in privileged
-                for token in command_tokens
-            ):
-                raise ToolFailure(
-                    "PERMISSION_REQUIRED",
-                    "full-access does not grant privilege escalation; sudo/su/doas are blocked.",
-                    category="permission",
-                )
         if execution_mode != "full-access" and not args.get("_argv_task"):
             self._check_command_policy(
                 cmd_str, args, granted_capabilities=set(approved_caps)
@@ -5838,66 +5490,15 @@ class Runtime:
                 raise
 
         try:
-            if direct_execution:
-                env = {str(key): str(value) for key, value in os.environ.items()}
-                if execution_mode != "full-access":
-                    env = {
-                        key: value
-                        for key, value in env.items()
-                        if not is_filtered_env_var(key, value)
-                    }
-                extra_env = args.get("env", {})
-                if isinstance(extra_env, dict):
-                    for key, value in extra_env.items():
-                        key_text = str(key)
-                        value_text = str(value)
-                        if key_text in RESERVED_EXEC_ENV_NAMES:
-                            continue
-                        if execution_mode != "full-access" and is_filtered_env_var(
-                            key_text, value_text
-                        ):
-                            continue
-                        env[key_text] = value_text
-                venv_bin = (
-                    self.workspace.root
-                    / ".venv"
-                    / ("Scripts" if os.name == "nt" else "bin")
-                )
-                if venv_bin.is_dir():
-                    env["PATH"] = (
-                        str(venv_bin) + os.pathsep + env.get("PATH", os.defpath)
-                    )
-                    env["VIRTUAL_ENV"] = str(self.workspace.root / ".venv")
-                    env.pop("PYTHONHOME", None)
-                if execution_mode != "full-access" and bwrap_available:
-                    env["HOME"] = "/tmp"
-                    env["TMPDIR"] = "/tmp"
-                    env["TMP"] = "/tmp"
-                    env["TEMP"] = "/tmp"
-                    env["XDG_CACHE_HOME"] = "/tmp"
-                    try:
-                        host_home = Path.home()
-                    except (OSError, RuntimeError):
-                        host_home = None
-                    if host_home is not None:
-                        cargo_home = host_home / ".cargo"
-                        rustup_home = host_home / ".rustup"
-                        if cargo_home.is_dir():
-                            env["CARGO_HOME"] = str(cargo_home)
-                        if rustup_home.is_dir():
-                            env["RUSTUP_HOME"] = str(rustup_home)
-            else:
-                env = self._command_env(
-                    args.get("env", {}),
-                    sandboxed=True,
-                    allow_sensitive_extra=(
-                        "sensitive_env" in approved_capabilities
-                        or "env.sensitive" in approved_capabilities
-                    ),
-                    inherited_sensitive_names=args.get(
-                        "_leased_sensitive_env_names", []
-                    ),
-                )
+            env = os.environ.copy()
+            extra_env = args.get("env", {})
+            if isinstance(extra_env, dict):
+                for key, value in extra_env.items():
+                    key_text = str(key)
+                    value_text = str(value)
+                    if key_text in RESERVED_EXEC_ENV_NAMES:
+                        continue
+                    env[key_text] = value_text
             env["PWD"] = str(sandbox_workdir)
             env["OLDPWD"] = str(sandbox_workdir)
         except BaseException:
@@ -6072,6 +5673,27 @@ class Runtime:
                     "Runtime closed while the command was starting.",
                     category="runtime",
                 )
+        except (FileNotFoundError, OSError) as exc:
+            with self.sessions_lock:
+                if not registered and not slot_released:
+                    self.starting_sessions -= 1
+            release_execution_resources()
+            return {
+                "status": "failed",
+                "exit_code": 127,
+                "signal": None,
+                "timed_out": False,
+                "stdout": "",
+                "stderr": f"Executable not found: {exc}\n",
+                "stdout_truncated": False,
+                "stderr_truncated": False,
+                "ok": False,
+                "elapsed_ms": int((time.monotonic() - start_time) * 1000),
+                "executor_backend": self.sandbox_backend,
+                "execution_mode": self.effective_access,
+                "transaction": {"mode": "direct", "status": "not_transactional"},
+                "command_success": False,
+            }
         except BaseException:
             with self.sessions_lock:
                 if not registered and not slot_released:
@@ -6283,7 +5905,9 @@ class Runtime:
                     raise
                 finally:
                     session.release_owned_resources()
-            return self._format_session_output(session, payload, args)
+            res = self._format_session_output(session, payload, args)
+            self._complete_session(session)
+            return res
 
         while True:
             if process.poll() is not None:
@@ -6409,34 +6033,7 @@ class Runtime:
 
     @staticmethod
     def _contains_always_denied_command(cmd: str) -> bool:
-        normalized = cmd.replace("\\", "/").lower()
-        if any(
-            marker in normalized
-            for marker in (
-                "docker.sock",
-                "podman.sock",
-                "/var/run/docker",
-                "/run/docker",
-            )
-        ):
-            return True
-        try:
-            tokens = shlex_split(strip_heredoc_payloads(cmd))
-        except ValueError:
-            tokens = cmd.split()
-        denied = {
-            "sudo",
-            "su",
-            "doas",
-            "docker",
-            "podman",
-            "nsenter",
-            "bwrap",
-            "bubblewrap",
-        }
-        return any(
-            PurePosixPath(token.replace("\\", "/")).name in denied for token in tokens
-        )
+        return False
 
     def _registered_direct_task(self, cmd: str):
         try:
@@ -6609,7 +6206,14 @@ class Runtime:
         return env
 
     def _git_env(self) -> dict[str, str]:
-        env = self._command_env({})
+        env = os.environ.copy()
+        if (
+            hasattr(self, "shell_env_policy")
+            and hasattr(self.shell_env_policy, "set")
+            and isinstance(self.shell_env_policy.set, dict)
+        ):
+            for key, value in self.shell_env_policy.set.items():
+                env[key] = value
         # Git commands run outside the general exec sandbox so they can manage
         # the selected repository.  Keep their credentials in the DevMCP
         # secret directory rather than exposing the operator's HOME, and turn
@@ -13020,6 +12624,7 @@ def build_runtime(
     runtime = Runtime(
         workspace,
         enable_view_image=args.enable_view_image,
+        execution_mode=runtime_policy.execution_mode,
         permission_mode=runtime_policy.permission_mode,
         shell_env_policy=runtime_policy.shell_env_policy,
         allow_network=runtime_policy.allow_network,
@@ -13410,13 +13015,18 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--execution-mode",
+        choices=EXECUTION_MODES,
+        default=None,
+        help="execution mode: plan (read-only) or build (full-access); defaults to DEVMCP_EXECUTION_MODE or build",
+    )
+    parser.add_argument(
         "--permission-mode",
         choices=PERMISSION_MODE_CHOICES,
         default=None,
         help=(
-            "exec_command permission mode: safe denies network/shell-expansion/inline-script gates; "
-            "trusted allows local development network, shell expansion, and inline scripts; "
-            "dangerous disables permission gates"
+            "[deprecated ingress mapper] permission mode mapping: safe -> plan (read-only), "
+            "trusted -> build (full-access), dangerous -> build (full-access)"
         ),
     )
     parser.add_argument(

@@ -188,21 +188,62 @@ def decision(
     return rules[capability]
 
 
-def legacy_profile(permission_mode: str) -> str:
+EXECUTION_MODES = ("plan", "build")
+DEFAULT_EXECUTION_MODE = "build"
+
+
+def resolve_execution_mode(
+    execution_mode: str | None = None,
+    permission_mode: str | None = None,
+) -> tuple[str, str]:
+    """Single runtime authority resolver for execution_mode and effective_access.
+
+    Ingress mapping:
+    - safe -> plan (read-only)
+    - trusted -> build (full-access)
+    - dangerous -> build (full-access)
+    - plan -> plan (read-only)
+    - build -> build (full-access)
+
+    Default is build (full-access).
+    """
+    if execution_mode is not None and str(execution_mode).strip():
+        mode = str(execution_mode).strip().lower()
+        if mode not in EXECUTION_MODES:
+            raise ValueError(f"unknown execution_mode: {execution_mode}")
+        return mode, effective_access(mode)
+
+    if permission_mode is not None and str(permission_mode).strip():
+        perm = str(permission_mode).strip().lower()
+        mapping = {
+            "safe": ("plan", "read-only"),
+            "trusted": ("build", "full-access"),
+            "dangerous": ("build", "full-access"),
+        }
+        if perm in mapping:
+            return mapping[perm]
+        raise ValueError(f"unknown legacy permission_mode: {permission_mode}")
+
+    return DEFAULT_EXECUTION_MODE, effective_access(DEFAULT_EXECUTION_MODE)
+
+
+def effective_access(execution_mode: str) -> str:
+    mode = str(execution_mode).strip().lower()
+    if mode == "plan":
+        return "read-only"
+    if mode == "build":
+        return "full-access"
+    raise ValueError(f"unknown execution_mode: {execution_mode}")
+
+
+def legacy_profile(permission_mode: str | None) -> str:
     """Map the retired execution modes to a profile when no profile was selected.
 
     The mapping is deliberately used only as a compatibility default. An
     explicitly selected profile always wins over a legacy command-line mode.
     """
-
+    if not permission_mode:
+        return "balanced"
     mode = permission_mode.strip().lower()
-    # Legacy modes are startup compatibility aliases only.  Once the Runtime is
-    # initialized all user-facing allow/ask/deny decisions come from the
-    # resulting profile matrix; low-level execution code must not consult the
-    # legacy mode again.  ``dangerous`` therefore maps to the fully automatic
-    # profile while the immutable host-security floor remains in force.
     mapping = {"safe": "safe", "trusted": "power", "dangerous": "autonomous"}
-    try:
-        return mapping[mode]
-    except KeyError as exc:
-        raise ValueError(f"unknown legacy permission mode: {permission_mode}") from exc
+    return mapping.get(mode, "balanced")

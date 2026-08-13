@@ -169,7 +169,8 @@ class SessionEventTests(unittest.TestCase):
         assert isinstance(properties, dict)
         self.assertEqual(properties["$process_person_profile"], False)
         self.assertEqual(properties["transport"], "stdio")
-        self.assertEqual(properties["permission_mode"], "safe")
+        self.assertEqual(properties["execution_mode"], "build")
+        self.assertEqual(properties["permission_mode"], "trusted")
         # clientInfo values are enum-like labels, truncated, and expected here.
         self.assertEqual(properties["client_name"], "clientinfo-probe")
 
