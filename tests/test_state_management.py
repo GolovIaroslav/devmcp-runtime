@@ -335,3 +335,72 @@ class StateManagementTests(TestCase):
             )
             self.assertEqual(state["local_head"], head)
             self.assertNotEqual(state["installed_service_git_sha"], state["local_head"])
+
+    def test_real_state_managed_runtime_mro_and_git_env(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, _head = init_repo(root)
+            remote = root / "remote.git"
+            subprocess.run(["git", "init", "-q", "--bare", remote], check=True)
+            subprocess.run(
+                ["git", "remote", "add", "origin", str(remote)], cwd=repo, check=True
+            )
+            subprocess.run(
+                ["git", "push", "-qu", "origin", "main"], cwd=repo, check=True
+            )
+
+            runtime = StateManagedRuntime(workspace=repo, sandbox_backend="unsafe")
+
+            # 1. _git_env returns env dict without MRO NotImplementedError
+            git_env = runtime._git_env()
+            self.assertIsInstance(git_env, dict)
+            self.assertIn("GIT_CONFIG_KEY_0", git_env)
+
+            # 2. local_state_snapshot works without error
+            snapshot = runtime.local_state_snapshot({})
+            self.assertEqual(snapshot["branch"], "main")
+
+            # 3. git_status works without error
+            status = runtime.git_status({})
+            self.assertTrue(status["is_repo"])
+            self.assertEqual(status["branch"], "main")
+
+            # 4. guarded apply_patch does not crash due to MRO or recursion
+            patch_text = """*** Begin Patch
+*** Update File: tracked.txt
+@@ -1,1 +1,1 @@
+-one
++two
+*** End Patch
+"""
+            res_patch = runtime.apply_patch({"patch": patch_text})
+            self.assertIn("state_checkpoint", res_patch)
+
+            # 5. guarded git_commit does not crash due to MRO or recursion
+            res_commit = runtime.git_commit(
+                {"message": "update file", "paths": ["tracked.txt"]}
+            )
+            self.assertIn("state_checkpoint", res_commit)
+
+            # 6. guarded git_create_branch & git_switch_branch do not crash due to MRO
+            res_create = runtime.git_create_branch({"name": "feature-branch"})
+            self.assertIn("state_checkpoint", res_create)
+
+            res_switch = runtime.git_switch_branch({"name": "main"})
+            self.assertIn("state_checkpoint", res_switch)
+
+            # 7. guarded git_merge_remote_branch does not crash due to MRO
+            runtime.git_fetch({"remote": "origin"})
+            res_merge = runtime.git_merge_remote_branch({"branch": "main"})
+            self.assertIn("state_checkpoint", res_merge)
+
+            # 8. guarded git_push does not crash due to MRO
+            res_push = runtime.git_push({"remote": "origin"})
+            self.assertIn("state_checkpoint", res_push)
+
+            # 9. guarded service_update does not crash due to MRO
+            with patch.object(
+                core.Runtime, "service_update", return_value={"updated": True}
+            ):
+                res_service = runtime.service_update({})
+                self.assertIn("state_checkpoint", res_service)

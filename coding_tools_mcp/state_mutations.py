@@ -10,7 +10,7 @@ class StateMutationMixin:
     workspace: Any
 
     def _git_env(self) -> dict[str, str]:
-        raise NotImplementedError
+        return super()._git_env()  # type: ignore[misc,attr-defined]
 
     def _state_preflight(
         self, operation: str, *, extra_branches: list[str] | None = None

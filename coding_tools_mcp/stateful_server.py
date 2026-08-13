@@ -183,14 +183,14 @@ class StateManagedRuntime(StateMutationMixin, BuildIdentityMixin, core.Runtime):
 
     def apply_patch(self, args: dict[str, Any]) -> dict[str, Any]:
         result, checkpoint = self._guarded(
-            "apply_patch", lambda: core.Runtime.apply_patch(self, args)
+            "apply_patch", lambda: super(StateManagedRuntime, self).apply_patch(args)
         )
         result["state_checkpoint"] = checkpoint
         return result
 
     def git_commit(self, args: dict[str, Any]) -> dict[str, Any]:
         result, checkpoint = self._guarded(
-            "git_commit", lambda: core.Runtime.git_commit(self, args)
+            "git_commit", lambda: super(StateManagedRuntime, self).git_commit(args)
         )
         result["state_checkpoint"] = checkpoint
         return result
