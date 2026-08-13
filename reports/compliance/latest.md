@@ -1,18 +1,17 @@
 # Compliance Report
 
 - contract: `coding-tools-mcp-v0.2`
-- commit: `ba044e60d69020dcd3fa1a9467340c32a53244d8+dirty`
+- commit: `091f82b7d4ab9ef428873f5df9366c6e67576d1a+dirty`
 - suite: `all`
 - passed: `true`
-- tests_run: `83`
-- elapsed_seconds: `44.718`
+- tests_run: `82`
+- elapsed_seconds: `35.52`
 
 ## Required Tools
 
 - `server_info`: passed
 - `host_cli_probe`: passed
 - `service_update`: passed
-- `activate_policy_profile`: passed
 - `check_exec_environment`: passed
 - `get_default_cwd`: passed
 - `set_default_cwd`: passed
@@ -26,11 +25,6 @@
 - `read_file`: passed
 - `read_files`: passed
 - `code_diagnostics`: passed
-- `grant_root`: passed
-- `grant_capability`: passed
-- `list_capability_leases`: passed
-- `revoke_capability_lease`: passed
-- `end_task_scope`: passed
 - `list_dir`: passed
 - `list_files`: passed
 - `search_text`: passed

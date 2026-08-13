@@ -10,6 +10,7 @@ services:
     environment:
       CODING_TOOLS_MCP_PORT: ${CODING_TOOLS_MCP_PORT:-8765}
       CODING_TOOLS_MCP_AUTH_TOKEN: ${CODING_TOOLS_MCP_AUTH_TOKEN:-dev-token}
+      DEVMCP_EXECUTION_MODE: build
       CODING_TOOLS_MCP_PERMISSION_MODE: trusted
     volumes:
       - .:/workspace

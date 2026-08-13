@@ -10,7 +10,6 @@ from __future__ import annotations
 import argparse
 import getpass
 import json
-import math
 import os
 import shlex
 import shutil
@@ -26,7 +25,6 @@ from pathlib import Path
 from typing import Any
 
 from coding_tools_mcp import __version__
-from coding_tools_mcp.approval import ApprovalEngine
 from coding_tools_mcp.config import (
     ConfigPaths,
     ensure_mcp_authorization_header,
@@ -40,7 +38,7 @@ from coding_tools_mcp.config import (
     set_key,
     write_secret,
 )
-from coding_tools_mcp.policy import PROFILE_NAMES, effective_rules, validate_rules
+from coding_tools_mcp.policy import EXECUTION_MODES, resolve_execution_mode
 from coding_tools_mcp.protocol import PROTOCOL_VERSION
 
 
@@ -325,7 +323,6 @@ def _status(_: argparse.Namespace) -> int:
     selected, config = _config()
     tunnel = _tunnel_status(selected)
     healthy, ready = _tunnel_health_flags(tunnel)
-    pending = len(ApprovalEngine(selected.approvals_db).list_pending())
     print(f"DevMCP Runtime {__version__}")
     print(f"runtime sha: {config.get('installed_runtime_sha') or 'unknown'}")
     print(f"runtime branch: {config.get('installed_runtime_branch') or 'unknown'}")
@@ -345,13 +342,18 @@ def _status(_: argparse.Namespace) -> int:
     print(f"MCP process: {'running' if _active(MCP_SERVICE) else 'stopped'}")
     print(f"MCP health: {'ok' if _mcp_health(config, selected) else 'fail'}")
     print(f"MCP workspace: {config.get('workspace')}")
-    backend = str(config.get("sandbox_backend", "bwrap"))
-    print(f"sandbox: {backend if backend != 'unsafe' else 'SANDBOX: UNSAFE HOST MODE'}")
-    print(f"execution_mode: {config.get('execution_mode', 'build')}")
+    execution_mode = str(config.get("execution_mode", "build"))
+    print(f"execution_mode: {execution_mode}")
+    print(
+        f"effective_access: {'read-only' if execution_mode == 'plan' else 'full-access'}"
+    )
+    print(
+        f"effective_executor: {'not-applicable' if execution_mode == 'plan' else 'host'}"
+    )
+    print("sandbox: none")
     print(f"tunnel process: {'running' if _active(TUNNEL_SERVICE) else 'stopped'}")
     print(f"tunnel ready: {'yes' if ready and healthy else 'no'}")
     print(f"tunnel id: {config.get('tunnel_id') or 'not configured'}")
-    print(f"pending approvals: {pending}")
     print(
         f"auth: mcp={'configured' if secret_status(selected)['mcp_token_configured'] else 'not configured'}, tunnel={'configured' if secret_status(selected)['control_plane_key_configured'] else 'not configured'}"
     )
@@ -429,60 +431,6 @@ def _logs(_: argparse.Namespace) -> int:
     return returncode
 
 
-def _approvals(args: argparse.Namespace) -> int:
-    selected, _ = _config()
-    engine = ApprovalEngine(selected.approvals_db)
-    if args.approval_action == "prune":
-        print(f"Pruned {engine.prune_expired()} expired approvals.")
-        return 0
-    if args.approval_action == "clear-expired":
-        print(f"Cleared {engine.clear_expired()} expired approvals.")
-        return 0
-    pending = engine.list_pending()
-    if not pending:
-        print("No pending approvals.")
-        return 0
-    for request in pending:
-        print(
-            f"[{request['id']}] {request['command_or_action']} in {request['working_directory']}"
-        )
-    return 0
-
-
-def _show(args: argparse.Namespace) -> int:
-    selected, _ = _config()
-    request = next(
-        (
-            item
-            for item in ApprovalEngine(selected.approvals_db).list_pending()
-            if item["id"] == args.id
-        ),
-        None,
-    )
-    if request is None:
-        print(f"Request {args.id} not found or not pending.")
-        return 1
-    for key, value in request.items():
-        print(f"{key}: {value}")
-    return 0
-
-
-def _approve(args: argparse.Namespace) -> int:
-    selected, _ = _config()
-    ApprovalEngine(selected.approvals_db).approve(args.id, pattern=args.pattern)
-    print(
-        f"Approved {args.id} ({'always allow matching rule' if args.pattern else 'once'})"
-    )
-    return 0
-
-
-def _deny(args: argparse.Namespace) -> int:
-    selected, _ = _config()
-    ApprovalEngine(selected.approvals_db).deny(args.id)
-    print(f"Denied {args.id}")
-    return 0
-
-
 def _parse_value(raw: str) -> Any:
     try:
         return json.loads(raw)
@@ -513,87 +461,6 @@ def _config_command(args: argparse.Namespace) -> int:
     return 2
 
 
-def _policy_command(args: argparse.Namespace) -> int:
-    selected, config = _config()
-    if args.policy_action == "profile":
-        profile = args.profile.lower()
-        if profile not in PROFILE_NAMES:
-            print(
-                f"profile must be one of: {', '.join(PROFILE_NAMES)}", file=sys.stderr
-            )
-            return 2
-        config["profile"] = profile
-        save_config(config, selected)
-        print(f"Policy profile: {profile}")
-        return 0
-    if args.policy_action == "export":
-        rules = effective_rules(
-            str(config.get("profile", "balanced")),
-            config.get("policy", {}).get("custom", {}),
-        )
-        payload = {
-            "profile": config.get("profile", "balanced"),
-            "rules": rules,
-            "patch": config.get("patch", {}),
-        }
-        if args.file:
-            Path(args.file).write_text(
-                json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-            )
-        else:
-            print(json.dumps(payload, indent=2, sort_keys=True))
-        return 0
-    if args.policy_action == "import":
-        payload = json.loads(Path(args.file).read_text(encoding="utf-8"))
-        if not isinstance(payload, dict):
-            raise ValueError("policy export must be an object")
-        raw_rules = payload.get("rules", {})
-        if not isinstance(raw_rules, dict):
-            raise ValueError("policy rules must be an object")
-        rules = validate_rules(raw_rules)
-        imported_patch = payload.get("patch")
-        if "patch" in payload:
-            if not isinstance(imported_patch, dict):
-                raise ValueError("patch thresholds must be an object")
-            unknown_patch_fields = sorted(
-                set(imported_patch) - {"max_removed_lines", "max_removed_percent"}
-            )
-            if unknown_patch_fields:
-                raise ValueError(
-                    f"unknown patch threshold fields: {', '.join(unknown_patch_fields)}"
-                )
-            current_patch = config.get("patch", {})
-            max_removed_lines = imported_patch.get(
-                "max_removed_lines", current_patch.get("max_removed_lines", 200)
-            )
-            max_removed_percent = imported_patch.get(
-                "max_removed_percent", current_patch.get("max_removed_percent", 30.0)
-            )
-            if isinstance(max_removed_lines, bool) or not isinstance(
-                max_removed_lines, int
-            ):
-                raise ValueError("max_removed_lines must be an integer")
-            if isinstance(max_removed_percent, bool) or not isinstance(
-                max_removed_percent, (int, float)
-            ):
-                raise ValueError("max_removed_percent must be a number")
-            if not math.isfinite(float(max_removed_percent)):
-                raise ValueError("max_removed_percent must be finite")
-            if max_removed_lines < 0 or max_removed_percent < 0:
-                raise ValueError("patch thresholds cannot be negative")
-        config["profile"] = "custom"
-        config.setdefault("policy", {})["custom"] = rules
-        if "patch" in payload:
-            config["patch"] = {
-                "max_removed_lines": max_removed_lines,
-                "max_removed_percent": float(max_removed_percent),
-            }
-        save_config(config, selected)
-        print("Imported custom policy")
-        return 0
-    return 2
-
-
 def _setup(args: argparse.Namespace) -> int:
     selected, config = _config()
     if args.workspace:
@@ -608,10 +475,9 @@ def _setup(args: argparse.Namespace) -> int:
             if str(item) != str(workspace)
         ]
         config["workspaces"] = [str(workspace), *workspaces]
-    profile = args.profile or str(config.get("profile", "balanced"))
-    if profile not in PROFILE_NAMES:
-        return 2
-    config["profile"] = profile
+    raw_mode = args.execution_mode or args.permission_mode
+    mode, _ = resolve_execution_mode(execution_mode=raw_mode)
+    config["execution_mode"] = mode
     if args.tunnel_id:
         config["tunnel_id"] = args.tunnel_id
     save_config(config, selected)
@@ -1078,7 +944,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--workspace"
     )
     setup = sub.choices["setup"]
-    setup.add_argument("--profile", choices=PROFILE_NAMES)
+    setup.add_argument("--execution-mode", choices=EXECUTION_MODES, default="build")
+    setup.add_argument(
+        "--permission-mode",
+        choices=("safe", "trusted", "dangerous"),
+        help=argparse.SUPPRESS,
+    )
     setup.add_argument("--tunnel-id")
     setup.add_argument("--no-tunnel", action="store_true")
     setup.add_argument(
@@ -1114,31 +985,6 @@ def build_parser() -> argparse.ArgumentParser:
     set_parser = config_sub.add_parser("set")
     set_parser.add_argument("key")
     set_parser.add_argument("value")
-
-    policy = sub.add_parser(
-        "policy", help="select or exchange data-driven policy profiles"
-    )
-    policy_sub = policy.add_subparsers(dest="policy_action", required=True)
-    profile = policy_sub.add_parser("profile")
-    profile.add_argument("profile", choices=PROFILE_NAMES)
-    export = policy_sub.add_parser("export")
-    export.add_argument("--file")
-    imp = policy_sub.add_parser("import")
-    imp.add_argument("file")
-
-    approvals = sub.add_parser(
-        "approvals", help="inspect and clean local approval requests"
-    )
-    approvals.add_argument(
-        "approval_action", nargs="?", choices=("prune", "clear-expired"), default="list"
-    )
-    show = sub.add_parser("show")
-    show.add_argument("id")
-    approve = sub.add_parser("approve")
-    approve.add_argument("id")
-    approve.add_argument("--pattern")
-    deny = sub.add_parser("deny")
-    deny.add_argument("id")
 
     auth = sub.add_parser("auth", help="manage persistent auth files")
     auth_sub = auth.add_subparsers(dest="auth_action", required=True)
@@ -1196,16 +1042,6 @@ def main(argv: list[str] | None = None) -> int:
         return _serve(args)
     if args.command == "config":
         return _config_command(args)
-    if args.command == "policy":
-        return _policy_command(args)
-    if args.command == "approvals":
-        return _approvals(args)
-    if args.command == "show":
-        return _show(args)
-    if args.command == "approve":
-        return _approve(args)
-    if args.command == "deny":
-        return _deny(args)
     if args.command == "auth":
         return _auth_command(args)
     if args.command == "tunnel":

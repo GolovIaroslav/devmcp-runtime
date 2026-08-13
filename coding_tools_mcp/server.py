@@ -84,7 +84,6 @@ from .protocol import (
 )
 from .project_context import ProjectContext, load_project_context
 from .session_state import (
-    CapabilityLeaseRegistry,
     LogicalContextRegistry,
     LogicalContextState,
     SharedJobRegistry,
@@ -750,11 +749,6 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         destructive=True,
         open_world=True,
     ),
-    "activate_policy_profile": ToolSpec(
-        title="Activate policy profile",
-        description="Persist one DevMCP policy profile on the host and schedule a safe service restart.",
-        destructive=True,
-    ),
     "list_projects": ToolSpec(
         title="List projects",
         description="Discover Git repositories under operator-approved project roots.",
@@ -807,34 +801,6 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         title="Code diagnostics",
         description="Normalize compiler, traceback, or language-tool diagnostics without making diagnostics a core IDE dependency.",
         read_only=True,
-        idempotent=True,
-    ),
-    "grant_root": ToolSpec(
-        title="Grant additional root",
-        description="Grant one existing operator-authorized directory as a temporary read or write root for the current logical context.",
-        destructive=True,
-    ),
-    "grant_capability": ToolSpec(
-        title="Grant capability lease",
-        description="Grant one narrow, expiring capability target for this logical context. Permanent self-escalation is not supported.",
-        destructive=True,
-    ),
-    "list_capability_leases": ToolSpec(
-        title="List capability leases",
-        description="List active temporary capability leases owned by the current logical context.",
-        read_only=True,
-        idempotent=True,
-    ),
-    "revoke_capability_lease": ToolSpec(
-        title="Revoke capability lease",
-        description="Revoke one temporary capability lease owned by the current logical context.",
-        destructive=True,
-        idempotent=True,
-    ),
-    "end_task_scope": ToolSpec(
-        title="End task scope",
-        description="End the supplied logical task scope and revoke all task-scoped capability leases owned by it.",
-        destructive=True,
         idempotent=True,
     ),
     "list_dir": ToolSpec(
@@ -1005,18 +971,6 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     ),
     "job_cancel": ToolSpec(
         title="Job cancel", description="Job cancel.", destructive=True
-    ),
-    "approval_status": ToolSpec(
-        title="Approval status",
-        description="Approval status.",
-        read_only=True,
-        idempotent=True,
-    ),
-    "list_pending_approvals": ToolSpec(
-        title="List pending approvals",
-        description="List pending approvals.",
-        read_only=True,
-        idempotent=True,
     ),
     "check_exec_environment": ToolSpec(
         title="Check exec environment",
@@ -1738,7 +1692,6 @@ class Runtime:
         active_project_file: Path | None = None,
         logical_context_registry: LogicalContextRegistry | None = None,
         shared_job_registry: SharedJobRegistry | None = None,
-        capability_lease_registry: CapabilityLeaseRegistry | None = None,
         grantable_roots: list[Path] | None = None,
         persist_project_selection: bool = True,
     ) -> None:
@@ -1783,10 +1736,6 @@ class Runtime:
         )
         self.logical_context_registry = logical_context_registry
         self.shared_job_registry = shared_job_registry
-        self.capability_lease_registry = (
-            capability_lease_registry or CapabilityLeaseRegistry()
-        )
-        self._owns_capability_lease_registry = capability_lease_registry is None
         self.persist_project_selection = persist_project_selection
         self.logical_context_id: str | None = None
         persisted_project = self._load_persisted_project_path()
@@ -2329,46 +2278,20 @@ class Runtime:
         return value if isinstance(value, str) and value else None
 
     def readable_roots(self) -> list[Path]:
-        roots = [self.workspace.root]
-        roots.extend(
-            self.capability_lease_registry.root_paths(
-                self._capability_owner_id(),
-                write=False,
-                task_scope_id=self._task_scope_id(),
-            )
-        )
-        return list(dict.fromkeys(roots))
+        return [self.workspace.root]
 
     def writable_roots(self) -> list[Path]:
-        roots = [self.workspace.root]
-        roots.extend(
-            self.capability_lease_registry.root_paths(
-                self._capability_owner_id(),
-                write=True,
-                task_scope_id=self._task_scope_id(),
-            )
-        )
-        return list(dict.fromkeys(roots))
+        return [self.workspace.root]
 
     def _consume_additional_root(self, path: Path, *, write: bool) -> None:
         if is_relative_to(path.resolve(strict=False), self.workspace.root):
             return
-        lease_id = self.capability_lease_registry.consume_root_match(
-            self._capability_owner_id(),
-            path,
-            write=write,
-            task_scope_id=self._task_scope_id(),
-        )
-        if lease_id is None and self.execution_mode != "build":
+        if self.execution_mode != "build":
             raise ToolFailure(
                 "PATH_OUTSIDE_WORKSPACE",
                 "Path is outside the current authorized root set.",
                 category="security",
             )
-        if lease_id is not None:
-            used = getattr(self.request_context, "used_capability_leases", None)
-            if isinstance(used, set):
-                used.add(lease_id)
 
     def _matching_capability_lease(
         self,
@@ -2377,23 +2300,6 @@ class Runtime:
         *,
         pattern: bool = False,
     ) -> str | None:
-        leases = self.capability_lease_registry.list_owner(
-            self._capability_owner_id(), task_scope_id=self._task_scope_id()
-        )
-        for lease in leases:
-            if lease.get("capability") != capability:
-                continue
-            lease_target = str(lease.get("target", ""))
-            matched = lease_target == "*" or lease_target == target
-            if pattern and not matched:
-                matched = fnmatch.fnmatch(target, lease_target)
-            if not matched:
-                continue
-            lease_id = str(lease["lease_id"])
-            used = getattr(self.request_context, "used_capability_leases", None)
-            if isinstance(used, set):
-                used.add(lease_id)
-            return lease_id
         return None
 
     def _validate_transaction_relative_path(self, rel_path: str) -> None:
@@ -2743,11 +2649,6 @@ class Runtime:
             self.emit_tool_trace(name, args, payload, started_at)
             return make_tool_result(name, payload, is_error=True)
         finally:
-            owner_context_id = context_id or f"runtime:{self.server_instance_id}"
-            for lease_id in used_capability_leases:
-                self.capability_lease_registry.consume_once(
-                    lease_id, owner_context_id=owner_context_id
-                )
             self.request_context.used_capability_leases = None
             self.request_context.logical_context_id = None
             self.request_context.task_scope_id = None
@@ -9014,230 +8915,7 @@ class Runtime:
             "writable_roots": [str(root) for root in self.writable_roots()],
         }
 
-    def grant_root(self, args: dict[str, Any]) -> dict[str, Any]:
-        raw_path = str(args.get("path", "")).strip()
-        access = str(args.get("access", "")).strip().lower()
-        scope = str(args.get("scope", "session")).strip().lower()
-        if not raw_path or access not in {"read", "write"}:
-            raise ToolFailure(
-                "INVALID_ARGUMENT",
-                "grant_root requires path and access=read|write.",
-                category="validation",
-            )
-        if scope not in {"once", "task", "session"}:
-            raise ToolFailure(
-                "INVALID_ARGUMENT",
-                "grant_root scope must be once, task, or session.",
-                category="validation",
-            )
-        try:
-            target = Path(raw_path).expanduser().resolve(strict=True)
-        except FileNotFoundError as exc:
-            raise ToolFailure(
-                "NOT_FOUND", f"Root not found: {raw_path}", category="not_found"
-            ) from exc
-        if not target.is_dir():
-            raise ToolFailure(
-                "NOT_A_DIRECTORY",
-                "Additional root must be a directory.",
-                category="validation",
-            )
-        if is_relative_to(target, self.workspace.root):
-            return {
-                "status": "already_authorized",
-                "path": str(target),
-                "access": access,
-                "scope": "session",
-                "lease_id": None,
-            }
-        if is_relative_to(self.workspace.root, target):
-            raise ToolFailure(
-                "ACCESS_DENIED",
-                "Granting an ancestor of the primary workspace is too broad; grant the specific sibling/library directory instead.",
-                category="security",
-                details={"path": str(target), "workspace": str(self.workspace.root)},
-            )
-        if not any(is_relative_to(target, root) for root in self.grantable_roots):
-            raise ToolFailure(
-                "ACCESS_DENIED",
-                "Requested root is outside the operator-configured grantable roots.",
-                category="security",
-                details={"path": str(target)},
-            )
-        capability = (
-            "workspace.additional_write_root"
-            if access == "write"
-            else "workspace.additional_read_root"
-        )
-        pending = self._profile_authorize_operation(
-            capability, args, f"grant {access} root {target}"
-        )
-        if pending is not None:
-            return pending
-        task_scope_id = self._task_scope_id()
-        if scope == "task" and not task_scope_id:
-            task_scope_id = "task_" + secrets.token_urlsafe(24)
-        try:
-            record = self.capability_lease_registry.create(
-                owner_context_id=self._capability_owner_id(),
-                capability=capability,
-                target=str(target),
-                scope=scope,
-                ttl_seconds=int(args.get("ttl_seconds", 900)),
-                task_scope_id=task_scope_id if scope == "task" else None,
-            )
-        except (RuntimeError, ValueError) as exc:
-            raise ToolFailure(
-                "SESSION_LIMIT_REACHED",
-                str(exc),
-                category="runtime",
-            ) from exc
-        return {
-            "lease_id": record.lease_id,
-            "capability": record.capability,
-            "path": record.target,
-            "access": access,
-            "scope": record.scope,
-            "task_scope_id": record.task_scope_id,
-        }
-
-    def grant_capability(self, args: dict[str, Any]) -> dict[str, Any]:
-        capability = str(args.get("capability", "")).strip()
-        target = str(args.get("target", "")).strip()
-        scope = str(args.get("scope", "once")).strip().lower()
-        leaseable = {
-            "exec.arbitrary",
-            "deps.install",
-            "env.sensitive",
-            "network.public",
-            "network.host_local",
-            "workspace.create",
-            "workspace.delete",
-            "workspace.move",
-            "workspace.patch_small",
-            "workspace.patch_destructive",
-        }
-        if capability not in leaseable or not target:
-            raise ToolFailure(
-                "INVALID_ARGUMENT",
-                "grant_capability requires a supported capability and non-empty target.",
-                category="validation",
-                details={"supported": sorted(leaseable)},
-            )
-        if scope not in {"once", "task", "session"}:
-            raise ToolFailure(
-                "INVALID_ARGUMENT",
-                "Capability lease scope must be once, task, or session.",
-                category="validation",
-            )
-        if capability.startswith("network.") and target != "*":
-            container_backend = self.executor_registry.backends["ephemeral_container"]
-            if not (
-                container_backend.configured
-                and container_backend.secure
-                and container_backend.supports_network_targets
-            ):
-                raise ToolFailure(
-                    "CAPABILITY_UNAVAILABLE",
-                    "Destination-scoped network egress requires an operator-configured backend with a real network filter; the local sandbox cannot enforce host/domain targets.",
-                    category="environment",
-                    details={"capability": capability, "target": target},
-                )
-        if capability == "env.sensitive":
-            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", target):
-                raise ToolFailure(
-                    "INVALID_ARGUMENT",
-                    "Sensitive environment leases require one exact variable name.",
-                    category="validation",
-                )
-            if target in RESERVED_EXEC_ENV_NAMES:
-                raise ToolFailure(
-                    "ACCESS_DENIED",
-                    "Runtime-reserved environment names cannot be leased.",
-                    category="security",
-                )
-        elif len(target) > 4096 or "\x00" in target or "\n" in target:
-            raise ToolFailure(
-                "INVALID_ARGUMENT",
-                "Capability lease target is invalid.",
-                category="validation",
-            )
-
-        pending = self._profile_authorize_operation(
-            capability, args, f"grant capability {capability} target {target}"
-        )
-        if pending is not None:
-            return pending
-        task_scope_id = self._task_scope_id()
-        if scope == "task" and not task_scope_id:
-            task_scope_id = "task_" + secrets.token_urlsafe(24)
-        try:
-            record = self.capability_lease_registry.create(
-                owner_context_id=self._capability_owner_id(),
-                capability=capability,
-                target=target,
-                scope=scope,
-                ttl_seconds=int(args.get("ttl_seconds", 900)),
-                task_scope_id=task_scope_id if scope == "task" else None,
-            )
-        except (RuntimeError, ValueError) as exc:
-            raise ToolFailure(
-                "SESSION_LIMIT_REACHED", str(exc), category="runtime"
-            ) from exc
-        return {
-            "lease_id": record.lease_id,
-            "capability": record.capability,
-            "target": record.target,
-            "scope": record.scope,
-            "task_scope_id": record.task_scope_id,
-        }
-
-    def list_capability_leases(self, args: dict[str, Any]) -> dict[str, Any]:
-        return {
-            "leases": self.capability_lease_registry.list_owner(
-                self._capability_owner_id(), task_scope_id=self._task_scope_id()
-            )
-        }
-
-    def revoke_capability_lease(self, args: dict[str, Any]) -> dict[str, Any]:
-        lease_id = str(args.get("lease_id", "")).strip()
-        if not lease_id:
-            raise ToolFailure(
-                "INVALID_ARGUMENT", "lease_id is required.", category="validation"
-            )
-        revoked = self.capability_lease_registry.revoke(
-            lease_id, owner_context_id=self._capability_owner_id()
-        )
-        if not revoked:
-            raise ToolFailure(
-                "NOT_FOUND", "Capability lease not found.", category="not_found"
-            )
-        return {"lease_id": lease_id, "status": "revoked"}
-
-    def end_task_scope(self, args: dict[str, Any]) -> dict[str, Any]:
-        task_scope_id = self._task_scope_id()
-        if not task_scope_id:
-            raise ToolFailure(
-                "INVALID_ARGUMENT",
-                "end_task_scope requires the common task_scope_id argument.",
-                category="validation",
-            )
-        revoked = self.capability_lease_registry.clear_task(
-            self._capability_owner_id(), task_scope_id
-        )
-        return {
-            "task_scope_id": task_scope_id,
-            "status": "ended",
-            "revoked_leases": revoked,
-        }
-
     def read_files(self, args: dict[str, Any]) -> dict[str, Any]:
-        if self._profile_managed:
-            approval = self._profile_authorize_operation(
-                "workspace.read", args, "read_files"
-            )
-            if approval is not None:
-                return approval
         raw_paths = args.get("paths", [])
         if not isinstance(raw_paths, list):
             raise ToolFailure(
@@ -9469,40 +9147,11 @@ class Runtime:
                     category="security",
                 )
         cmd_argv = self.task_registry.build_argv(template, args)
-        from .approval import ApprovalEngine
-
-        approval_engine = ApprovalEngine()
-        network_required = template.network_requirement
-        requested_caps = {"network"} if network_required else set()
-        if template.approval_class == "ASK":
-            requested_caps.add("task")
-        approval_id = args.get("approval_id")
-        granted_caps: set[str] = set()
-        if approval_id:
-            granted_caps = set(
-                approval_engine.consume(
-                    approval_id,
-                    cmd_argv,
-                    str(cwd.path),
-                    env=args.get("env", {}),
-                    task_id=task_id,
-                    network=network_required,
-                    sandbox=True,
-                    sandbox_id=self.server_instance_id,
-                )
-            )
-        elif requested_caps:
-            return approval_engine.request_approval(
-                action=cmd_argv,
-                cwd=str(cwd.path),
-                reason=f"Task '{task_id}' requests explicit capabilities.",
-                risk="network" if network_required else "task",
-                network=network_required,
-                env=args.get("env", {}),
-                task_id=task_id,
-                sandbox=True,
-                sandbox_id=self.server_instance_id,
-                capabilities=sorted(requested_caps),
+        if self.execution_mode == "plan":
+            raise ToolFailure(
+                "EXECUTION_DENIED",
+                "Process execution is denied in plan mode.",
+                category="security",
             )
         exec_args = {
             "cwd": cwd.display,
@@ -9511,7 +9160,7 @@ class Runtime:
             "max_output_bytes": args.get("max_output_bytes", 65536),
             "env": self._task_env(args.get("env", {})),
         }
-        return self._execute_task_argv(cmd_argv, exec_args, granted_caps)
+        return self._execute_task_argv(cmd_argv, exec_args, set())
 
     def _project_environment_info(self) -> dict[str, Any]:
         root = self.workspace.root
@@ -9645,23 +9294,6 @@ class Runtime:
 
     def job_cancel(self, args: dict[str, Any]) -> dict[str, Any]:
         return self.kill_session(args)
-
-    def approval_status(self, args: dict[str, Any]) -> dict[str, Any]:
-        approval_id = args.get("approval_id")
-        if not approval_id:
-            return {"error": "approval_id is required"}
-        from .approval import ApprovalEngine
-
-        engine = ApprovalEngine()
-        status = engine.get_status(approval_id)
-        return {"approval_id": approval_id, "status": status}
-
-    def list_pending_approvals(self, args: dict[str, Any]) -> dict[str, Any]:
-        from .approval import ApprovalEngine
-
-        engine = ApprovalEngine()
-        pending = engine.list_pending()
-        return {"pending_approvals": pending}
 
 
 def lsp_definition(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -10960,13 +10592,6 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                 "approval_id": string,
             }
         ),
-        "activate_policy_profile": object_schema(
-            {
-                "profile": {**string, "enum": list(PROFILE_NAMES)},
-                "approval_id": string,
-            },
-            ["profile"],
-        ),
         "list_projects": object_schema(),
         "select_project": object_schema(
             {"project": {**string, "minLength": 1}}, ["project"]
@@ -11089,65 +10714,6 @@ def input_schemas() -> dict[str, dict[str, Any]]:
             },
             ["text"],
         ),
-        "grant_root": object_schema(
-            {
-                "path": {**string, "minLength": 1},
-                "access": {**string, "enum": ["read", "write"]},
-                "scope": {
-                    **string,
-                    "enum": ["once", "task", "session"],
-                    "default": "session",
-                },
-                "ttl_seconds": {
-                    **integer,
-                    "minimum": 1,
-                    "maximum": 86400,
-                    "default": 900,
-                },
-                "task_scope_id": string,
-                "approval_id": string,
-            },
-            ["path", "access"],
-        ),
-        "grant_capability": object_schema(
-            {
-                "capability": {
-                    **string,
-                    "enum": [
-                        "exec.arbitrary",
-                        "deps.install",
-                        "env.sensitive",
-                        "network.public",
-                        "network.host_local",
-                        "workspace.create",
-                        "workspace.delete",
-                        "workspace.move",
-                        "workspace.patch_small",
-                        "workspace.patch_destructive",
-                    ],
-                },
-                "target": {**string, "minLength": 1, "maxLength": 4096},
-                "scope": {
-                    **string,
-                    "enum": ["once", "task", "session"],
-                    "default": "once",
-                },
-                "ttl_seconds": {
-                    **integer,
-                    "minimum": 1,
-                    "maximum": 86400,
-                    "default": 900,
-                },
-                "task_scope_id": string,
-                "approval_id": string,
-            },
-            ["capability", "target"],
-        ),
-        "list_capability_leases": object_schema(),
-        "revoke_capability_lease": object_schema(
-            {"lease_id": {**string, "minLength": 1}}, ["lease_id"]
-        ),
-        "end_task_scope": object_schema(),
         "list_dir": object_schema(
             {
                 "path": {**string, "default": "."},
@@ -11681,13 +11247,6 @@ def input_schemas() -> dict[str, dict[str, Any]]:
             },
             ["session_id"],
         ),
-        "approval_status": object_schema(
-            {
-                "approval_id": {**string, "minLength": 1},
-            },
-            ["approval_id"],
-        ),
-        "list_pending_approvals": object_schema(),
         "check_exec_environment": object_schema(),
         "get_default_cwd": object_schema(),
         "set_default_cwd": object_schema(
@@ -12578,13 +12137,11 @@ class RuntimeHTTPServer(http.server.ThreadingHTTPServer):
         runtime_factory: Any,
         logical_context_registry: LogicalContextRegistry,
         shared_job_registry: SharedJobRegistry,
-        capability_lease_registry: CapabilityLeaseRegistry,
     ) -> None:
         super().__init__(address, handler)
         self.control_runtime = control_runtime
         self.logical_context_registry = logical_context_registry
         self.shared_job_registry = shared_job_registry
-        self.capability_lease_registry = capability_lease_registry
         self.sessions = HTTPSessionManager(runtime_factory)
 
     def server_close(self) -> None:
@@ -12605,7 +12162,6 @@ def build_runtime(
     transport: str = "stdio",
     logical_context_registry: LogicalContextRegistry | None = None,
     shared_job_registry: SharedJobRegistry | None = None,
-    capability_lease_registry: CapabilityLeaseRegistry | None = None,
     persist_project_selection: bool = True,
 ) -> Runtime:
     workspace = Path(
@@ -12659,7 +12215,6 @@ def build_runtime(
         ),
         logical_context_registry=logical_context_registry,
         shared_job_registry=shared_job_registry,
-        capability_lease_registry=capability_lease_registry,
         grantable_roots=grantable_roots,
         persist_project_selection=persist_project_selection,
     )
@@ -12882,7 +12437,6 @@ def run_http(args: argparse.Namespace) -> int:
         completed_ttl_seconds=completed_job_ttl,
         context_registry=logical_context_registry,
     )
-    capability_lease_registry = CapabilityLeaseRegistry()
     try:
         runtime = build_runtime(
             args,
@@ -12892,7 +12446,6 @@ def run_http(args: argparse.Namespace) -> int:
             transport="http",
             logical_context_registry=logical_context_registry,
             shared_job_registry=shared_job_registry,
-            capability_lease_registry=capability_lease_registry,
             persist_project_selection=False,
         )
     except (ToolFailure, ValueError) as exc:
@@ -12910,7 +12463,6 @@ def run_http(args: argparse.Namespace) -> int:
             transport="http",
             logical_context_registry=logical_context_registry,
             shared_job_registry=shared_job_registry,
-            capability_lease_registry=capability_lease_registry,
             persist_project_selection=False,
         )
 
@@ -12921,7 +12473,6 @@ def run_http(args: argparse.Namespace) -> int:
         runtime_factory,
         logical_context_registry,
         shared_job_registry,
-        capability_lease_registry,
     )
     if oauth_config:
         url_label = oauth_config.server_url or "dynamic request URL"

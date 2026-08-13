@@ -8,7 +8,6 @@ from unittest.mock import patch
 import pytest
 
 from apps.devmcp.ui import UIHTTPServer, UIState
-from coding_tools_mcp.approval import ApprovalEngine
 from coding_tools_mcp.config import write_secret
 
 
@@ -112,12 +111,12 @@ def test_setup_save_preserves_existing_mcp_token() -> None:
                 page.goto(state.origin + "/setup")
                 csrf = page.locator('meta[name="csrf-token"]').get_attribute("content")
                 assert csrf
-                for profile in ("balanced", "power"):
+                for mode in ("build", "plan"):
                     response = page.request.post(
                         state.origin + "/api/setup",
                         form={
                             "workspace": state.config["workspace"],
-                            "profile": profile,
+                            "execution_mode": mode,
                             "csrf": csrf,
                         },
                         headers={"Origin": state.origin},
@@ -180,69 +179,6 @@ def test_rotate_mcp_token_requires_explicit_confirmation() -> None:
             server.shutdown()
             server.server_close()
             thread.join(timeout=2)
-
-
-def test_permissions_edit_destructive_patch_thresholds() -> None:
-    with (
-        tempfile.TemporaryDirectory() as tmp,
-        patch.dict(os.environ, {"DEVMCP_CONFIG_DIR": tmp}, clear=False),
-    ):
-        state = UIState.load("127.0.0.1", 0)
-        server = UIHTTPServer(("127.0.0.1", 0), state)
-        state.port = server.server_address[1]
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        try:
-            with sync_playwright() as playwright:
-                try:
-                    browser = playwright.chromium.launch(headless=True)
-                except PlaywrightError:
-                    pytest.skip("Chromium is not installed")
-                page = browser.new_page()
-                page.goto(state.origin + "/permissions")
-                assert page.get_by_text("Destructive patch thresholds").count() == 1
-                csrf = page.locator('meta[name="csrf-token"]').get_attribute("content")
-                response = page.request.post(
-                    state.origin + "/api/policy/patch",
-                    form={
-                        "max_removed_lines": "17",
-                        "max_removed_percent": "12.5",
-                        "csrf": csrf,
-                    },
-                    headers={"Origin": state.origin},
-                )
-                assert response.status == 200
-                assert state.config["patch"] == {
-                    "max_removed_lines": 17,
-                    "max_removed_percent": 12.5,
-                }
-                browser.close()
-        finally:
-            server.shutdown()
-            server.server_close()
-            thread.join(timeout=2)
-
-
-def test_approvals_show_risk_expiry_capabilities_and_scoped_allow() -> None:
-    with (
-        tempfile.TemporaryDirectory() as tmp,
-        patch.dict(os.environ, {"DEVMCP_CONFIG_DIR": tmp}, clear=False),
-    ):
-        state = UIState.load("127.0.0.1", 0)
-        approval = ApprovalEngine(state.config_paths.approvals_db).request_approval(
-            "curl https://example.invalid",
-            state.config["workspace"],
-            "network",
-            "high",
-            True,
-            capabilities=["network.public"],
-        )
-        assert (
-            ApprovalEngine(state.config_paths.approvals_db).get_status(
-                approval["approval_id"]
-            )
-            == "approved"
-        )
 
 
 def test_services_page_exposes_service_controls() -> None:

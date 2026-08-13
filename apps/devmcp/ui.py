@@ -12,7 +12,6 @@ import html
 import http.server
 import json
 import secrets
-import shutil
 import subprocess
 import urllib.parse
 import urllib.error
@@ -21,7 +20,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from coding_tools_mcp.approval import ApprovalEngine
 from coding_tools_mcp.audit import read_recent_events
 from coding_tools_mcp.config import (
     ConfigPaths,
@@ -31,13 +29,6 @@ from coding_tools_mcp.config import (
     save_config,
     secret_status,
     write_secret,
-)
-from coding_tools_mcp.policy import (
-    CAPABILITIES,
-    PROFILE_NAMES,
-    UNIMPLEMENTED_CAPABILITIES,
-    effective_rules,
-    validate_rules,
 )
 from coding_tools_mcp.tasks import TaskRegistry
 from coding_tools_mcp import __version__
@@ -91,9 +82,8 @@ def _page(title: str, body: str, state: UIState) -> bytes:
             ("", "Dashboard"),
             ("setup", "Setup"),
             ("workspaces", "Workspaces"),
-            ("permissions", "Permissions"),
+            ("permissions", "Execution Mode"),
             ("tasks", "Tasks"),
-            ("approvals", "Approvals"),
             ("services", "Services"),
             ("diagnostics", "Diagnostics"),
             ("audit", "Audit log"),
@@ -121,11 +111,7 @@ def _table(rows: list[tuple[str, Any]]) -> str:
 
 
 def _status(state: UIState) -> dict[str, Any]:
-    approvals = ApprovalEngine(state.config_paths.approvals_db).list_pending()
     workspace = Path(str(state.config.get("workspace", "")))
-    bwrap_available = shutil.which("bwrap") is not None
-    backend = str(state.config.get("sandbox_backend", "bwrap"))
-    secure = backend == "bwrap" and bwrap_available
     health_url = f"http://{state.config.get('mcp_host', '127.0.0.1')}:{int(state.config.get('mcp_port', 47157))}/healthz"
     try:
         with urllib.request.urlopen(health_url, timeout=0.5) as response:
@@ -153,14 +139,16 @@ def _status(state: UIState) -> dict[str, Any]:
     except (OSError, subprocess.SubprocessError):
         tunnel_ready = False
         mcp_service = "unknown"
+    execution_mode = str(state.config.get("execution_mode", "build"))
     return {
         "mcp_running": mcp_running,
         "mcp_health": "ok" if mcp_running else "stopped/unreachable",
         "workspace": str(workspace),
         "workspace_exists": workspace.is_dir(),
-        "sandbox_backend": backend,
-        "sandbox_secure": secure,
-        "policy_profile": str(state.config.get("profile", "balanced")),
+        "execution_mode": execution_mode,
+        "effective_access": "read-only" if execution_mode == "plan" else "full-access",
+        "effective_executor": "not-applicable" if execution_mode == "plan" else "host",
+        "sandbox": "none",
         "tunnel_id": str(state.config.get("tunnel_id", "")) or "not configured",
         "tunnel_state": (
             "not configured"
@@ -173,7 +161,6 @@ def _status(state: UIState) -> dict[str, Any]:
         "tunnel_status": tunnel_status,
         "mcp_service": mcp_service,
         "tunnel_process": tunnel_process,
-        "pending_approvals": len(approvals),
         "version": __version__,
         "auth": secret_status(state.config_paths),
     }
@@ -267,29 +254,6 @@ class UIHandler(http.server.BaseHTTPRequestHandler):
             return
         route = urllib.parse.urlsplit(self.path).path.strip("/")
         try:
-            if route == "api/policy/profile":
-                profile = form.get("profile", [""])[0].lower()
-                if profile not in PROFILE_NAMES:
-                    raise ValueError("unknown profile")
-                self.state.config["profile"] = profile
-                save_config(self.state.config, self.state.config_paths)
-                self.state.reload()
-                self._send_json({"ok": True, "profile": profile})
-                return
-            if route == "api/policy/custom":
-                rules = {
-                    key.removeprefix("rule."): values[0]
-                    for key, values in form.items()
-                    if key.startswith("rule.") and values
-                }
-                self.state.config.setdefault("policy", {})["custom"] = validate_rules(
-                    rules
-                )
-                self.state.config["profile"] = "custom"
-                save_config(self.state.config, self.state.config_paths)
-                self.state.reload()
-                self._send_json({"ok": True, "profile": "custom"})
-                return
             if route == "api/config/reset":
                 from coding_tools_mcp.config import default_config
 
@@ -316,10 +280,9 @@ class UIHandler(http.server.BaseHTTPRequestHandler):
                     self.state.config["workspace"],
                     *workspaces,
                 ]
-                profile = form.get("profile", ["balanced"])[0].lower()
-                if profile not in PROFILE_NAMES:
-                    raise ValueError("unknown profile")
-                self.state.config["profile"] = profile
+                mode = form.get("execution_mode", ["build"])[0].lower()
+                if mode in ("plan", "build"):
+                    self.state.config["execution_mode"] = mode
                 save_config(self.state.config, self.state.config_paths)
                 if not secret_status(self.state.config_paths)["mcp_token_configured"]:
                     generate_mcp_token(self.state.config_paths)
@@ -381,34 +344,6 @@ class UIHandler(http.server.BaseHTTPRequestHandler):
                 self.state.reload()
                 self._send_json({"ok": True, "workspaces": roots})
                 return
-            if route == "api/approvals/clear-expired":
-                removed = ApprovalEngine(
-                    self.state.config_paths.approvals_db
-                ).clear_expired()
-                self._send_json({"ok": True, "removed": removed})
-                return
-            if route.startswith("api/approvals/"):
-                parts = route.split("/")
-                if len(parts) != 4 or parts[3] not in {
-                    "approve",
-                    "approve-always",
-                    "deny",
-                }:
-                    raise ValueError("invalid approval route")
-                engine = ApprovalEngine(self.state.config_paths.approvals_db)
-                if parts[3] == "approve":
-                    engine.approve(parts[2])
-                elif parts[3] == "approve-always":
-                    pattern = form.get("pattern", [""])[0].strip()
-                    if not pattern:
-                        raise ValueError(
-                            "an Always Allow rule needs a scoped command pattern"
-                        )
-                    engine.approve(parts[2], pattern=pattern)
-                else:
-                    engine.deny(parts[2])
-                self._send_json({"ok": True})
-                return
             if route.startswith("api/services/"):
                 action = route.rsplit("/", 1)[-1]
                 if action not in {"start", "stop", "restart"}:
@@ -429,79 +364,25 @@ class UIHandler(http.server.BaseHTTPRequestHandler):
         status = _status(self.state)
         if route == "":
             body = "<h2>Dashboard</h2>" + _table(list(status.items()))
-            if not status["sandbox_secure"]:
-                body += (
-                    '<p class="warning">SANDBOX: UNSAFE HOST MODE or unavailable</p>'
-                )
             return _page("Dashboard", body, self.state)
         if route == "permissions":
-            profile = str(self.state.config.get("profile", "balanced"))
-            rules = effective_rules(
-                profile, self.state.config.get("policy", {}).get("custom", {})
-            )
+            mode = str(self.state.config.get("execution_mode", "build"))
             options = "".join(
-                f'<option value="{name}" {"selected" if name == profile else ""}>{name}</option>'
-                for name in PROFILE_NAMES
+                f'<option value="{item}" {"selected" if item == mode else ""}>{item}</option>'
+                for item in ("build", "plan")
             )
-            rows: list[str] = []
-            for capability in CAPABILITIES:
-                unavailable = capability in UNIMPLEMENTED_CAPABILITIES
-                decision_options = "".join(
-                    f'<option value="{value}" {"selected" if value == rules[capability] else ""}>{value.upper()}</option>'
-                    for value in ("auto", "ask", "deny")
-                )
-                rows.append(
-                    f'<tr><td>{html.escape(capability)}</td><td><select name="rule.{html.escape(capability)}" {"disabled" if unavailable else ""}>{decision_options}</select>{" (not implemented)" if unavailable else ""}</td></tr>'
-                )
-            rows_html = "".join(rows)
-            patch = self.state.config.get("patch", {})
-            body = f'<h2>Permissions</h2><form method="post" action="/api/policy/profile"><input type="hidden" name="csrf" value="{html.escape(self.state.csrf_token)}"><select name="profile">{options}</select><button>Apply profile</button></form><form method="post" action="/api/policy/custom"><input type="hidden" name="csrf" value="{html.escape(self.state.csrf_token)}"><table><tr><th>Capability</th><th>Decision</th></tr>{rows_html}</table><button>Save Custom matrix</button></form><form method="post" action="/api/policy/patch"><input type="hidden" name="csrf" value="{html.escape(self.state.csrf_token)}"><h3>Destructive patch thresholds</h3><label>Maximum removed lines <input name="max_removed_lines" type="number" min="0" value="{html.escape(str(patch.get("max_removed_lines", 200)))}"></label><label>Maximum removed percent <input name="max_removed_percent" type="number" min="0" step="0.01" value="{html.escape(str(patch.get("max_removed_percent", 30.0)))}"></label><button>Save thresholds</button></form>'
-            return _page("Permissions", body, self.state)
-        if route == "setup":
-            configured = secret_status(self.state.config_paths)["mcp_token_configured"]
-            body = f'<h2>First-run setup</h2><form method="post" action="/api/setup"><input type="hidden" name="csrf" value="{html.escape(self.state.csrf_token)}"><label>Workspace <input name="workspace" value="{html.escape(str(self.state.config.get("workspace", "")))}" size="70"></label><br><label>Profile <select name="profile">{"".join(f"<option>{name}</option>" for name in PROFILE_NAMES)}</select></label><br><label>Secure MCP Tunnel key (optional, never displayed again) <input type="password" name="control_plane_key" autocomplete="off"></label><br><button>Save setup</button></form><section><h3>MCP connector token</h3><p>{"Configured" if configured else "Will be generated when Setup is saved"}. Saving Setup does not rotate an existing token.</p><form method="post" action="/api/auth/rotate-mcp-token"><input type="hidden" name="csrf" value="{html.escape(self.state.csrf_token)}"><label>Type ROTATE to invalidate existing ChatGPT connections <input name="confirmation" autocomplete="off"></label><button>Rotate MCP token</button></form></section>'
-            return _page("Setup", body, self.state)
-        if route == "workspaces":
-            roots = [
-                str(item)
-                for item in self.state.config.get("workspaces", [status["workspace"]])
-            ]
-            rows_list: list[str] = []
-            for root in roots:
-                remove_form = ""
-                if root != status["workspace"]:
-                    remove_form = (
-                        f'<form method="post" action="/api/workspaces/remove"><input type="hidden" '
-                        f'name="csrf" value="{html.escape(self.state.csrf_token)}"><input type="hidden" '
-                        f'name="workspace" value="{html.escape(root)}"><button>Remove</button></form>'
-                    )
-                rows_list.append(
-                    f"<tr><td>{html.escape(root)}</td><td>{'active' if root == status['workspace'] else ''}</td><td>{remove_form}</td></tr>"
-                )
-            workspace_rows = "".join(rows_list)
-            body = f'<h2>Configured workspaces</h2><table><tr><th>Root</th><th>State</th><th></th></tr>{workspace_rows}</table><form method="post" action="/api/workspaces/add"><input type="hidden" name="csrf" value="{html.escape(self.state.csrf_token)}"><input name="workspace" size="70" placeholder="/absolute/path"><button>Add root</button></form><p>The model cannot add or remove roots through MCP tools.</p>'
-            return _page("Workspaces", body, self.state)
-        if route == "approvals":
-            pending = ApprovalEngine(
-                self.state.config_paths.approvals_db
-            ).list_pending()
-            approval_rows = "".join(
-                f'<tr><td>{html.escape(str(item["id"]))}</td><td>{html.escape(str(item["command_or_action"]))}</td><td>{html.escape(str(item.get("risk_class", "")))}</td><td>{html.escape(str(item.get("expires_at", "")))}</td><td>{html.escape(", ".join(item.get("capabilities", [])))}</td><td><form method="post" action="/api/approvals/{html.escape(str(item["id"]))}/approve"><input type="hidden" name="csrf" value="{html.escape(self.state.csrf_token)}"><button>Approve once</button></form><form method="post" action="/api/approvals/{html.escape(str(item["id"]))}/approve-always"><input type="hidden" name="csrf" value="{html.escape(self.state.csrf_token)}"><input name="pattern" value="{html.escape(str(item["command_or_action"]))}" size="24"><button>Always Allow scoped</button></form></td><td><form method="post" action="/api/approvals/{html.escape(str(item["id"]))}/deny"><input type="hidden" name="csrf" value="{html.escape(self.state.csrf_token)}"><button>Deny</button></form></td></tr>'
-                for item in pending
-            )
-            return _page(
-                "Approvals",
-                f'<h2>Pending approvals</h2><form method="post" action="/api/approvals/clear-expired"><input type="hidden" name="csrf" value="{html.escape(self.state.csrf_token)}"><button>Prune expired approvals</button></form><table><tr><th>ID</th><th>Operation</th><th>Risk</th><th>Expires</th><th>Capabilities</th><th>Allow</th><th></th></tr>{approval_rows}</table>',
-                self.state,
-            )
+            body = f'<h2>Execution Mode</h2><form method="post" action="/api/config/set"><input type="hidden" name="csrf" value="{html.escape(self.state.csrf_token)}"><input type="hidden" name="key" value="execution_mode"><select name="value">{options}</select><button>Save execution mode</button></form>'
+            return _page("Execution Mode", body, self.state)
         if route == "diagnostics":
             return _page(
                 "Diagnostics",
                 "<h2>Diagnostics</h2>"
                 + _table(
                     [
-                        ("bwrap", status["sandbox_backend"]),
-                        ("secure", status["sandbox_secure"]),
+                        ("execution_mode", status["execution_mode"]),
+                        ("effective_access", status["effective_access"]),
+                        ("effective_executor", status["effective_executor"]),
+                        ("sandbox", status["sandbox"]),
                         ("MCP token", status["auth"]["mcp_token_configured"]),
                         ("Tunnel key", status["auth"]["control_plane_key_configured"]),
                     ]

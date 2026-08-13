@@ -1,11 +1,7 @@
 from __future__ import annotations
 
 import unittest
-from pathlib import Path
-from tempfile import TemporaryDirectory
-from unittest.mock import patch
 
-from coding_tools_mcp.server import Runtime
 from coding_tools_mcp.tasks import TaskRegistry
 from tests.compliance.test_support import ComplianceTestCase, structured_payload
 
@@ -14,12 +10,6 @@ class LiveDogfoodV5Tests(ComplianceTestCase):
     fixture_name = "coding-loop-project"
 
     def test_coding_loop_uses_safe_patch_and_registered_tests(self) -> None:
-        before_pending = {
-            item["id"]
-            for item in structured_payload(
-                self.client.call_tool("list_pending_approvals", {})
-            ).get("pending_approvals", [])
-        }
 
         self.assertEqual(
             structured_payload(self.client.call_tool("health", {})).get("status"), "ok"
@@ -90,39 +80,10 @@ class LiveDogfoodV5Tests(ComplianceTestCase):
         self.assertNotIn("test_calc.py", diff)
         self.assertEqual(diff.count("\n@@"), 1, diff)
 
-        after_pending = {
-            item["id"]
-            for item in structured_payload(
-                self.client.call_tool("list_pending_approvals", {})
-            ).get("pending_approvals", [])
-        }
-        self.assertEqual(after_pending, before_pending)
         self.assertEqual(
             (self.workspace.root / "calc.py").read_text(encoding="utf-8"),
             "def add(a, b):\n    return a + b\n",
         )
-
-
-class ApprovalWorkflowV5Tests(unittest.TestCase):
-    def test_risky_approval_is_out_of_band_exact_once_and_non_replayable(self) -> None:
-        with (
-            TemporaryDirectory() as tmp,
-            patch.dict("os.environ", {"HOME": tmp}, clear=False),
-        ):
-            workspace = Path(tmp) / "workspace"
-            workspace.mkdir()
-            runtime = Runtime(workspace, execution_mode="build")
-            try:
-                command = 'python3 -c "print(42)"'
-                requested = structured_payload(
-                    runtime.call_tool(
-                        "exec_command", {"cmd": command, "timeout_ms": 5000}
-                    )
-                )
-                self.assertEqual(requested.get("status"), "success", requested)
-                self.assertEqual(requested.get("stdout"), "42\n")
-            finally:
-                runtime.close()
 
 
 class RegisteredTaskPolicyV5Tests(unittest.TestCase):

@@ -43,6 +43,7 @@ class AuthConfig:
 @dataclass
 class RuntimeConfig:
     local_port: int = 28766
+    execution_mode: str = "build"
     permission_mode: str = "trusted"
     runtime_command: str = ""
 
@@ -92,6 +93,13 @@ class WorkspaceProfile:
             # Drop keys removed or renamed in newer releases so stale
             # profiles.json records keep loading.
             data = dict(record.get(key, {}))
+            if (
+                key == "runtime"
+                and "execution_mode" not in data
+                and "permission_mode" in data
+            ):
+                perm = str(data["permission_mode"]).strip().lower()
+                data["execution_mode"] = "plan" if perm == "safe" else "build"
             field_names = {item.name for item in fields(config_cls)}
             return {name: value for name, value in data.items() if name in field_names}
 

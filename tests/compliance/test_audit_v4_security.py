@@ -1,11 +1,9 @@
 from __future__ import annotations
 
 import socket
-import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from coding_tools_mcp.approval import ApprovalEngine
 from coding_tools_mcp.errors import ToolFailure
 from coding_tools_mcp.server import Runtime
 from coding_tools_mcp.tasks import TaskRegistry, TaskTemplate
@@ -145,12 +143,3 @@ class AuditV4SecurityTests(ComplianceTestCase):
                 )
             finally:
                 runtime.close()
-
-
-class ApprovalV4Tests(unittest.TestCase):
-    def test_approval_engine_stub_compatibility(self) -> None:
-        engine = ApprovalEngine()
-        res = engine.request_approval("action", ".", "reason")
-        self.assertEqual(res["status"], "approved")
-        consumed = engine.consume("app_id", "action", ".")
-        self.assertEqual(consumed, [])
