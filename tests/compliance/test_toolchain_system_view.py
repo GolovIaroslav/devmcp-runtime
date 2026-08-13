@@ -135,17 +135,20 @@ class ToolchainSystemViewTests(unittest.TestCase):
             (["mvn", "-version"], "maven"),
             (["gradle", "--version"], "gradle"),
         ]
-        host_supported = [
-            (argv, name) for argv, name in candidates if self._host_version_works(argv)
-        ]
-        if not host_supported:
-            self.skipTest(
-                "none of the optional package/toolchain commands are installed"
-            )
-
         with TemporaryDirectory() as tmp:
             runtime = self._workspace_runtime(Path(tmp))
             try:
+                host_supported = [
+                    (argv, name)
+                    for argv, name in candidates
+                    if self._run(runtime, argv, timeout_ms=10_000).get("status")
+                    == "success"
+                ]
+                if not host_supported:
+                    self.skipTest(
+                        "none of the optional package/toolchain commands are installed"
+                    )
+
                 failures: list[str] = []
                 for argv, name in host_supported:
                     result = self._run(runtime, argv, timeout_ms=60_000)

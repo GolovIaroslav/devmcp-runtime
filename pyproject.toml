@@ -45,10 +45,10 @@ gui = [
 ]
 
 [project.scripts]
-devmcp-runtime = "coding_tools_mcp.server:main"
+devmcp-runtime = "coding_tools_mcp.stateful_server:main"
 devmcp-desktop = "mcp_desktop_client.app:main"
 # Compatibility launchers retained for existing local installations.
-coding-tools-mcp = "coding_tools_mcp.server:main"
+coding-tools-mcp = "coding_tools_mcp.stateful_server:main"
 coding-tools-mcp-desktop = "mcp_desktop_client.app:main"
 devmcp = "apps.devmcp.cli:main"
 
