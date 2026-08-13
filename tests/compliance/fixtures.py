@@ -116,7 +116,11 @@ def materialize_runtime_files(root: Path, outside_secret: Path, name: str) -> No
 
 
 def init_git(root: Path) -> None:
-    run(["git", "init", "-q"], root)
+    try:
+        run(["git", "init", "-q", "-b", "main"], root)
+    except AssertionError:
+        run(["git", "init", "-q"], root)
+        run(["git", "checkout", "-B", "main"], root)
     run(["git", "config", "user.email", "compliance@example.invalid"], root)
     run(["git", "config", "user.name", "Compliance Runner"], root)
     run(["git", "add", "-A"], root)

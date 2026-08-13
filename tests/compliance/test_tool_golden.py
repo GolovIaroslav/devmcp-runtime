@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from coding_tools_mcp.state_checkpoint import write_state_checkpoint
-from coding_tools_mcp.state_snapshot import collect_state_snapshot
+from coding_tools_mcp.state_snapshot import collect_state_snapshot, git_text
 from tests.compliance.mcp_client import MCPError
 from tests.compliance.test_support import ComplianceTestCase
 
@@ -215,9 +215,10 @@ class ApplyPatchGoldenTests(ComplianceTestCase):
 
         duplicate_file = self.workspace.root / "src" / "duplicate.txt"
         duplicate_file.write_text("same\nsame\n", encoding="utf-8")
+        branch = git_text(self.workspace.root, ["branch", "--show-current"]) or "main"
         write_state_checkpoint(
             self.workspace.root,
-            "main",
+            branch,
             snapshot=collect_state_snapshot(
                 self.workspace.root,
                 project_id="0:.",
