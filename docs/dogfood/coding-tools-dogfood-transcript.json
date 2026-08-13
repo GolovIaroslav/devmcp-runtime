@@ -2,7 +2,7 @@
   "cases": [
     {
       "checks": [
-        "PASS search_text finds add: tiny-js-project/src/math.js:1:1: function add(a, b) {\\n{\"active_project\": {\"authority_files\": [], \"id\": \"0:.\", \"name\": \"workspace\", \"path\": \"/tmp/coding-tools-mcp-dogfood-6e6svd...",
+        "PASS search_text finds add: tiny-js-project/src/math.js:1:1: function add(a, b) {\\n{\"active_project\": {\"authority_files\": [], \"id\": \"0:.\", \"name\": \"workspace\", \"path\": \"/tmp/coding-tools-mcp-dogfood-ctvmnl...",
         "PASS read_file returns buggy source: function add(a, b) {\\n  return a - b;\\n}\\n\\nmodule.exports = { add };\\n\\n{\"active_project\": {\"authority_files\": [], \"id\": \"0:.\", \"name\": \"workspace\", \"path\": \"/tmp/coding-tools-...",
         "PASS apply_patch fixes add: Patch applied to 1 file (+1 -1).\\nM tiny-js-project/src/math.js\\n{\"active_project\": {\"authority_files\": [], \"id\": \"0:.\", \"name\": \"workspace\", \"path\": \"/tmp/coding-tools-mcp-dogf...",
         "PASS exec_command npm test passes: Status: success | command_success=true | exit code 0 | 162 ms\\njs ok\\n\\nstderr:\\nnpm notice run test\\nnpm notice run node test/math.test.js\\n\\n{\"active_project\": {\"authority_fil...",
@@ -14,7 +14,7 @@
     },
     {
       "checks": [
-        "PASS read_file returns python source: def add(a, b):\\n    return a + b\\n\\n{\"active_project\": {\"authority_files\": [], \"id\": \"0:.\", \"name\": \"workspace\", \"path\": \"/tmp/coding-tools-mcp-dogfood-6e6svdfq/workspace\", \"rel...",
+        "PASS read_file returns python source: def add(a, b):\\n    return a + b\\n\\n{\"active_project\": {\"authority_files\": [], \"id\": \"0:.\", \"name\": \"workspace\", \"path\": \"/tmp/coding-tools-mcp-dogfood-ctvmnldi/workspace\", \"rel...",
         "PASS apply_patch adds multiply: Patch applied to 1 file (+4 -0).\\nM tiny-python-project/src/math_utils.py\\n{\"active_project\": {\"authority_files\": [], \"id\": \"0:.\", \"name\": \"workspace\", \"path\": \"/tmp/coding-tool...",
         "PASS exec_command unittest passes: Status: success | command_success=true | exit code 0 | 61 ms\\nstderr:\\n..\\n----------------------------------------------------------------------\\nRan 2 tests in 0.000s\\n\\nOK\\n\\...",
         "PASS git_diff shows multiply: diff --git a/tiny-python-project/src/math_utils.py b/tiny-python-project/src/math_utils.py\\nindex 4693ad3..3581473 100644\\n--- a/tiny-python-project/src/math_utils.py\\n+++ b/tin..."
@@ -25,10 +25,10 @@
     },
     {
       "checks": [
-        "PASS exec_command returns session_id: Status: running | 41 ms\\nready\r\\n\\nSession still running; continue with write_stdin(session_id=\"job_YJXl2hDGFbWpym7DuQtfCasNllz8qLHO\", chars=\"\", yield_time_ms=10000, context_id=...",
-        "PASS write_stdin accepts hello: Status: running\\nhello\r\\necho:hello\r\\n\\nSession still running; continue with write_stdin(session_id=\"job_YJXl2hDGFbWpym7DuQtfCasNllz8qLHO\", chars=\"\", yield_time_ms=10000, contex...",
+        "PASS exec_command returns session_id: Status: running | 42 ms\\nready\r\\n\\nSession still running; continue with write_stdin(session_id=\"job_FusNe62Q51Fk5OdXVoj6JlqrW2Tvkwxv\", chars=\"\", yield_time_ms=10000, context_id=...",
+        "PASS write_stdin accepts hello: Status: running\\nhello\r\\necho:hello\r\\n\\nSession still running; continue with write_stdin(session_id=\"job_FusNe62Q51Fk5OdXVoj6JlqrW2Tvkwxv\", chars=\"\", yield_time_ms=10000, contex...",
         "PASS write_stdin accepts exit: Status: success | command_success=true | exit code 0\\nexit\r\\nbye\r\\n\\n{\"active_project\": {\"authority_files\": [], \"id\": \"0:.\", \"name\": \"workspace\", \"path\": \"/tmp/coding-tools-mcp-...",
-        "PASS kill_session terminates or reports already closed: Session job_YJXl2hDGFbWpym7DuQtfCasNllz8qLHO: exited (signal SIGTERM).\\n{\"active_project\": {\"authority_files\": [], \"id\": \"0:.\", \"name\": \"workspace\", \"path\": \"/tmp/coding-tools-m..."
+        "PASS kill_session terminates or reports already closed: Session job_FusNe62Q51Fk5OdXVoj6JlqrW2Tvkwxv: exited (signal SIGTERM).\\n{\"active_project\": {\"authority_files\": [], \"id\": \"0:.\", \"name\": \"workspace\", \"path\": \"/tmp/coding-tools-m..."
       ],
       "failures": [],
       "name": "long_running_stdin",
@@ -36,9 +36,9 @@
     },
     {
       "checks": [
-        "PASS read_file rejects ../ escape: PATH_OUTSIDE_WORKSPACE: Path is outside the current authorized root set.\\n{\"active_project\": {\"authority_files\": [], \"id\": \"0:.\", \"name\": \"workspace\", \"path\": \"/tmp/coding-tools...",
-        "PASS apply_patch rejects ../ escape: PATH_OUTSIDE_WORKSPACE: Path is outside the current authorized root set.\\n{\"active_project\": {\"authority_files\": [], \"id\": \"0:.\", \"name\": \"workspace\", \"path\": \"/tmp/coding-tools...",
-        "PASS exec_command under BUILD mode accesses host path as current OS user: Status: success | command_success=true | exit code 0 | 21 ms\\nDOGFOOD-OUTSIDE-SECRET\\n\\n{\"active_project\": {\"authority_files\": [], \"id\": \"0:.\", \"name\": \"workspace\", \"path\": \"/tm..."
+        "PASS read_file under BUILD mode reads host path as current OS user: DOGFOOD-OUTSIDE-SECRET\\n\\n{\"active_project\": {\"authority_files\": [], \"id\": \"0:.\", \"name\": \"workspace\", \"path\": \"/tmp/coding-tools-mcp-dogfood-ctvmnldi/workspace\", \"relative_path...",
+        "PASS apply_patch under BUILD mode applies patch as current OS user: Patch applied to 1 file (+1 -1).\\nM /tmp/coding-tools-mcp-dogfood-ctvmnldi/outside-secret.txt\\n{\"active_project\": {\"authority_files\": [], \"id\": \"0:.\", \"name\": \"workspace\", \"path...",
+        "PASS exec_command under BUILD mode accesses host path as current OS user: Status: success | command_success=true | exit code 0 | 21 ms\\nMODIFIED\\n\\n{\"active_project\": {\"authority_files\": [], \"id\": \"0:.\", \"name\": \"workspace\", \"path\": \"/tmp/coding-tools..."
       ],
       "failures": [],
       "name": "workspace_escape",
@@ -51,25 +51,25 @@
     "all_cases_passed": true,
     "argument_bytes": 1710,
     "completion_rate": 1.0,
-    "first_patch_attempts": 2,
+    "first_patch_attempts": 3,
     "first_patch_success": true,
     "first_patch_success_rate": 1.0,
-    "result_bytes": 29803,
+    "result_bytes": 31531,
     "session_poll_count": 0,
     "tool_call_count": 18,
-    "tool_latency_p50_ms": 14.634,
-    "tool_latency_p95_ms": 144.409,
-    "total_elapsed_ms": 982.035
+    "tool_latency_p50_ms": 14.385,
+    "tool_latency_p95_ms": 117.165,
+    "total_elapsed_ms": 942.012
   },
   "tool_calls": [
     {
       "argument_bytes": 2,
       "arguments": {},
-      "duration_ms": 1.952,
+      "duration_ms": 1.976,
       "expected_rejection": false,
       "ok": true,
-      "result_bytes": 7084,
-      "summary": "devmcp-runtime 0.1.0b1\\nWorkspace: /tmp/coding-tools-mcp-dogfood-6e6svdfq/workspace\\n{\"active_project\": {\"authority_files\": [], \"id\": \"0:.\", \"name\": \"workspace\", \"path\": \"/tmp/c...",
+      "result_bytes": 6472,
+      "summary": "devmcp-runtime 0.1.0b1\\nWorkspace: /tmp/coding-tools-mcp-dogfood-ctvmnldi/workspace\\n{\"active_project\": {\"authority_files\": [], \"id\": \"0:.\", \"name\": \"workspace\", \"path\": \"/tmp/c...",
       "tool": "server_info"
     },
     {
@@ -78,11 +78,11 @@
         "path": "tiny-js-project",
         "query": "function add"
       },
-      "duration_ms": 6.988,
+      "duration_ms": 6.629,
       "expected_rejection": false,
       "ok": true,
       "result_bytes": 753,
-      "summary": "tiny-js-project/src/math.js:1:1: function add(a, b) {\\n{\"active_project\": {\"authority_files\": [], \"id\": \"0:.\", \"name\": \"workspace\", \"path\": \"/tmp/coding-tools-mcp-dogfood-6e6svd...",
+      "summary": "tiny-js-project/src/math.js:1:1: function add(a, b) {\\n{\"active_project\": {\"authority_files\": [], \"id\": \"0:.\", \"name\": \"workspace\", \"path\": \"/tmp/coding-tools-mcp-dogfood-ctvmnl...",
       "tool": "search_text"
     },
     {
@@ -90,7 +90,7 @@
       "arguments": {
         "path": "tiny-js-project/src/math.js"
       },
-      "duration_ms": 1.22,
+      "duration_ms": 1.313,
       "expected_rejection": false,
       "ok": true,
       "result_bytes": 916,
@@ -102,7 +102,7 @@
       "arguments": {
         "patch": "*** Begin Patch\n*** Update File: tiny-js-project/src/math.js\n@@\n function add(a, b) {\n-  return a - b;\n+  return a + b;\n }\n*** End Patch\n"
       },
-      "duration_ms": 140.841,
+      "duration_ms": 52.05,
       "expected_rejection": false,
       "ok": true,
       "result_bytes": 2601,
@@ -120,7 +120,7 @@
         "workdir": "tiny-js-project",
         "yield_time_ms": 20000
       },
-      "duration_ms": 164.625,
+      "duration_ms": 166.366,
       "expected_rejection": false,
       "ok": true,
       "result_bytes": 1320,
@@ -132,7 +132,7 @@
       "arguments": {
         "path": "tiny-js-project/src/math.js"
       },
-      "duration_ms": 5.166,
+      "duration_ms": 6.959,
       "expected_rejection": false,
       "ok": true,
       "result_bytes": 1204,
@@ -144,11 +144,11 @@
       "arguments": {
         "path": "tiny-python-project/src/math_utils.py"
       },
-      "duration_ms": 1.416,
+      "duration_ms": 1.33,
       "expected_rejection": false,
       "ok": true,
       "result_bytes": 852,
-      "summary": "def add(a, b):\\n    return a + b\\n\\n{\"active_project\": {\"authority_files\": [], \"id\": \"0:.\", \"name\": \"workspace\", \"path\": \"/tmp/coding-tools-mcp-dogfood-6e6svdfq/workspace\", \"rel...",
+      "summary": "def add(a, b):\\n    return a + b\\n\\n{\"active_project\": {\"authority_files\": [], \"id\": \"0:.\", \"name\": \"workspace\", \"path\": \"/tmp/coding-tools-mcp-dogfood-ctvmnldi/workspace\", \"rel...",
       "tool": "read_file"
     },
     {
@@ -156,7 +156,7 @@
       "arguments": {
         "patch": "*** Begin Patch\n*** Update File: tiny-python-project/src/math_utils.py\n@@\n def add(a, b):\n     return a + b\n+\n+\n+def multiply(a, b):\n+    return a * b\n*** End Patch\n"
       },
-      "duration_ms": 66.3,
+      "duration_ms": 53.431,
       "expected_rejection": false,
       "ok": true,
       "result_bytes": 2830,
@@ -174,7 +174,7 @@
         "workdir": "tiny-python-project",
         "yield_time_ms": 20000
       },
-      "duration_ms": 63.167,
+      "duration_ms": 63.556,
       "expected_rejection": false,
       "ok": true,
       "result_bytes": 1393,
@@ -186,7 +186,7 @@
       "arguments": {
         "path": "tiny-python-project/src/math_utils.py"
       },
-      "duration_ms": 5.187,
+      "duration_ms": 5.105,
       "expected_rejection": false,
       "ok": true,
       "result_bytes": 1272,
@@ -204,33 +204,33 @@
         "workdir": "long-running-project",
         "yield_time_ms": 1000
       },
-      "duration_ms": 43.742,
+      "duration_ms": 44.793,
       "expected_rejection": false,
       "ok": true,
       "result_bytes": 1546,
-      "summary": "Status: running | 41 ms\\nready\r\\n\\nSession still running; continue with write_stdin(session_id=\"job_YJXl2hDGFbWpym7DuQtfCasNllz8qLHO\", chars=\"\", yield_time_ms=10000, context_id=...",
+      "summary": "Status: running | 42 ms\\nready\r\\n\\nSession still running; continue with write_stdin(session_id=\"job_FusNe62Q51Fk5OdXVoj6JlqrW2Tvkwxv\", chars=\"\", yield_time_ms=10000, context_id=...",
       "tool": "exec_command"
     },
     {
       "argument_bytes": 74,
       "arguments": {
         "chars": "hello\n",
-        "session_id": "job_YJXl2hDGFbWpym7DuQtfCasNllz8qLHO"
+        "session_id": "job_FusNe62Q51Fk5OdXVoj6JlqrW2Tvkwxv"
       },
-      "duration_ms": 82.697,
+      "duration_ms": 82.087,
       "expected_rejection": false,
       "ok": true,
       "result_bytes": 1415,
-      "summary": "Status: running\\nhello\r\\necho:hello\r\\n\\nSession still running; continue with write_stdin(session_id=\"job_YJXl2hDGFbWpym7DuQtfCasNllz8qLHO\", chars=\"\", yield_time_ms=10000, contex...",
+      "summary": "Status: running\\nhello\r\\necho:hello\r\\n\\nSession still running; continue with write_stdin(session_id=\"job_FusNe62Q51Fk5OdXVoj6JlqrW2Tvkwxv\", chars=\"\", yield_time_ms=10000, contex...",
       "tool": "write_stdin"
     },
     {
       "argument_bytes": 73,
       "arguments": {
         "chars": "exit\n",
-        "session_id": "job_YJXl2hDGFbWpym7DuQtfCasNllz8qLHO"
+        "session_id": "job_FusNe62Q51Fk5OdXVoj6JlqrW2Tvkwxv"
       },
-      "duration_ms": 22.281,
+      "duration_ms": 21.811,
       "expected_rejection": false,
       "ok": true,
       "result_bytes": 1043,
@@ -240,13 +240,13 @@
     {
       "argument_bytes": 54,
       "arguments": {
-        "session_id": "job_YJXl2hDGFbWpym7DuQtfCasNllz8qLHO"
+        "session_id": "job_FusNe62Q51Fk5OdXVoj6JlqrW2Tvkwxv"
       },
-      "duration_ms": 1.203,
+      "duration_ms": 1.306,
       "expected_rejection": true,
       "ok": true,
       "result_bytes": 1087,
-      "summary": "Session job_YJXl2hDGFbWpym7DuQtfCasNllz8qLHO: exited (signal SIGTERM).\\n{\"active_project\": {\"authority_files\": [], \"id\": \"0:.\", \"name\": \"workspace\", \"path\": \"/tmp/coding-tools-m...",
+      "summary": "Session job_FusNe62Q51Fk5OdXVoj6JlqrW2Tvkwxv: exited (signal SIGTERM).\\n{\"active_project\": {\"authority_files\": [], \"id\": \"0:.\", \"name\": \"workspace\", \"path\": \"/tmp/coding-tools-m...",
       "tool": "kill_session"
     },
     {
@@ -254,11 +254,11 @@
       "arguments": {
         "path": "../outside-secret.txt"
       },
-      "duration_ms": 0.965,
-      "expected_rejection": true,
-      "ok": false,
-      "result_bytes": 673,
-      "summary": "PATH_OUTSIDE_WORKSPACE: Path is outside the current authorized root set.\\n{\"active_project\": {\"authority_files\": [], \"id\": \"0:.\", \"name\": \"workspace\", \"path\": \"/tmp/coding-tools...",
+      "duration_ms": 1.078,
+      "expected_rejection": false,
+      "ok": true,
+      "result_bytes": 852,
+      "summary": "DOGFOOD-OUTSIDE-SECRET\\n\\n{\"active_project\": {\"authority_files\": [], \"id\": \"0:.\", \"name\": \"workspace\", \"path\": \"/tmp/coding-tools-mcp-dogfood-ctvmnldi/workspace\", \"relative_path...",
       "tool": "read_file"
     },
     {
@@ -266,11 +266,11 @@
       "arguments": {
         "patch": "*** Begin Patch\n*** Update File: ../outside-secret.txt\n@@\n-DOGFOOD-OUTSIDE-SECRET\n+MODIFIED\n*** End Patch\n"
       },
-      "duration_ms": 53.519,
-      "expected_rejection": true,
-      "ok": false,
-      "result_bytes": 673,
-      "summary": "PATH_OUTSIDE_WORKSPACE: Path is outside the current authorized root set.\\n{\"active_project\": {\"authority_files\": [], \"id\": \"0:.\", \"name\": \"workspace\", \"path\": \"/tmp/coding-tools...",
+      "duration_ms": 108.483,
+      "expected_rejection": false,
+      "ok": true,
+      "result_bytes": 2863,
+      "summary": "Patch applied to 1 file (+1 -1).\\nM /tmp/coding-tools-mcp-dogfood-ctvmnldi/outside-secret.txt\\n{\"active_project\": {\"authority_files\": [], \"id\": \"0:.\", \"name\": \"workspace\", \"path...",
       "tool": "apply_patch"
     },
     {
@@ -282,17 +282,17 @@
         "tty": false,
         "yield_time_ms": 10000
       },
-      "duration_ms": 22.694,
+      "duration_ms": 23.139,
       "expected_rejection": false,
       "ok": true,
-      "result_bytes": 1221,
-      "summary": "Status: success | command_success=true | exit code 0 | 21 ms\\nDOGFOOD-OUTSIDE-SECRET\\n\\n{\"active_project\": {\"authority_files\": [], \"id\": \"0:.\", \"name\": \"workspace\", \"path\": \"/tm...",
+      "result_bytes": 1192,
+      "summary": "Status: success | command_success=true | exit code 0 | 21 ms\\nMODIFIED\\n\\n{\"active_project\": {\"authority_files\": [], \"id\": \"0:.\", \"name\": \"workspace\", \"path\": \"/tmp/coding-tools...",
       "tool": "exec_command"
     },
     {
       "argument_bytes": 2,
       "arguments": {},
-      "duration_ms": 5.078,
+      "duration_ms": 4.89,
       "expected_rejection": false,
       "ok": true,
       "result_bytes": 1920,
@@ -300,5 +300,5 @@
       "tool": "git_diff"
     }
   ],
-  "workspace": "/tmp/coding-tools-mcp-dogfood-6e6svdfq/workspace"
+  "workspace": "/tmp/coding-tools-mcp-dogfood-ctvmnldi/workspace"
 }
