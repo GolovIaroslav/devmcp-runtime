@@ -134,6 +134,7 @@ def prepare_workspace(workspace: Path) -> int:
         capture_output=True,
         text=True,
     )
+    run_git(workspace, "checkout", "-B", "main")
     run_git(workspace, "config", "user.name", "DevMCP dogfood")
     run_git(workspace, "config", "user.email", "dogfood@example.invalid")
 
