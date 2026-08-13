@@ -29,6 +29,7 @@ lint:
 	$(PYTHON) scripts/check_desktop_i18n.py
 
 format-check:
+	$(PYTHON) -m ruff format --diff .
 	$(PYTHON) -m ruff format --check .
 
 check-dispatch-inputs:
