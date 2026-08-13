@@ -1,85 +1,126 @@
 {
   "comparisons": [
     {
-      "mcp_p95_ms": 1.752,
-      "native_p95_ms": 0.049,
+      "mcp_p95_ms": 1.296,
+      "native_p95_ms": 0.042,
       "operation": "read_file",
-      "p95_ratio": 35.755
+      "p95_ratio": 30.857
     },
     {
-      "mcp_p95_ms": 9.7,
-      "native_p95_ms": 6.885,
+      "mcp_p95_ms": 7.621,
+      "native_p95_ms": 5.195,
       "operation": "search_text",
-      "p95_ratio": 1.409
+      "p95_ratio": 1.467
     },
     {
-      "mcp_p95_ms": 51.329,
-      "native_p95_ms": 5.823,
-      "operation": "exec_command",
-      "p95_ratio": 8.815
+      "mcp_p95_ms": 24.159,
+      "native_p95_ms": 0.937,
+      "operation": "exec_true",
+      "p95_ratio": 25.783
     }
   ],
   "conclusion": "PASS",
-  "endpoint": "http://127.0.0.1:40743/mcp",
-  "exec_iterations": 4,
+  "endpoint": "http://127.0.0.1:44665/mcp",
+  "exec_iterations": 20,
   "failures": [],
-  "iterations": 8,
+  "iterations": 10,
   "max_p95_ms": 5000,
   "metrics": {
-    "mcp.exec_command": {
-      "max_ms": 51.387,
-      "min_ms": 48.944,
-      "p50_ms": 50.249,
-      "p95_ms": 51.329,
-      "samples": 4
+    "mcp.exec_argv_true": {
+      "max_ms": 25.278,
+      "min_ms": 3.651,
+      "p50_ms": 23.967,
+      "p95_ms": 24.87,
+      "samples": 20
+    },
+    "mcp.exec_pytest_small": {
+      "max_ms": 247.297,
+      "min_ms": 205.755,
+      "p50_ms": 225.818,
+      "p95_ms": 247.232,
+      "samples": 20
+    },
+    "mcp.exec_python_pass": {
+      "max_ms": 45.983,
+      "min_ms": 44.412,
+      "p50_ms": 44.97,
+      "p95_ms": 45.677,
+      "samples": 20
+    },
+    "mcp.exec_true": {
+      "max_ms": 24.421,
+      "min_ms": 22.783,
+      "p50_ms": 23.567,
+      "p95_ms": 24.159,
+      "samples": 20
+    },
+    "mcp.exec_true_after_unrelated_tree": {
+      "max_ms": 27.49,
+      "min_ms": 5.282,
+      "p50_ms": 26.496,
+      "p95_ms": 27.423,
+      "samples": 20
+    },
+    "mcp.git_status": {
+      "max_ms": 7.944,
+      "min_ms": 5.782,
+      "p50_ms": 6.168,
+      "p95_ms": 7.834,
+      "samples": 20
     },
     "mcp.read_file": {
-      "max_ms": 1.808,
-      "min_ms": 1.307,
-      "p50_ms": 1.371,
-      "p95_ms": 1.752,
-      "samples": 8
+      "max_ms": 1.319,
+      "min_ms": 1.033,
+      "p50_ms": 1.107,
+      "p95_ms": 1.296,
+      "samples": 10
     },
     "mcp.search_text": {
-      "max_ms": 10.177,
-      "min_ms": 6.932,
-      "p50_ms": 7.51,
-      "p95_ms": 9.7,
-      "samples": 8
+      "max_ms": 7.69,
+      "min_ms": 5.869,
+      "p50_ms": 6.603,
+      "p95_ms": 7.621,
+      "samples": 10
     },
     "mcp.tools_list": {
-      "max_ms": 3.463,
-      "min_ms": 2.08,
-      "p50_ms": 2.136,
-      "p95_ms": 3.08,
-      "samples": 8
+      "max_ms": 2.853,
+      "min_ms": 1.941,
+      "p50_ms": 2.141,
+      "p95_ms": 2.701,
+      "samples": 10
     },
-    "native.exec_command": {
-      "max_ms": 6.085,
-      "min_ms": 2.217,
-      "p50_ms": 4.321,
-      "p95_ms": 5.823,
-      "samples": 4
+    "native.exec_true": {
+      "max_ms": 0.978,
+      "min_ms": 0.719,
+      "p50_ms": 0.845,
+      "p95_ms": 0.937,
+      "samples": 20
     },
     "native.read_text": {
-      "max_ms": 0.05,
-      "min_ms": 0.042,
-      "p50_ms": 0.044,
-      "p95_ms": 0.049,
-      "samples": 8
+      "max_ms": 0.047,
+      "min_ms": 0.018,
+      "p50_ms": 0.019,
+      "p95_ms": 0.042,
+      "samples": 10
     },
     "native.search": {
-      "max_ms": 6.935,
-      "min_ms": 5.032,
-      "p50_ms": 5.37,
-      "p95_ms": 6.885,
-      "samples": 8
+      "max_ms": 5.377,
+      "min_ms": 4.231,
+      "p50_ms": 4.56,
+      "p95_ms": 5.195,
+      "samples": 10
     }
   },
   "notes": [
     "Native baselines are local developer-tool primitives, not equivalent MCP substitutes.",
     "Latency thresholds are intentionally broad; this smoke benchmark catches transport regressions and records trend evidence."
   ],
+  "unrelated_tree": {
+    "bytes": 8192000,
+    "files": 4000,
+    "p50_growth_ms": 2.929,
+    "p50_ratio": 1.124
+  },
   "warmup": 2,
-  "workspace": "/tmp/codex-mcp-latency-8222_e49/workspace"
+  "workspace": "/tmp/codex-mcp-latency-ec1ibkld/workspace"
 }

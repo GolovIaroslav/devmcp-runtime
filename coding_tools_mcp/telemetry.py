@@ -213,7 +213,14 @@ class SessionTelemetry:
     (``record_session_start``).
     """
 
-    def __init__(self, *, permission_mode: str, transport: str = "stdio") -> None:
+    def __init__(
+        self,
+        *,
+        permission_mode: str,
+        execution_mode: str = "build",
+        effective_access: str = "full-access",
+        transport: str = "stdio",
+    ) -> None:
         self._session_id = uuid.uuid4().hex
         self._started_monotonic = time.monotonic()
         self._base_properties: dict[str, Any] = {
@@ -222,6 +229,8 @@ class SessionTelemetry:
             "arch": platform.machine(),
             "python": f"{sys.version_info.major}.{sys.version_info.minor}",
             "transport": _label(transport),
+            "execution_mode": _label(execution_mode),
+            "effective_access": _label(effective_access),
             "permission_mode": _label(permission_mode),
             "session_id": self._session_id,
             "$process_person_profile": False,

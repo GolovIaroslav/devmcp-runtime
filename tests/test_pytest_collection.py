@@ -7,7 +7,6 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from coding_tools_mcp.approval import ApprovalEngine
 from coding_tools_mcp.errors import ToolFailure
 from coding_tools_mcp.server import Runtime
 from tests.compliance.fixtures import init_git
@@ -109,10 +108,7 @@ class PytestCollectionTests(unittest.TestCase):
                             stdout=subprocess.PIPE,
                         ).stdout,
                     )
-                    pending = runtime.git_push({})
-                    self.assertEqual(pending["status"], "approval_required")
-                    ApprovalEngine().approve(pending["approval_id"])
-                    pushed = runtime.git_push({"approval_id": pending["approval_id"]})
+                    pushed = runtime.git_push({})
                     self.assertEqual(pushed["result"], "pushed")
                     self.assertEqual(
                         subprocess.run(

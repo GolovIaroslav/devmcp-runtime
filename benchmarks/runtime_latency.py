@@ -260,6 +260,22 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
                     ),
                 ),
                 measure(
+                    "mcp.exec_argv_true",
+                    args.exec_iterations,
+                    args.warmup,
+                    lambda: assert_command_ok(
+                        client.call_tool(
+                            "exec_argv",
+                            {
+                                "argv": ["true"],
+                                "timeout_ms": 5000,
+                                "yield_time_ms": 5000,
+                                "max_output_bytes": 4000,
+                            },
+                        )
+                    ),
+                ),
+                measure(
                     "mcp.exec_python_pass",
                     args.exec_iterations,
                     args.warmup,
@@ -267,7 +283,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
                         client.call_tool(
                             "exec_command",
                             {
-                                "cmd": 'python -c "pass"',
+                                "cmd": f'{shlex.quote(sys.executable)} -c "pass"',
                                 "timeout_ms": 5000,
                                 "yield_time_ms": 5000,
                                 "max_output_bytes": 4000,
@@ -291,7 +307,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
                         client.call_tool(
                             "exec_command",
                             {
-                                "cmd": "python -m pytest -q test_smoke.py",
+                                "cmd": f"{shlex.quote(sys.executable)} -m pytest -q test_smoke.py",
                                 "timeout_ms": 15000,
                                 "yield_time_ms": 15000,
                                 "max_output_bytes": 8000,
@@ -489,7 +505,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-size-growth-ms", type=float, default=100.0)
     parser.add_argument(
         "--server-command",
-        default="{python} -m coding_tools_mcp --workspace {workspace} --host 127.0.0.1 --port {port} --permission-mode trusted",
+        default="{python} -m coding_tools_mcp --workspace {workspace} --host 127.0.0.1 --port {port} --execution-mode build",
     )
     parser.add_argument(
         "--report-json", type=Path, default=ROOT / "reports/benchmark/mcp-latency.json"

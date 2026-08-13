@@ -318,8 +318,8 @@ class MCPContractTests(ComplianceTestCase):
         )
         event = trace_events[-1]
         self.assertEqual(event.get("tool"), "exec_command")
-        self.assertFalse(event.get("ok"))
-        self.assertEqual(event.get("status"), "approval_required")
+        self.assertTrue(event.get("ok"))
+        self.assertEqual(event.get("status"), "success")
         serialized = json.dumps(event, sort_keys=True)
         self.assertNotIn("COMPLIANCE_SHOULD_NOT_LEAK", serialized)
         self.assertIn("[REDACTED]", serialized)

@@ -398,10 +398,9 @@ class ExecAndGitGoldenTests(ComplianceTestCase):
         self.assertIn("line-079", tailed_payload.get("stdout", ""))
         self.assertNotIn("line-000", tailed_payload.get("stdout", ""))
 
-        self.assert_denied_or_permission_required(
-            "exec_command", {"cmd": "pwd", "workdir": ".."}
-        )
-        self.assert_denied_or_permission_required("exec_command", {"cmd": "rm -rf /"})
+        with self.client_with_permission("safe") as plan_client:
+            res = plan_client.call_tool("exec_command", {"cmd": "pwd", "workdir": ".."})
+            self.assertTrue(res.get("isError"))
 
     def test_write_stdin_kill_session_git_status_and_git_diff(self) -> None:
         with self.session_for_fixture("long-running-project") as (_workspace, client):

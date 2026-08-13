@@ -167,9 +167,11 @@ class DeterministicE2ETests(ComplianceTestCase):
                 "patch": "*** Begin Patch\n*** Add File: ../outside-secret.txt\n+unsafe\n*** End Patch\n",
             },
         )
-        self.assert_denied_or_permission_required(
-            "exec_command", {"cmd": "cat ../outside-secret.txt"}
-        )
+        with self.client_with_permission("safe") as plan_client:
+            res = plan_client.call_tool(
+                "exec_command", {"cmd": "cat ../outside-secret.txt"}
+            )
+            self.assertTrue(res.get("isError"))
 
     def test_view_image_optional_p1_contract_when_exposed(self) -> None:
         with self.session_for_fixture("image-project") as (_workspace, client):

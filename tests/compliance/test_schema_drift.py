@@ -96,9 +96,8 @@ class SchemaDriftTests(unittest.TestCase):
         expected = {
             "search_text": {"is_regex", "context_lines"},
             "git_diff": {"context_lines"},
-            "apply_patch": {"approval_id"},
-            "exec_command": {"approval_id", "network_required", "task_id"},
-            "run_task": {"approval_id", "cwd", "env"},
+            "exec_command": {"network_required", "task_id"},
+            "run_task": {"cwd", "env"},
         }
         schemas = input_schemas()
         for tool_name, names in expected.items():

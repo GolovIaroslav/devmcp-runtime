@@ -347,7 +347,7 @@ def _status(_: argparse.Namespace) -> int:
     print(f"MCP workspace: {config.get('workspace')}")
     backend = str(config.get("sandbox_backend", "bwrap"))
     print(f"sandbox: {backend if backend != 'unsafe' else 'SANDBOX: UNSAFE HOST MODE'}")
-    print(f"policy: {config.get('profile', 'balanced')}")
+    print(f"execution_mode: {config.get('execution_mode', 'build')}")
     print(f"tunnel process: {'running' if _active(TUNNEL_SERVICE) else 'stopped'}")
     print(f"tunnel ready: {'yes' if ready and healthy else 'no'}")
     print(f"tunnel id: {config.get('tunnel_id') or 'not configured'}")
@@ -1030,8 +1030,8 @@ def _serve(_: argparse.Namespace) -> int:
         str(int(config.get("mcp_port", 47157))),
         "--auth-token-file",
         str(selected.mcp_token),
-        "--policy-profile",
-        str(config.get("profile", "balanced")),
+        "--execution-mode",
+        str(config.get("execution_mode", "build")),
         "--sandbox-backend",
         str(config.get("sandbox_backend", "bwrap")),
         "--max-removed-lines",

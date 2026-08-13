@@ -138,7 +138,8 @@ class MCPClient:
     session_id: str | None = None
     request_id: int = 0
     initialized: bool = False
-    permission_mode: str = "safe"
+    execution_mode: str | None = None
+    permission_mode: str = "trusted"
     policy_profile: str | None = None
 
     def __enter__(self) -> "MCPClient":
@@ -160,10 +161,16 @@ class MCPClient:
                 + " ".join(cmd or ["<empty>"])
             )
 
+        eff_exec_mode = (
+            self.execution_mode
+            if self.execution_mode is not None
+            else ("plan" if self.permission_mode == "safe" else "build")
+        )
         env_overrides = {
-            "AWS_SECRET_ACCESS_KEY": "COMPLIANCE_SHOULD_NOT_LEAK",
-            "OPENAI_API_KEY": "COMPLIANCE_SHOULD_NOT_LEAK",
+            "DUMMY_SECRET_KEY_A": "COMPLIANCE_SHOULD_NOT_LEAK",
+            "DUMMY_SECRET_KEY_B": "COMPLIANCE_SHOULD_NOT_LEAK",
             "CODING_TOOLS_MCP_WORKSPACE": str(self.workspace),
+            "DEVMCP_EXECUTION_MODE": eff_exec_mode,
             "CODING_TOOLS_MCP_PERMISSION_MODE": self.permission_mode,
         }
         if self.policy_profile is not None:
