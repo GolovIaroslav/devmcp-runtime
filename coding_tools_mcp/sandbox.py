@@ -15,7 +15,7 @@ from typing import Iterable
 
 from .errors import ToolFailure
 from .path_security import sensitive_path_reason
-from .system_view import readonly_system_paths
+from .system_view import readonly_system_paths, readonly_user_toolchain_paths
 
 
 @dataclass(frozen=True)
@@ -715,8 +715,29 @@ class ExecutionSandbox:
         args.extend(["--dir", "/etc"])
         if allow_network:
             args.extend(["--dir", "/run"])
-        for system_path in readonly_system_paths(allow_network=allow_network):
+        system_paths = readonly_system_paths(allow_network=allow_network)
+        created_dirs: set[str] = {"/tmp", "/etc", "/run"}
+
+        def ensure_mount_parents(destination: Path) -> None:
+            for parent in reversed(destination.resolve(strict=False).parents):
+                text = str(parent)
+                if text in {"/", ""} or text in created_dirs:
+                    continue
+                if any(
+                    text == str(system_path)
+                    or text.startswith(str(system_path) + os.sep)
+                    for system_path in system_paths
+                    if system_path.is_dir()
+                ):
+                    continue
+                args.extend(["--dir", text])
+                created_dirs.add(text)
+
+        for system_path in system_paths:
             args.extend(["--ro-bind", str(system_path), str(system_path)])
+        for toolchain_path in readonly_user_toolchain_paths():
+            ensure_mount_parents(toolchain_path)
+            args.extend(["--ro-bind", str(toolchain_path), str(toolchain_path)])
         args.extend(
             [
                 "--proc",
@@ -755,31 +776,18 @@ class ExecutionSandbox:
         for uv_root in uv_roots:
             if uv_root.exists() and str(uv_root) not in seen_uv_roots:
                 seen_uv_roots.add(str(uv_root))
+                ensure_mount_parents(uv_root)
                 args.extend(["--ro-bind", str(uv_root), str(uv_root)])
         mcp_pkg = Path(__file__).parent
+        ensure_mount_parents(mcp_pkg)
         args.extend(["--ro-bind", str(mcp_pkg), str(mcp_pkg)])
 
         mounts = list(root_mounts)
         if not mounts:
             mounts = [(self.sandbox_dir, self.original_workspace, True)]
-        created_dirs: set[str] = {"/tmp", "/etc", "/run"}
         for source, destination, writable in mounts:
             dest = destination.resolve(strict=False)
-            for parent in reversed(dest.parents):
-                text = str(parent)
-                if text in {"/", ""} or text in created_dirs:
-                    continue
-                if any(
-                    text == str(system_path)
-                    or text.startswith(str(system_path) + os.sep)
-                    for system_path in readonly_system_paths(
-                        allow_network=allow_network
-                    )
-                    if system_path.is_dir()
-                ):
-                    continue
-                args.extend(["--dir", text])
-                created_dirs.add(text)
+            ensure_mount_parents(dest)
             args.extend(
                 [
                     "--bind" if writable else "--ro-bind",

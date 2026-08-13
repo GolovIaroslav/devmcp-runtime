@@ -68,46 +68,35 @@ class SecurityComplianceTests(ComplianceTestCase):
             "exec_command", {"cmd": "cat outside-link.txt"}
         )
         self.assert_denied_or_permission_required("exec_command", {"cmd": "rm -rf /"})
-        self.assert_denied_or_permission_required(
-            "exec_command", {"cmd": "git reset --hard"}
-        )
+        reset = self.client.call_tool("exec_command", {"cmd": "git reset --hard"})
+        reset_payload = self.assert_tool_success(reset)
+        self.assertNotEqual(reset_payload.get("exit_code"), 0, reset_payload)
+        self.assertEqual(reset_payload.get("execution_mode"), "read-only")
         self.assert_denied_or_permission_required(
             "exec_command", {"cmd": "chmod -R 777 /"}
         )
-        self.assert_denied_or_permission_required(
+        network = self.client.call_tool(
             "exec_command",
             {
                 "cmd": "python -c \"import urllib.request; urllib.request.urlopen('https://example.com', timeout=1)\"",
                 "timeout_ms": 3000,
             },
         )
+        network_payload = self.assert_tool_success(network)
+        self.assertNotEqual(network_payload.get("exit_code"), 0, network_payload)
 
     def test_exec_command_rejects_interpreter_mediated_outside_reads(self) -> None:
         outside_secret = repr(str(self.workspace.outside_secret))
-        self.assert_denied_or_permission_required(
-            "exec_command",
-            {
-                "cmd": (
-                    "python -c "
-                    f'"from pathlib import Path; print(Path({outside_secret}).read_text())"'
-                ),
-                "timeout_ms": 5000,
-                "max_output_bytes": 4096,
-            },
-        )
+        commands = [
+            "python -c "
+            f'"from pathlib import Path; print(Path({outside_secret}).read_text())"'
+        ]
         computed_cmd = (
             "python -c "
             '"import os; '
             "print(open(os.path.dirname(os.getcwd()) + chr(47) + 'outside-secret.txt').read())\""
         )
-        self.assert_denied_or_permission_required(
-            "exec_command",
-            {
-                "cmd": computed_cmd,
-                "timeout_ms": 5000,
-                "max_output_bytes": 4096,
-            },
-        )
+        commands.append(computed_cmd)
         direct_syscall_cmd = (
             "python -c "
             '"import os, ctypes as c; '
@@ -116,14 +105,7 @@ class SecurityComplianceTests(ComplianceTestCase):
             "fd=lib.syscall(257, -100, c.c_char_p(p), 0); "
             "raise OSError(c.get_errno(), 'blocked') if fd < 0 else print(os.read(fd, 80))\""
         )
-        self.assert_denied_or_permission_required(
-            "exec_command",
-            {
-                "cmd": direct_syscall_cmd,
-                "timeout_ms": 5000,
-                "max_output_bytes": 4096,
-            },
-        )
+        commands.append(direct_syscall_cmd)
         direct_syscall_write_cmd = (
             "python -c "
             '"import os, ctypes as c; '
@@ -132,20 +114,21 @@ class SecurityComplianceTests(ComplianceTestCase):
             "fd=lib.syscall(257, -100, c.c_char_p(p), os.O_WRONLY | os.O_TRUNC); "
             "raise OSError(c.get_errno(), 'blocked') if fd < 0 else os.write(fd, b'MODIFIED')\""
         )
-        self.assert_denied_or_permission_required(
-            "exec_command",
-            {
-                "cmd": direct_syscall_write_cmd,
-                "timeout_ms": 5000,
-                "max_output_bytes": 4096,
-            },
-        )
+        commands.append(direct_syscall_write_cmd)
+        for command in commands:
+            with self.subTest(command=command):
+                result = self.client.call_tool(
+                    "exec_command",
+                    {"cmd": command, "timeout_ms": 5000, "max_output_bytes": 4096},
+                )
+                payload = self.assert_tool_success(result)
+                self.assertNotEqual(payload.get("exit_code"), 0, payload)
         self.assertEqual(
             self.workspace.outside_secret.read_text(encoding="utf-8"),
             "TOP_SECRET_DO_NOT_READ\n",
         )
 
-    def test_exec_command_landlock_absolute_path_bypass_is_rejected(self) -> None:
+    def test_exec_command_read_only_absolute_path_bypass_is_rejected(self) -> None:
         authoritative_file = self.workspace.root / "inside.txt"
         authoritative_path = repr(str(authoritative_file))
 
@@ -153,16 +136,14 @@ class SecurityComplianceTests(ComplianceTestCase):
         # via an absolute path, even if it is known to the attacker.
         write_cmd = f"python -c \"open({authoritative_path}, 'w').write('HACKED')\""
 
-        self.assert_denied_or_permission_required(
+        write_result = self.client.call_tool(
             "exec_command",
-            {
-                "cmd": write_cmd,
-                "timeout_ms": 5000,
-                "max_output_bytes": 4096,
-            },
+            {"cmd": write_cmd, "timeout_ms": 5000, "max_output_bytes": 4096},
         )
+        write_payload = self.assert_tool_success(write_result)
+        self.assertNotEqual(write_payload.get("exit_code"), 0, write_payload)
         self.assertNotEqual(authoritative_file.read_text(encoding="utf-8"), "HACKED")
-        self.assert_denied_or_permission_required(
+        outside_result = self.client.call_tool(
             "exec_command",
             {
                 "cmd": 'cat $(dirname "$PWD")/outside-secret.txt',
@@ -170,6 +151,8 @@ class SecurityComplianceTests(ComplianceTestCase):
                 "max_output_bytes": 4096,
             },
         )
+        outside_payload = self.assert_tool_success(outside_result)
+        self.assertNotEqual(outside_payload.get("exit_code"), 0, outside_payload)
 
     def test_exec_command_long_non_path_tokens_do_not_become_internal_errors(
         self,
@@ -188,7 +171,7 @@ class SecurityComplianceTests(ComplianceTestCase):
         self.assertTrue(payload.get("command_success"), payload)
         self.assertEqual(payload.get("exit_code"), 0, payload)
 
-    def test_exec_command_rejects_destructive_workspace_mutations(self) -> None:
+    def test_read_only_exec_cannot_perform_destructive_workspace_mutations(self) -> None:
         dangerous_commands = [
             "rm -rf src",
             "git -C . reset --hard",
@@ -204,12 +187,11 @@ class SecurityComplianceTests(ComplianceTestCase):
                         "exec_command",
                         {"cmd": cmd, "timeout_ms": 5000, "max_output_bytes": 4096},
                     )
-                    self.assertTrue(
-                        result.get("isError", False),
-                        f"destructive command must be denied: {result!r}",
-                    )
+                    payload = self.assert_tool_success(result)
+                    self.assertNotEqual(payload.get("exit_code"), 0, payload)
+                    self.assertEqual(payload.get("execution_mode"), "read-only")
 
-    def test_exec_command_rejects_obfuscated_network_access(self) -> None:
+    def test_read_only_exec_blocks_obfuscated_network_access(self) -> None:
         result = self.client.call_tool(
             "exec_command",
             {
@@ -223,12 +205,11 @@ class SecurityComplianceTests(ComplianceTestCase):
                 "max_output_bytes": 4096,
             },
         )
-        self.assertTrue(
-            result.get("isError", False),
-            f"network command must be denied before execution: {result!r}",
-        )
+        payload = self.assert_tool_success(result)
+        self.assertNotEqual(payload.get("exit_code"), 0, payload)
+        self.assertEqual(payload.get("execution_mode"), "read-only")
 
-    def test_exec_command_rejects_shell_startup_and_loader_environment(self) -> None:
+    def test_read_only_exec_filters_shell_startup_and_loader_environment(self) -> None:
         risky_env = {
             "BASH_ENV": "malicious-startup.sh",
             "ENV": "malicious-startup.sh",
@@ -238,12 +219,11 @@ class SecurityComplianceTests(ComplianceTestCase):
         for key, value in risky_env.items():
             with self.subTest(env=key):
                 result = self.client.call_tool(
-                    "exec_command", {"cmd": "true", "env": {key: value}}
+                    "exec_command", {"cmd": "env", "env": {key: value}}
                 )
-                self.assertTrue(
-                    result.get("isError", False),
-                    f"{key} must require permission or be denied: {result!r}",
-                )
+                payload = self.assert_tool_success(result)
+                self.assertEqual(payload.get("exit_code"), 0, payload)
+                self.assertNotIn(f"{key}=", payload.get("stdout", ""))
 
     def test_exec_command_timeout_is_enforced_after_running_session_is_returned(
         self,

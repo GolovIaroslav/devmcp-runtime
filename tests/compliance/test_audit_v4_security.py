@@ -338,7 +338,7 @@ class ApprovalV4Tests(unittest.TestCase):
         ):
             root = Path(tmp) / "workspace"
             root.mkdir()
-            runtime = Runtime(root)
+            runtime = Runtime(root, policy_profile="balanced")
             try:
                 command = 'python3 -c "print(42)"'
                 requested = runtime.exec_command({"cmd": command, "timeout_ms": 5000})

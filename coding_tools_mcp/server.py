@@ -5615,7 +5615,10 @@ class Runtime:
         max_output_bytes = int(args.get("max_output_bytes", 65536))
         tty = bool(args.get("tty", False))
         stdin_text = str(args.get("stdin", ""))
-        direct_execution = not transaction_apply
+        # Normal compatibility modes use the real workspace fast path. Explicit
+        # policy profiles intentionally retain the legacy snapshot/Landlock
+        # compatibility path until that API is retired separately.
+        direct_execution = not transaction_apply and not self._profile_managed
         if transaction_apply:
             if tty:
                 raise ToolFailure(
@@ -5887,7 +5890,9 @@ class Runtime:
                 (
                     sandbox.sandbox_dir,
                     self.workspace.root,
-                    execution_mode != "read-only",
+                    self._profile_managed
+                    or transaction_apply
+                    or execution_mode != "read-only",
                 ),
                 *[
                     (extra_sandbox.sandbox_dir, root, writable)
