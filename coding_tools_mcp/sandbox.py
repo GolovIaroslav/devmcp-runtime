@@ -117,8 +117,7 @@ def legacy_devmcp_parent_sandbox_backend() -> SandboxBackend | None:
     if home.name != ".devmcp-home" or home.parent != pwd:
         return None
     if any(
-        path.name != ".devmcp-tmp" or path.parent != pwd
-        for path in (tmpdir, tmp, temp)
+        path.name != ".devmcp-tmp" or path.parent != pwd for path in (tmpdir, tmp, temp)
     ):
         return None
     parts = pwd.parts
