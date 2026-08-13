@@ -218,110 +218,114 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         metrics.extend(
             [
                 measure(
-                "mcp.tools_list",
-                args.iterations,
-                args.warmup,
-                lambda: client.list_tools(),
+                    "mcp.tools_list",
+                    args.iterations,
+                    args.warmup,
+                    lambda: client.list_tools(),
                 ),
                 measure(
-                "mcp.read_file",
-                args.iterations,
-                args.warmup,
-                lambda: assert_tool_contains(
-                    client.call_tool("read_file", {"path": "src/target.txt"}),
-                    "TARGET_NEEDLE",
-                ),
-                ),
-                measure(
-                "mcp.search_text",
-                args.iterations,
-                args.warmup,
-                lambda: assert_tool_contains(
-                    client.call_tool(
-                        "search_text", {"query": "TARGET_NEEDLE", "path": "src"}
+                    "mcp.read_file",
+                    args.iterations,
+                    args.warmup,
+                    lambda: assert_tool_contains(
+                        client.call_tool("read_file", {"path": "src/target.txt"}),
+                        "TARGET_NEEDLE",
                     ),
-                    "TARGET_NEEDLE",
-                ),
                 ),
                 measure(
-                "mcp.exec_true",
-                args.exec_iterations,
-                args.warmup,
-                lambda: assert_command_ok(
-                    client.call_tool(
-                        "exec_command",
-                        {
-                            "cmd": "true",
-                            "timeout_ms": 5000,
-                            "yield_time_ms": 5000,
-                            "max_output_bytes": 4000,
-                        },
-                    )
-                ),
+                    "mcp.search_text",
+                    args.iterations,
+                    args.warmup,
+                    lambda: assert_tool_contains(
+                        client.call_tool(
+                            "search_text", {"query": "TARGET_NEEDLE", "path": "src"}
+                        ),
+                        "TARGET_NEEDLE",
+                    ),
                 ),
                 measure(
-                "mcp.exec_python_pass",
-                args.exec_iterations,
-                args.warmup,
-                lambda: assert_command_ok(
-                    client.call_tool(
-                        "exec_command",
-                        {
-                            "cmd": 'python -c "pass"',
-                            "timeout_ms": 5000,
-                            "yield_time_ms": 5000,
-                            "max_output_bytes": 4000,
-                        },
-                    )
-                ),
-                ),
-                measure(
-                "mcp.git_status",
-                args.exec_iterations,
-                args.warmup,
-                lambda: assert_tool_ok(client.call_tool("git_status", {}), "git_status"),
+                    "mcp.exec_true",
+                    args.exec_iterations,
+                    args.warmup,
+                    lambda: assert_command_ok(
+                        client.call_tool(
+                            "exec_command",
+                            {
+                                "cmd": "true",
+                                "timeout_ms": 5000,
+                                "yield_time_ms": 5000,
+                                "max_output_bytes": 4000,
+                            },
+                        )
+                    ),
                 ),
                 measure(
-                "mcp.exec_pytest_small",
-                args.exec_iterations,
-                args.warmup,
-                lambda: assert_command_ok(
-                    client.call_tool(
-                        "exec_command",
-                        {
-                            "cmd": "python -m pytest -q test_smoke.py",
-                            "timeout_ms": 15000,
-                            "yield_time_ms": 15000,
-                            "max_output_bytes": 8000,
-                        },
-                    )
-                ),
-                ),
-                measure(
-                "native.read_text",
-                args.iterations,
-                args.warmup,
-                lambda: (workspace / "src" / "target.txt").read_text(encoding="utf-8"),
+                    "mcp.exec_python_pass",
+                    args.exec_iterations,
+                    args.warmup,
+                    lambda: assert_command_ok(
+                        client.call_tool(
+                            "exec_command",
+                            {
+                                "cmd": 'python -c "pass"',
+                                "timeout_ms": 5000,
+                                "yield_time_ms": 5000,
+                                "max_output_bytes": 4000,
+                            },
+                        )
+                    ),
                 ),
                 measure(
-                "native.search",
-                args.iterations,
-                args.warmup,
-                lambda: native_search(workspace),
+                    "mcp.git_status",
+                    args.exec_iterations,
+                    args.warmup,
+                    lambda: assert_tool_ok(
+                        client.call_tool("git_status", {}), "git_status"
+                    ),
                 ),
                 measure(
-                "native.exec_true",
-                args.exec_iterations,
-                args.warmup,
-                lambda: subprocess.run(
-                    ["true"],
-                    cwd=str(workspace),
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                    timeout=5,
-                    check=True,
+                    "mcp.exec_pytest_small",
+                    args.exec_iterations,
+                    args.warmup,
+                    lambda: assert_command_ok(
+                        client.call_tool(
+                            "exec_command",
+                            {
+                                "cmd": "python -m pytest -q test_smoke.py",
+                                "timeout_ms": 15000,
+                                "yield_time_ms": 15000,
+                                "max_output_bytes": 8000,
+                            },
+                        )
+                    ),
                 ),
+                measure(
+                    "native.read_text",
+                    args.iterations,
+                    args.warmup,
+                    lambda: (workspace / "src" / "target.txt").read_text(
+                        encoding="utf-8"
+                    ),
+                ),
+                measure(
+                    "native.search",
+                    args.iterations,
+                    args.warmup,
+                    lambda: native_search(workspace),
+                ),
+                measure(
+                    "native.exec_true",
+                    args.exec_iterations,
+                    args.warmup,
+                    lambda: subprocess.run(
+                        ["true"],
+                        cwd=str(workspace),
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        timeout=5,
+                        check=True,
+                    ),
                 ),
             ]
         )

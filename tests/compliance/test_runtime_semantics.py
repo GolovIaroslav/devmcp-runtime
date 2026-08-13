@@ -16,7 +16,7 @@ class RuntimeSemanticsTests(ComplianceTestCase):
         for case in vectors["apply_patch"]:
             with self.subTest(case=case["name"]):
                 with workspace_from_fixture("tiny-js-project") as workspace:
-                    with MCPClient(workspace.root) as client:
+                    with MCPClient(workspace.root, permission_mode="trusted") as client:
                         try:
                             result = client.call_tool(
                                 "apply_patch", {"patch": case["patch"]}

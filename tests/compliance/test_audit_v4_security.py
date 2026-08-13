@@ -25,8 +25,7 @@ class AuditV4SecurityTests(ComplianceTestCase):
         sentinel.write_text("must remain byte-identical\n", encoding="utf-8")
         link_script = self.workspace.root / "make_link.py"
         link_script.write_text(
-            "import os\n"
-            f"os.symlink({str(sentinel)!r}, 'future-file.txt')\n",
+            f"import os\nos.symlink({str(sentinel)!r}, 'future-file.txt')\n",
             encoding="utf-8",
         )
         runtime = Runtime(self.workspace.root)

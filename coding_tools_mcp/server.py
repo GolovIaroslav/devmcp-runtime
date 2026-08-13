@@ -1938,7 +1938,9 @@ class Runtime:
             landlock=self._profile_managed and self.sandbox_backend.name != "unsafe",
             secret_env_filter=self._profile_managed or permission_mode != "dangerous",
             global_tmp_write=(
-                "host" if not self._profile_managed and permission_mode == "dangerous" else "sandbox-private"
+                "host"
+                if not self._profile_managed and permission_mode == "dangerous"
+                else "sandbox-private"
             ),
             skip_all_permissions=not self._profile_managed,
         )
@@ -3973,7 +3975,9 @@ class Runtime:
             "definitions": definitions,
             "references": references,
             "relevant_tests": tests,
-            "total_matches": searched.get("total_matches", len(definitions) + len(references)),
+            "total_matches": searched.get(
+                "total_matches", len(definitions) + len(references)
+            ),
             "truncated": bool(searched.get("truncated")),
         }
 
@@ -5855,6 +5859,17 @@ class Runtime:
                     env["TMP"] = "/tmp"
                     env["TEMP"] = "/tmp"
                     env["XDG_CACHE_HOME"] = "/tmp"
+                    try:
+                        host_home = Path.home()
+                    except (OSError, RuntimeError):
+                        host_home = None
+                    if host_home is not None:
+                        cargo_home = host_home / ".cargo"
+                        rustup_home = host_home / ".rustup"
+                        if cargo_home.is_dir():
+                            env["CARGO_HOME"] = str(cargo_home)
+                        if rustup_home.is_dir():
+                            env["RUSTUP_HOME"] = str(rustup_home)
             else:
                 env = self._command_env(
                     args.get("env", {}),

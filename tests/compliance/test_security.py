@@ -171,7 +171,9 @@ class SecurityComplianceTests(ComplianceTestCase):
         self.assertTrue(payload.get("command_success"), payload)
         self.assertEqual(payload.get("exit_code"), 0, payload)
 
-    def test_read_only_exec_cannot_perform_destructive_workspace_mutations(self) -> None:
+    def test_read_only_exec_cannot_perform_destructive_workspace_mutations(
+        self,
+    ) -> None:
         dangerous_commands = [
             "rm -rf src",
             "git -C . reset --hard",
@@ -223,7 +225,13 @@ class SecurityComplianceTests(ComplianceTestCase):
                 )
                 payload = self.assert_tool_success(result)
                 self.assertEqual(payload.get("exit_code"), 0, payload)
-                self.assertNotIn(f"{key}=", payload.get("stdout", ""))
+                self.assertFalse(
+                    any(
+                        line.startswith(f"{key}=")
+                        for line in payload.get("stdout", "").splitlines()
+                    ),
+                    payload,
+                )
 
     def test_exec_command_timeout_is_enforced_after_running_session_is_returned(
         self,

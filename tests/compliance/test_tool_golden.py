@@ -182,7 +182,9 @@ class ApplyPatchGoldenTests(ComplianceTestCase):
             self.assert_tool_success(client.call_tool("apply_patch", {"patch": move}))
             missing_source = client.call_tool("read_file", {"path": "TODO.md"})
             self.assertTrue(missing_source.get("isError", False), missing_source)
-            self.assert_tool_success(client.call_tool("read_file", {"path": "docs/TODO.md"}))
+            self.assert_tool_success(
+                client.call_tool("read_file", {"path": "docs/TODO.md"})
+            )
 
         mismatch = """*** Begin Patch
 *** Update File: src/math.js

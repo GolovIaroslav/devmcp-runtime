@@ -817,7 +817,9 @@ class RuntimeHelperTests(unittest.TestCase):
             self.assertNotIn("PYTHONPATH", env)
             self.assertNotIn("DYLD_LIBRARY_PATH", env)
 
-    def test_command_env_explicit_policy_still_filters_sensitive_environment(self) -> None:
+    def test_command_env_explicit_policy_still_filters_sensitive_environment(
+        self,
+    ) -> None:
         with TemporaryDirectory() as tmp:
             runtime = Runtime(
                 Path(tmp),
@@ -971,7 +973,9 @@ class RuntimeHelperTests(unittest.TestCase):
                 with patch.object(
                     server_module,
                     "open_landlock_ruleset",
-                    side_effect=AssertionError("normal execution must not use Landlock"),
+                    side_effect=AssertionError(
+                        "normal execution must not use Landlock"
+                    ),
                 ):
                     result = runtime.exec_command(
                         {"cmd": "printf ok", "timeout_ms": 5000, "yield_time_ms": 0}
@@ -1310,7 +1314,9 @@ class RuntimeHelperTests(unittest.TestCase):
     def test_cancelled_direct_execution_does_not_create_owned_sandbox(self) -> None:
         with TemporaryDirectory() as tmp:
             workspace = Path(tmp)
-            runtime = Runtime(workspace, permission_mode="trusted", sandbox_backend="unsafe")
+            runtime = Runtime(
+                workspace, permission_mode="trusted", sandbox_backend="unsafe"
+            )
             try:
                 with patch.object(
                     ExecutionSandbox,
@@ -1334,7 +1340,9 @@ class RuntimeHelperTests(unittest.TestCase):
     def test_runtime_close_reaps_direct_execution_without_snapshot(self) -> None:
         with TemporaryDirectory() as tmp:
             workspace = Path(tmp)
-            runtime = Runtime(workspace, permission_mode="trusted", sandbox_backend="unsafe")
+            runtime = Runtime(
+                workspace, permission_mode="trusted", sandbox_backend="unsafe"
+            )
             with patch.object(
                 ExecutionSandbox,
                 "create",
@@ -1415,7 +1423,7 @@ class RuntimeHelperTests(unittest.TestCase):
             ):
                 inherited = dangerous_runtime.exec_command(
                     {
-                        "cmd": 'python -c "import os; print(os.environ[\'OPENAI_API_KEY\'])"',
+                        "cmd": "python -c \"import os; print(os.environ['OPENAI_API_KEY'])\"",
                         "timeout_ms": 5000,
                         "yield_time_ms": 5000,
                     }
@@ -3700,13 +3708,17 @@ Maven home: /usr/share/maven
                 {"DEVMCP_INSTALLED_RUNTIME_SHA": installed_sha},
                 clear=False,
             ):
-                runtime = Runtime(repo, permission_mode="trusted", sandbox_backend="unsafe")
+                runtime = Runtime(
+                    repo, permission_mode="trusted", sandbox_backend="unsafe"
+                )
                 try:
                     snapshot = runtime.local_state_snapshot({})
                 finally:
                     runtime.close()
             self.assertEqual(snapshot["service"]["installed_sha"], installed_sha)
-            self.assertEqual(snapshot["self_host"]["default_execution_mode"], "workspace-write")
+            self.assertEqual(
+                snapshot["self_host"]["default_execution_mode"], "workspace-write"
+            )
             self.assertIn("tracked.py", snapshot["dirty_paths"])
             self.assertIn("tracked.py", snapshot["staged_paths"])
             self.assertEqual(len(str(snapshot["head"])), 40)
