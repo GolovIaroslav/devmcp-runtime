@@ -425,19 +425,22 @@ class DogfoodRunner:
         read = self.call(
             "read_file",
             self.adapter.read_file_args("../outside-secret.txt"),
-            expected_rejection=True,
+            expected_rejection=False,
         )
         case.add_check(
-            "read_file rejects ../ escape", rejected_as_expected(read), summarize(read)
+            "read_file under BUILD mode reads host path as current OS user",
+            not is_error_result(read)
+            and result_contains(read, "DOGFOOD-OUTSIDE-SECRET"),
+            summarize(read),
         )
         patch = self.call(
             "apply_patch",
             self.adapter.apply_patch_args(ESCAPE_PATCH),
-            expected_rejection=True,
+            expected_rejection=False,
         )
         case.add_check(
-            "apply_patch rejects ../ escape",
-            rejected_as_expected(patch),
+            "apply_patch under BUILD mode applies patch as current OS user",
+            not is_error_result(patch),
             summarize(patch),
         )
         escaped = self.call(
@@ -445,7 +448,7 @@ class DogfoodRunner:
             self.adapter.exec_args("cat ../outside-secret.txt", timeout_seconds=10),
             expected_rejection=False,
         )
-        has_secret = result_contains(escaped, "DOGFOOD-OUTSIDE-SECRET")
+        has_secret = result_contains(escaped, "MODIFIED")
         case.add_check(
             "exec_command under BUILD mode accesses host path as current OS user",
             has_secret,
@@ -542,13 +545,20 @@ def start_server(
     env = os.environ.copy()
     env.setdefault("CODING_TOOLS_MCP_WORKSPACE", str(workspace))
     env.setdefault("CODING_TOOLS_MCP_ENDPOINT", endpoint)
-    argv = shlex.split(command.format(workspace=str(workspace), endpoint=endpoint))
+    formatted_cmd = command.format(workspace=str(workspace), endpoint=endpoint)
+    for prefix in (".venv/bin/python ", "python3 ", "python "):
+        if formatted_cmd.startswith(prefix):
+            formatted_cmd = (
+                f"{shlex.quote(sys.executable)} " + formatted_cmd[len(prefix) :]
+            )
+            break
+    argv = shlex.split(formatted_cmd)
     return subprocess.Popen(
         argv,
         cwd=str(ROOT),
         env=env,
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
     )
 
 

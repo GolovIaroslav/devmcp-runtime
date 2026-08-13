@@ -16,10 +16,21 @@ class RuntimeSemanticsTests(ComplianceTestCase):
         for case in vectors["apply_patch"]:
             with self.subTest(case=case["name"]):
                 with workspace_from_fixture("tiny-js-project") as workspace:
+                    abs_target = workspace.root.parent / "abs-escape-file.txt"
+                    abs_target.unlink(missing_ok=True)
+                    rel_target = workspace.root.parent / "rel-escape-file.txt"
+                    rel_target.unlink(missing_ok=True)
+                    patch_text = (
+                        case["patch"]
+                        .replace(
+                            "/tmp/coding-tools-runtime-escape-new.txt", str(abs_target)
+                        )
+                        .replace("../new-outside-file.txt", "../rel-escape-file.txt")
+                    )
                     with MCPClient(workspace.root, permission_mode="trusted") as client:
                         try:
                             result = client.call_tool(
-                                "apply_patch", {"patch": case["patch"]}
+                                "apply_patch", {"patch": patch_text}
                             )
                         except MCPError:
                             result = {"isError": True, "content": []}
@@ -43,6 +54,22 @@ class RuntimeSemanticsTests(ComplianceTestCase):
                             self.assertTrue(
                                 read.get("isError"),
                                 f"deleted path should be unreadable: {deleted}",
+                            )
+                    if not case.get("expect_success_plan", True):
+                        abs_target.unlink(missing_ok=True)
+                        rel_target.unlink(missing_ok=True)
+                        with MCPClient(
+                            workspace.root, permission_mode="safe"
+                        ) as plan_client:
+                            try:
+                                plan_result = plan_client.call_tool(
+                                    "apply_patch", {"patch": patch_text}
+                                )
+                            except MCPError:
+                                plan_result = {"isError": True, "content": []}
+                            self.assertTrue(
+                                plan_result.get("isError"),
+                                f"case should fail in plan mode: {case!r} -> {plan_result!r}",
                             )
 
     def test_session_semantics_match_runtime_exec_and_stdin(self) -> None:
