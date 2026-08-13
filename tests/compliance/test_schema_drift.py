@@ -5,6 +5,7 @@ import inspect
 import re
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from coding_tools_mcp.server import (
     KILL_SESSION_STATUSES,
@@ -109,6 +110,24 @@ class SchemaDriftTests(unittest.TestCase):
                 self.assertTrue(names <= schema_names)
                 for name in names:
                     self.assertRegex(source, rf'args\.(?:get|pop)\("{re.escape(name)}"')
+
+    def test_exec_verbosity_schema_matches_runtime_integer_contract(self) -> None:
+        schema = input_schemas()["exec_command"]["properties"]["verbosity"]
+        self.assertEqual(schema.get("type"), "integer")
+        self.assertEqual(schema.get("minimum"), 0)
+        self.assertEqual(schema.get("maximum"), 2)
+        with TemporaryDirectory() as tmp:
+            result = Runtime(
+                Path(tmp), permission_mode="trusted", sandbox_backend="unsafe"
+            ).exec_command(
+                {
+                    "cmd": "true",
+                    "verbosity": 0,
+                    "timeout_ms": 5_000,
+                    "yield_time_ms": 5_000,
+                }
+            )
+        self.assertEqual(result.get("status"), "success", result)
 
     def test_contract_error_enum_contains_live_tool_failure_codes(self) -> None:
         source = "\n".join(

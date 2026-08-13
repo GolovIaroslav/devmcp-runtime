@@ -246,6 +246,7 @@ class ExecSession:
     terminating: bool = False
     pty_master_fd: int | None = None
     resource_cleanup: Callable[[], None] | None = field(default=None, repr=False)
+    auto_release_resources_on_exit: bool = True
     _stdin_closed: bool = False
     _resource_cleanup_done: bool = field(default=False, repr=False)
     _reaper_started: bool = field(default=False, repr=False)
@@ -451,7 +452,8 @@ class ExecSession:
         self.closed = True
         if self.completed_at is None:
             self.completed_at = time.time()
-        self.release_owned_resources()
+        if self.auto_release_resources_on_exit:
+            self.release_owned_resources()
 
     def drain_readers(self, timeout: float = 0.2) -> None:
         deadline = time.time() + timeout

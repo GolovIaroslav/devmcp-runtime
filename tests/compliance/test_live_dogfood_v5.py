@@ -114,7 +114,7 @@ class ApprovalWorkflowV5Tests(unittest.TestCase):
         ):
             workspace = Path(tmp) / "workspace"
             workspace.mkdir()
-            runtime = Runtime(workspace)
+            runtime = Runtime(workspace, policy_profile="balanced")
             try:
                 command = 'python3 -c "print(42)"'
                 requested = structured_payload(
@@ -126,7 +126,7 @@ class ApprovalWorkflowV5Tests(unittest.TestCase):
                     requested.get("status"), "approval_required", requested
                 )
                 self.assertIsInstance(requested.get("approval_id"), str)
-                self.assertEqual(requested.get("capabilities"), ["inline_script"])
+                self.assertEqual(requested.get("capabilities"), ["exec.arbitrary"])
                 self.assertIn("operation_summary", requested)
                 approval_id = requested["approval_id"]
 

@@ -188,6 +188,9 @@ def _render_exec(payload: dict[str, Any]) -> str:
     # Decision-critical fields lead every command result so the model never
     # has to infer success from output alone.
     header = [f"Status: {payload.get('status', 'unknown')}"]
+    command_success = payload.get("command_success")
+    if isinstance(command_success, bool):
+        header.append(f"command_success={str(command_success).lower()}")
     exit_code = payload.get("exit_code")
     if exit_code is not None:
         header.append(f"exit code {exit_code}")
@@ -213,8 +216,14 @@ def _render_exec(payload: dict[str, Any]) -> str:
         sections.append(summary)
     session_id = payload.get("session_id")
     if payload.get("status") == "running" and session_id:
+        next_call = _render_next_action(payload)
         sections.append(
-            f'Session still running; poll with write_stdin(session_id="{session_id}", chars="", yield_time_ms=10000).'
+            "Session still running; "
+            + (
+                f"continue with {next_call}."
+                if next_call
+                else f'poll with write_stdin(session_id="{session_id}", chars="", yield_time_ms=10000).'
+            )
         )
     if payload.get("truncated"):
         continuations = _render_exec_continuations(payload)

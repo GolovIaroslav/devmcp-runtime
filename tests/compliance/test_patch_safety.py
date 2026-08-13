@@ -3,6 +3,8 @@ from tests.compliance.test_support import ComplianceTestCase
 
 
 class PatchSafetyTests(ComplianceTestCase):
+    policy_profile = "balanced"
+
     fixture_name = "tiny-js-project"
 
     def test_preview_patch_is_dry_run(self) -> None:

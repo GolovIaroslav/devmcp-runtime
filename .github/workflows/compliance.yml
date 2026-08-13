@@ -40,8 +40,16 @@ jobs:
       - name: Install Linux execution sandbox
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y bubblewrap
-          sudo chmod u+s "$(command -v bwrap)"
+          sudo apt-get install -y bubblewrap apparmor apparmor-profiles
+          profile="$(dpkg -L apparmor-profiles | grep '/bwrap-userns-restrict$' | head -n 1)"
+          if [ -z "$profile" ]; then
+            echo "bwrap-userns-restrict profile not found in apparmor-profiles" >&2
+            exit 1
+          fi
+          sudo install -m 0644 "$profile" /etc/apparmor.d/bwrap-userns-restrict
+          sudo apparmor_parser -r /etc/apparmor.d/bwrap-userns-restrict
+          bwrap --unshare-user --unshare-all --cap-drop ALL --disable-userns \
+            --new-session --die-with-parent --ro-bind / / -- /bin/true
           ls -l "$(command -v bwrap)"
 
       - name: Set up Node
@@ -171,8 +179,16 @@ jobs:
       - name: Install Linux sandbox and runtime
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y bubblewrap
-          sudo chmod u+s "$(command -v bwrap)"
+          sudo apt-get install -y bubblewrap apparmor apparmor-profiles
+          profile="$(dpkg -L apparmor-profiles | grep '/bwrap-userns-restrict$' | head -n 1)"
+          if [ -z "$profile" ]; then
+            echo "bwrap-userns-restrict profile not found in apparmor-profiles" >&2
+            exit 1
+          fi
+          sudo install -m 0644 "$profile" /etc/apparmor.d/bwrap-userns-restrict
+          sudo apparmor_parser -r /etc/apparmor.d/bwrap-userns-restrict
+          bwrap --unshare-user --unshare-all --cap-drop ALL --disable-userns \
+            --new-session --die-with-parent --ro-bind / / -- /bin/true
           python -m pip install --upgrade pip
           python -m pip install -e ".[dev,gui]"
           python -m playwright install --with-deps chromium

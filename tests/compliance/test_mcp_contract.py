@@ -15,8 +15,10 @@ import urllib.parse
 import urllib.request
 from collections.abc import Callable
 from typing import Any
+from unittest.mock import patch
 
 from coding_tools_mcp.server import MAX_HTTP_REQUEST_BYTES
+from scripts.mcp_smoke import command_succeeded
 from tests.compliance.mcp_client import (
     FORBIDDEN_TOOL_NAMES,
     FORBIDDEN_TOOL_TERMS,
@@ -32,6 +34,29 @@ from tests.compliance.test_support import ComplianceTestCase
 
 
 class MCPContractTests(ComplianceTestCase):
+    def test_mcp_smoke_accepts_current_exec_command_success_contract(self) -> None:
+        server_command = (
+            f"{sys.executable} -m coding_tools_mcp --workspace {{workspace}} "
+            "--host 127.0.0.1 --port {port} --sandbox-backend unsafe "
+            "--permission-mode trusted"
+        )
+        with patch.dict(
+            os.environ, {"CODING_TOOLS_MCP_SERVER_CMD": server_command}, clear=False
+        ):
+            with MCPClient(self.workspace.root, permission_mode="trusted") as client:
+                result = self.assert_tool_success(
+                    client.call_tool(
+                        "exec_command",
+                        {
+                            "cmd": "python --version",
+                            "timeout_ms": 30000,
+                            "yield_time_ms": 30000,
+                        },
+                    )
+                )
+        self.assertEqual(result.get("status"), "success", result)
+        self.assertTrue(command_succeeded(result), result)
+
     def test_initialize_succeeds_and_tools_list_is_available(self) -> None:
         tools = self.client.list_tools()
         self.assertIsInstance(tools, list)
@@ -135,17 +160,27 @@ class MCPContractTests(ComplianceTestCase):
             "list_projects": (True, False, True, False),
             "select_project": (False, False, True, False),
             "current_project": (True, False, True, False),
+            "local_state_snapshot": (True, False, True, False),
             "project_checks": (True, False, True, False),
             "run_project_check": (False, True, False, False),
+            "run_checks_for_diff": (False, True, False, False),
             "check_exec_environment": (True, False, True, False),
             "get_default_cwd": (True, False, True, False),
             "set_default_cwd": (False, False, True, False),
             "read_file": (True, False, True, False),
+            "code_diagnostics": (True, False, True, False),
+            "grant_root": (False, True, False, False),
+            "grant_capability": (False, True, False, False),
+            "list_capability_leases": (True, False, True, False),
+            "revoke_capability_lease": (False, True, True, False),
+            "end_task_scope": (False, True, True, False),
             "list_dir": (True, False, True, False),
             "list_files": (True, False, True, False),
             "search_text": (True, False, True, False),
+            "inspect_symbol": (True, False, True, False),
             "apply_patch": (False, True, False, False),
             "exec_command": (False, True, False, True),
+            "exec_argv": (False, True, False, True),
             "write_stdin": (False, True, False, False),
             "kill_session": (False, True, False, False),
             "read_output": (True, False, True, False),
@@ -257,7 +292,7 @@ class MCPContractTests(ComplianceTestCase):
         old_trace = os.environ.get("CODING_TOOLS_MCP_TRACE")
         os.environ["CODING_TOOLS_MCP_TRACE"] = "1"
         try:
-            with MCPClient(self.workspace.root) as traced:
+            with MCPClient(self.workspace.root, policy_profile="balanced") as traced:
                 traced.call_tool(
                     "exec_command",
                     {
@@ -426,6 +461,25 @@ class MCPContractTests(ComplianceTestCase):
 
         still_alive = self.client.rpc("ping", {})
         self.assertEqual(still_alive, {})
+
+    def test_http_post_accepts_tunnel_and_tool_subpaths(self) -> None:
+        body = b'{"jsonrpc":"2.0","id":1,"method":"ping","params":{}}'
+        session_header = {"Mcp-Session-Id": str(self.client.session_id)}
+        for path in (
+            "/",
+            "/mcp",
+            "/mcp/mcp",
+            "/list_projects",
+            "/current_project",
+            "/mcp/list_projects",
+            "/mcp/current_project",
+        ):
+            with self.subTest(path=path):
+                status, response = self.raw_http_post(
+                    body, headers=session_header, path=path
+                )
+                self.assertEqual(status, 200, f"Path {path} returned status {status}")
+                self.assertEqual(response.get("result"), {})
 
     def test_http_discovery_endpoints_return_server_card_metadata(self) -> None:
         self.assertIsNotNone(self.client.url)

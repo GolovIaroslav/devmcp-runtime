@@ -592,7 +592,70 @@ class ReleaseLifecycleTests(unittest.TestCase):
                         {"source_project": "devmcp-runtime"}
                     )
                 self.assertEqual(result["status"], "scheduled")
-                schedule.assert_called_once_with(source.resolve(), head)
+                schedule.assert_called_once_with(
+                    source.resolve(), head, development_mode=False
+                )
+            finally:
+                runtime.close()
+
+    def test_service_update_development_mode_allows_clean_feature_branch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            projects = root / "projects"
+            source = projects / "devmcp-runtime"
+            (source / "apps" / "devmcp").mkdir(parents=True)
+            (source / "pyproject.toml").write_text(
+                '[project]\nname = "devmcp-runtime"\nversion = "0.1.0"\n',
+                encoding="utf-8",
+            )
+            (source / "apps" / "devmcp" / "cli.py").write_text(
+                "# fixture\n", encoding="utf-8"
+            )
+            subprocess.run(
+                ["git", "init", "-qb", "feature/self-host"], cwd=source, check=True
+            )
+            subprocess.run(
+                ["git", "config", "user.email", "test@example.invalid"],
+                cwd=source,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "config", "user.name", "Release Test"],
+                cwd=source,
+                check=True,
+            )
+            subprocess.run(["git", "add", "-A"], cwd=source, check=True)
+            subprocess.run(["git", "commit", "-qm", "fixture"], cwd=source, check=True)
+            head = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=source,
+                check=True,
+                text=True,
+                stdout=subprocess.PIPE,
+            ).stdout.strip()
+            runtime = Runtime(
+                source,
+                policy_profile="autonomous",
+                project_roots=[projects],
+            )
+            try:
+                with self.assertRaises(ToolFailure):
+                    runtime.service_update({"source_project": "devmcp-runtime"})
+                with patch.object(
+                    runtime,
+                    "_schedule_devmcp_update",
+                    return_value={"status": "scheduled"},
+                ) as schedule:
+                    result = runtime.service_update(
+                        {
+                            "source_project": "devmcp-runtime",
+                            "development_mode": True,
+                        }
+                    )
+                self.assertEqual(result["status"], "scheduled")
+                schedule.assert_called_once_with(
+                    source.resolve(), head, development_mode=True
+                )
             finally:
                 runtime.close()
 
@@ -652,6 +715,9 @@ class ReleaseLifecycleTests(unittest.TestCase):
         completed = [
             subprocess.CompletedProcess([], 0, expected_sha + "\n", ""),
             subprocess.CompletedProcess([], 0, "main\n", ""),
+            subprocess.CompletedProcess(
+                [], 0, "https://github.com/example/devmcp-runtime.git\n", ""
+            ),
             subprocess.CompletedProcess([], 0, "", ""),
             subprocess.CompletedProcess([], 0, "", ""),
             subprocess.CompletedProcess([], 0, "installed\n", ""),
@@ -661,6 +727,13 @@ class ReleaseLifecycleTests(unittest.TestCase):
         source = Path("/tmp/devmcp-runtime-source")
         with (
             patch.object(cli, "_validated_runtime_source", return_value=source),
+            patch.object(cli, "_config", return_value=(object(), {})),
+            patch.object(
+                cli,
+                "_mcp_runtime_state",
+                return_value={"service": {"installed_sha": expected_sha}},
+            ),
+            patch.object(cli, "save_config") as save_config,
             patch.object(
                 cli.shutil,
                 "which",
@@ -672,15 +745,64 @@ class ReleaseLifecycleTests(unittest.TestCase):
             patch.object(cli.subprocess, "run", side_effect=completed) as run,
         ):
             result = cli._service_update(
-                SimpleNamespace(source=str(source), expected_sha=expected_sha)
+                SimpleNamespace(
+                    source=str(source),
+                    expected_sha=expected_sha,
+                    development_mode=False,
+                )
             )
         self.assertEqual(result, 0)
+        save_config.assert_called_once()
         commands = [call.args[0] for call in run.call_args_list]
         self.assertEqual(commands[0][-2:], ["rev-parse", "HEAD"])
         self.assertEqual(commands[1][-2:], ["branch", "--show-current"])
-        self.assertEqual(commands[4][:4], ["/usr/bin/uv", "tool", "install", "--force"])
-        self.assertEqual(commands[5][-2:], ["service", "install"])
-        self.assertEqual(commands[6][-1], "restart")
+        self.assertEqual(commands[2][-3:], ["remote", "get-url", "origin"])
+        self.assertEqual(commands[5][:4], ["/usr/bin/uv", "tool", "install", "--force"])
+        self.assertEqual(commands[6][-2:], ["service", "install"])
+        self.assertEqual(commands[7][-1], "restart")
+
+    def test_cli_service_update_rejects_mismatched_running_sha(self) -> None:
+        expected_sha = "a" * 40
+        completed = [
+            subprocess.CompletedProcess([], 0, expected_sha + "\n", ""),
+            subprocess.CompletedProcess([], 0, "main\n", ""),
+            subprocess.CompletedProcess(
+                [], 0, "https://github.com/example/repo.git\n", ""
+            ),
+            subprocess.CompletedProcess([], 0, "", ""),
+            subprocess.CompletedProcess([], 0, "", ""),
+            subprocess.CompletedProcess([], 0, "installed\n", ""),
+            subprocess.CompletedProcess([], 0, "units\n", ""),
+            subprocess.CompletedProcess([], 0, "restarted\n", ""),
+        ]
+        source = Path("/tmp/devmcp-runtime-source")
+        with (
+            patch.object(cli, "_validated_runtime_source", return_value=source),
+            patch.object(cli, "_config", return_value=(object(), {})),
+            patch.object(
+                cli,
+                "_mcp_runtime_state",
+                return_value={"service": {"installed_sha": "b" * 40}},
+            ),
+            patch.object(cli, "save_config"),
+            patch.object(
+                cli.shutil,
+                "which",
+                side_effect=lambda name: {
+                    "git": "/usr/bin/git",
+                    "uv": "/usr/bin/uv",
+                }.get(name),
+            ),
+            patch.object(cli.subprocess, "run", side_effect=completed),
+        ):
+            result = cli._service_update(
+                SimpleNamespace(
+                    source=str(source),
+                    expected_sha=expected_sha,
+                    development_mode=False,
+                )
+            )
+        self.assertEqual(result, 1)
 
     def test_http_pressure_eviction_repairs_orphaned_sandbox_lease(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -754,7 +876,8 @@ class ReleaseLifecycleTests(unittest.TestCase):
                     {"cmd": command, "approval_id": pending["approval_id"]}
                 )
                 self.assertTrue(completed["ok"])
-                self.assertEqual(completed["status"], "exited")
+                self.assertEqual(completed["status"], "success")
+                self.assertTrue(completed["command_success"])
                 self.assertIn("custom-policy-approved", completed["stdout"])
             finally:
                 runtime.close()

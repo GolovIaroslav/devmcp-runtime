@@ -19,7 +19,9 @@ import sys
 import time
 import tomllib
 import urllib.error
+import urllib.parse
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -52,6 +54,22 @@ TUNNEL_BIN = Path(
 def _config() -> tuple[ConfigPaths, dict[str, Any]]:
     selected = paths()
     return selected, load_config(selected)
+
+
+def _sanitize_repo_identity(raw: str | None) -> str | None:
+    if not raw or not raw.strip():
+        return None
+    value = raw.strip()
+    if "@" in value and ":" in value and "://" not in value:
+        user_host, path = value.split(":", 1)
+        return f"{user_host.split('@', 1)[-1]}/{path.removesuffix('.git')}"
+    parsed = urllib.parse.urlsplit(value)
+    if parsed.scheme and parsed.netloc:
+        host = parsed.hostname or parsed.netloc.split("@")[-1]
+        if parsed.port:
+            host = f"{host}:{parsed.port}"
+        return f"{host}{parsed.path.removesuffix('.git')}"
+    return value.removesuffix(".git")
 
 
 def _systemctl(*args: str, check: bool = False) -> subprocess.CompletedProcess[str]:
@@ -180,6 +198,66 @@ def _mcp_health(config: dict[str, Any], selected: ConfigPaths) -> bool:
                 pass
 
 
+def _mcp_runtime_state(
+    config: dict[str, Any], selected: ConfigPaths
+) -> dict[str, Any] | None:
+    url = f"http://{config.get('mcp_host', '127.0.0.1')}:{int(config.get('mcp_port', 47157))}/mcp"
+    session_id: str | None = None
+    try:
+        initialize, session_id = _mcp_call(
+            url,
+            selected.mcp_token,
+            "initialize",
+            {
+                "protocolVersion": PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": {"name": "devmcp", "version": __version__},
+            },
+        )
+        if "error" in initialize or not session_id:
+            return None
+        token = selected.mcp_token.read_text(encoding="utf-8").strip()
+        notification = urllib.request.Request(
+            url,
+            data=b'{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}',
+            headers={
+                "Accept": "application/json, text/event-stream",
+                "Content-Type": "application/json",
+                "MCP-Protocol-Version": PROTOCOL_VERSION,
+                "Mcp-Session-Id": session_id,
+                "Authorization": f"Bearer {token}",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(notification, timeout=3):
+            pass
+        result, _ = _mcp_call(
+            url,
+            selected.mcp_token,
+            "tools/call",
+            {"name": "local_state_snapshot", "arguments": {}},
+            session_id=session_id,
+        )
+        structured = result.get("result", {}).get("structuredContent", {})
+        return structured if isinstance(structured, dict) else None
+    except (
+        OSError,
+        RuntimeError,
+        ValueError,
+        KeyError,
+        TypeError,
+        json.JSONDecodeError,
+        urllib.error.URLError,
+    ):
+        return None
+    finally:
+        if session_id:
+            try:
+                _mcp_delete(url, selected.mcp_token, session_id)
+            except (OSError, RuntimeError, urllib.error.URLError):
+                pass
+
+
 def _unit_loaded(unit: str) -> bool:
     result = _systemctl("show", "--property=LoadState", "--value", unit)
     return result.returncode == 0 and result.stdout.strip() != "not-found"
@@ -249,6 +327,21 @@ def _status(_: argparse.Namespace) -> int:
     healthy, ready = _tunnel_health_flags(tunnel)
     pending = len(ApprovalEngine(selected.approvals_db).list_pending())
     print(f"DevMCP Runtime {__version__}")
+    print(f"runtime sha: {config.get('installed_runtime_sha') or 'unknown'}")
+    print(f"runtime branch: {config.get('installed_runtime_branch') or 'unknown'}")
+    print(f"runtime source: {config.get('installed_runtime_source_repo') or 'unknown'}")
+    print(
+        f"runtime installed at: {config.get('installed_runtime_installed_at') or 'unknown'}"
+    )
+    dirty_build = config.get("installed_runtime_dirty_build")
+    print(
+        "runtime dirty build: "
+        + ("unknown" if dirty_build is None else "yes" if dirty_build else "no")
+    )
+    print(f"protocol: {PROTOCOL_VERSION}")
+    print(
+        f"development runtime: {'yes' if config.get('installed_runtime_development_mode') else 'no'}"
+    )
     print(f"MCP process: {'running' if _active(MCP_SERVICE) else 'stopped'}")
     print(f"MCP health: {'ok' if _mcp_health(config, selected) else 'fail'}")
     print(f"MCP workspace: {config.get('workspace')}")
@@ -786,10 +879,11 @@ def _service_update(args: argparse.Namespace) -> int:
     if git is None:
         print("git is required to update the installed DevMCP runtime", file=sys.stderr)
         return 1
-    for command, expected in (
-        ([git, "-C", str(source), "rev-parse", "HEAD"], expected_sha),
-        ([git, "-C", str(source), "branch", "--show-current"], "main"),
-    ):
+    development_mode = bool(args.development_mode)
+    checks = [([git, "-C", str(source), "rev-parse", "HEAD"], expected_sha)]
+    if not development_mode:
+        checks.append(([git, "-C", str(source), "branch", "--show-current"], "main"))
+    for command, expected in checks:
         check_result = subprocess.run(
             command,
             text=True,
@@ -803,6 +897,33 @@ def _service_update(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 1
+    if development_mode:
+        branch_result = subprocess.run(
+            [git, "-C", str(source), "branch", "--show-current"],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=30,
+        )
+        if branch_result.returncode != 0 or not branch_result.stdout.strip():
+            print(
+                "DevMCP development update requires a named local branch",
+                file=sys.stderr,
+            )
+            return 1
+        source_branch = branch_result.stdout.strip()
+    else:
+        source_branch = "main"
+    remote_result = subprocess.run(
+        [git, "-C", str(source), "remote", "get-url", "origin"],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        timeout=30,
+    )
+    source_repo = _sanitize_repo_identity(
+        remote_result.stdout.strip() if remote_result.returncode == 0 else None
+    )
     for diff_args in (("diff", "--quiet"), ("diff", "--cached", "--quiet")):
         dirty_result = subprocess.run(
             [git, "-C", str(source), *diff_args],
@@ -838,6 +959,15 @@ def _service_update(args: argparse.Namespace) -> int:
         sys.stderr.write(install.stdout)
         return install.returncode
 
+    selected, config = _config()
+    config["installed_runtime_sha"] = expected_sha
+    config["installed_runtime_branch"] = source_branch
+    config["installed_runtime_development_mode"] = development_mode
+    config["installed_runtime_installed_at"] = datetime.now(timezone.utc).isoformat()
+    config["installed_runtime_source_repo"] = source_repo
+    config["installed_runtime_dirty_build"] = False
+    save_config(config, selected)
+
     refreshed_python = Path(sys.executable)
     if not refreshed_python.is_file():
         print(
@@ -857,6 +987,19 @@ def _service_update(args: argparse.Namespace) -> int:
         if completed.returncode != 0:
             sys.stderr.write(completed.stdout)
             return completed.returncode
+    runtime_state = _mcp_runtime_state(config, selected)
+    installed_sha = (
+        runtime_state.get("service", {}).get("installed_sha")
+        if isinstance(runtime_state, dict)
+        and isinstance(runtime_state.get("service"), dict)
+        else None
+    )
+    if installed_sha != expected_sha:
+        print(
+            "DevMCP service restarted but did not report the requested runtime SHA",
+            file=sys.stderr,
+        )
+        return 1
     print(f"Updated DevMCP runtime from {source}")
     return 0
 
@@ -867,10 +1010,15 @@ def _serve(_: argparse.Namespace) -> int:
     selected, config = _config()
     if not secret_status(selected)["mcp_token_configured"]:
         generate_mcp_token(selected)
-    from coding_tools_mcp.server import main as server_main
+    from coding_tools_mcp.stateful_server import main as server_main
 
     os.environ["DEVMCP_POLICY_CONFIG_FILE"] = str(selected.config_file)
     os.environ["DEVMCP_ACTIVE_PROJECT_FILE"] = str(selected.root / "active-project")
+    installed_sha = str(config.get("installed_runtime_sha", "")).strip().lower()
+    if len(installed_sha) == 40 and all(
+        ch in "0123456789abcdef" for ch in installed_sha
+    ):
+        os.environ["DEVMCP_INSTALLED_RUNTIME_SHA"] = installed_sha
     if secret_status(selected)["git_credentials_configured"]:
         os.environ["DEVMCP_GIT_CREDENTIALS_FILE"] = str(selected.git_credentials)
     server_args = [
@@ -1021,6 +1169,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     service_update.add_argument("--source", required=True)
     service_update.add_argument("--expected-sha", required=True)
+    service_update.add_argument(
+        "--development-mode",
+        action="store_true",
+        help="permit a clean named non-main branch while still pinning the exact source HEAD",
+    )
     service_sub.add_parser("uninstall")
     return parser
 

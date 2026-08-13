@@ -18,6 +18,8 @@ UNIMPLEMENTED_CAPABILITIES: frozenset[str] = frozenset()
 
 CAPABILITIES = (
     "workspace.read",
+    "workspace.additional_read_root",
+    "workspace.additional_write_root",
     "workspace.patch_small",
     "workspace.patch_destructive",
     "workspace.create",
@@ -39,6 +41,7 @@ CAPABILITIES = (
     "service.manage",
     "policy.manage",
     "agent.delegate",
+    "executor.container",
 )
 
 
@@ -69,6 +72,8 @@ _SAFE_AUTO = {
 }
 
 _SAFE_ASK = {
+    "workspace.additional_read_root",
+    "workspace.additional_write_root",
     "workspace.create",
     "workspace.delete",
     "workspace.move",
@@ -86,13 +91,21 @@ _SAFE_ASK = {
     "env.sensitive",
     "service.manage",
     "policy.manage",
+    "executor.container",
 }
 
 _PROFILES: dict[str, dict[str, str]] = {
     "safe": _profile(_SAFE_AUTO, _SAFE_ASK, _FLOOR_DENY),
     "balanced": _profile(
-        _SAFE_AUTO | {"workspace.create", "git.branch", "git.commit"},
+        _SAFE_AUTO
+        | {
+            "workspace.create",
+            "workspace.additional_read_root",
+            "git.branch",
+            "git.commit",
+        },
         (_SAFE_ASK - {"workspace.create", "git.branch", "git.commit"})
+        - {"workspace.additional_read_root"}
         | {"workspace.delete", "workspace.move", "workspace.patch_destructive"},
         _FLOOR_DENY,
     ),
@@ -100,6 +113,8 @@ _PROFILES: dict[str, dict[str, str]] = {
         _SAFE_AUTO
         | {
             "workspace.create",
+            "workspace.additional_read_root",
+            "workspace.additional_write_root",
             "workspace.delete",
             "workspace.move",
             "exec.registered",
@@ -181,7 +196,12 @@ def legacy_profile(permission_mode: str) -> str:
     """
 
     mode = permission_mode.strip().lower()
-    mapping = {"safe": "safe", "trusted": "power", "dangerous": "power"}
+    # Legacy modes are startup compatibility aliases only.  Once the Runtime is
+    # initialized all user-facing allow/ask/deny decisions come from the
+    # resulting profile matrix; low-level execution code must not consult the
+    # legacy mode again.  ``dangerous`` therefore maps to the fully automatic
+    # profile while the immutable host-security floor remains in force.
+    mapping = {"safe": "safe", "trusted": "power", "dangerous": "autonomous"}
     try:
         return mapping[mode]
     except KeyError as exc:

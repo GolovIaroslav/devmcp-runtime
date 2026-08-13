@@ -33,14 +33,25 @@ REQUIRED_TOOLS = (
     "list_projects",
     "select_project",
     "current_project",
+    "local_state_snapshot",
     "project_checks",
     "run_project_check",
+    "run_checks_for_diff",
     "read_file",
+    "read_files",
+    "code_diagnostics",
+    "grant_root",
+    "grant_capability",
+    "list_capability_leases",
+    "revoke_capability_lease",
+    "end_task_scope",
     "list_dir",
     "list_files",
     "search_text",
+    "inspect_symbol",
     "apply_patch",
     "exec_command",
+    "exec_argv",
     "write_stdin",
     "kill_session",
     "read_output",
@@ -127,6 +138,8 @@ class MCPClient:
     session_id: str | None = None
     request_id: int = 0
     initialized: bool = False
+    permission_mode: str = "safe"
+    policy_profile: str | None = None
 
     def __enter__(self) -> "MCPClient":
         if self.url is None:
@@ -147,10 +160,16 @@ class MCPClient:
                 + " ".join(cmd or ["<empty>"])
             )
 
+        env_overrides = {
+            "AWS_SECRET_ACCESS_KEY": "COMPLIANCE_SHOULD_NOT_LEAK",
+            "OPENAI_API_KEY": "COMPLIANCE_SHOULD_NOT_LEAK",
+            "CODING_TOOLS_MCP_WORKSPACE": str(self.workspace),
+            "CODING_TOOLS_MCP_PERMISSION_MODE": self.permission_mode,
+        }
+        if self.policy_profile is not None:
+            env_overrides["DEVMCP_POLICY_PROFILE"] = self.policy_profile
         env = safe_server_env(
-            AWS_SECRET_ACCESS_KEY="COMPLIANCE_SHOULD_NOT_LEAK",
-            OPENAI_API_KEY="COMPLIANCE_SHOULD_NOT_LEAK",
-            CODING_TOOLS_MCP_WORKSPACE=str(self.workspace),
+            **env_overrides,
         )
         self.process = subprocess.Popen(
             cmd,
@@ -358,8 +377,16 @@ def stream_snapshot(stream: Any) -> str:
 
 def prepend_repo_pythonpath(env: dict[str, str]) -> dict[str, str]:
     """Ensure spawned server processes import the in-repo coding_tools_mcp package."""
+    entries = [str(ROOT)]
+    venv_candidates = [
+        *sorted((ROOT / ".venv" / "lib").glob("python*/site-packages")),
+        ROOT / ".venv" / "Lib" / "site-packages",
+    ]
+    entries.extend(str(path.resolve()) for path in venv_candidates if path.is_dir())
     existing = env.get("PYTHONPATH")
-    env["PYTHONPATH"] = str(ROOT) if not existing else str(ROOT) + os.pathsep + existing
+    if existing:
+        entries.append(existing)
+    env["PYTHONPATH"] = os.pathsep.join(entries)
     return env
 
 
