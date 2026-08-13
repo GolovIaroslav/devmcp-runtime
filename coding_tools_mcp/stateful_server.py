@@ -6,6 +6,8 @@ from typing import Any, Callable
 from . import server as core
 from .errors import ToolFailure
 from .state_checkpoint import read_state_checkpoint, write_state_checkpoint
+from .state_identity import BuildIdentityMixin
+from .state_mutations import StateMutationMixin
 from .state_snapshot import (
     collect_state_snapshot,
     compare_snapshots,
@@ -19,7 +21,7 @@ from .writer_lease import (
 )
 
 
-class StateManagedRuntime(core.Runtime):
+class StateManagedRuntime(StateMutationMixin, BuildIdentityMixin, core.Runtime):
     """Add cheap branch-level concurrency control around existing DevMCP tools."""
 
     def _state_owner(self) -> str:
@@ -48,7 +50,12 @@ class StateManagedRuntime(core.Runtime):
             env_sha=os.environ.get("DEVMCP_INSTALLED_RUNTIME_SHA"),
         )
 
-    def _state_snapshot(self, *, push_verified: bool | None = None) -> dict[str, Any]:
+    def _state_snapshot(
+        self,
+        *,
+        push_verified: bool | None = None,
+        remote_head: str | None = None,
+    ) -> dict[str, Any]:
         branch = git_text(
             self.workspace.root, ["branch", "--show-current"], env=self._git_env()
         )
@@ -63,6 +70,7 @@ class StateManagedRuntime(core.Runtime):
             logical_task=str((lease or {}).get("logical_task") or "") or None,
             git_env=self._git_env(),
             push_verified=push_verified,
+            authoritative_remote_head=remote_head,
             timestamp=now_iso(),
         )
 
@@ -135,8 +143,12 @@ class StateManagedRuntime(core.Runtime):
         *,
         outcome: str,
         push_verified: bool | None = None,
+        remote_head: str | None = None,
     ) -> dict[str, Any]:
-        actual = self._state_snapshot(push_verified=push_verified)
+        actual = self._state_snapshot(
+            push_verified=push_verified,
+            remote_head=remote_head,
+        )
         current_branch = str(actual.get("branch") or branch)
         return write_state_checkpoint(
             self.workspace.root,

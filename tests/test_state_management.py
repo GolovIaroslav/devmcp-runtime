@@ -3,10 +3,14 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from unittest import TestCase
 from unittest.mock import patch
 
+from coding_tools_mcp import server as core
 from coding_tools_mcp.errors import ToolFailure
+from coding_tools_mcp.state_identity import BuildIdentityMixin
+from coding_tools_mcp.state_mutations import StateMutationMixin
 from coding_tools_mcp.state_snapshot import (
     collect_state_snapshot,
     compare_snapshots,
@@ -14,6 +18,7 @@ from coding_tools_mcp.state_snapshot import (
     handoff_text,
     read_build_identity,
 )
+from coding_tools_mcp.stateful_server import StateManagedRuntime
 from coding_tools_mcp.writer_lease import acquire_writer_leases, release_writer_lease
 
 
@@ -39,6 +44,106 @@ def init_repo(root: Path) -> tuple[Path, str]:
 
 
 class StateManagementTests(TestCase):
+    def test_state_managed_runtime_wires_all_required_mutation_guards(self) -> None:
+        self.assertTrue(issubclass(StateManagedRuntime, StateMutationMixin))
+        self.assertIsNot(StateManagedRuntime.apply_patch, core.Runtime.apply_patch)
+        self.assertIsNot(StateManagedRuntime.git_commit, core.Runtime.git_commit)
+        for name in (
+            "git_create_branch",
+            "git_switch_branch",
+            "git_merge_remote_branch",
+            "git_push",
+            "service_update",
+        ):
+            self.assertIs(
+                getattr(StateManagedRuntime, name),
+                getattr(StateMutationMixin, name),
+                name,
+            )
+
+    def test_push_guard_verifies_authoritative_remote_head(self) -> None:
+        sha = "a" * 40
+
+        class PushBase:
+            def git_push(self, args: dict[str, object]) -> dict[str, object]:
+                return {
+                    "branch": "main",
+                    "remote": str(args.get("remote") or "origin"),
+                    "result": "pushed",
+                }
+
+        class PushHarness(StateMutationMixin, PushBase):
+            def __init__(self, root: Path) -> None:
+                self.workspace = SimpleNamespace(root=root)
+
+            def _git_env(self) -> dict[str, str]:
+                return {}
+
+            def _state_preflight(
+                self, operation: str, *, extra_branches: list[str] | None = None
+            ) -> tuple[str, dict[str, object] | None, dict[str, object]]:
+                return "main", None, {}
+
+            def _state_after(
+                self,
+                operation: str,
+                branch: str,
+                previous: dict[str, object] | None,
+                *,
+                outcome: str,
+                push_verified: bool | None = None,
+                remote_head: str | None = None,
+            ) -> dict[str, object]:
+                return {
+                    "operation": operation,
+                    "outcome": outcome,
+                    "push_verified": push_verified,
+                    "remote_head": remote_head,
+                }
+
+        with TemporaryDirectory() as tmp:
+            runtime = PushHarness(Path(tmp))
+            with patch(
+                "coding_tools_mcp.state_mutations.verify_remote_branch_head",
+                return_value=(True, sha, sha),
+            ):
+                result = runtime.git_push({"remote": "origin"})
+            self.assertEqual(result["remote_verification"]["remote_head"], sha)
+            self.assertTrue(result["state_checkpoint"]["push_verified"])
+
+            with patch(
+                "coding_tools_mcp.state_mutations.verify_remote_branch_head",
+                return_value=(False, sha, "b" * 40),
+            ):
+                with self.assertRaises(ToolFailure) as mismatch:
+                    runtime.git_push({"remote": "origin"})
+            self.assertEqual(mismatch.exception.code, "REMOTE_HEAD_MISMATCH")
+            self.assertEqual(mismatch.exception.details["local_head"], sha)
+            self.assertEqual(mismatch.exception.details["remote_head"], "b" * 40)
+            self.assertFalse(
+                mismatch.exception.details["state_checkpoint"]["push_verified"]
+            )
+
+    def test_build_identity_is_reported_by_server_info_and_service_status(self) -> None:
+        sha = "a" * 40
+
+        class IdentityBase:
+            def server_info_payload(self) -> dict[str, object]:
+                return {"version": "1.2.3"}
+
+            def service_status(self, args: dict[str, object]) -> dict[str, object]:
+                return {"stdout": "DevMCP Runtime 1.2.3"}
+
+        class IdentityHarness(BuildIdentityMixin, IdentityBase):
+            def _build_identity(self) -> dict[str, object]:
+                return {"git_sha": sha, "package_version": "1.2.3"}
+
+        runtime = IdentityHarness()
+        self.assertEqual(
+            runtime.server_info_payload()["build_identity"]["git_sha"], sha
+        )
+        self.assertEqual(runtime.service_status({})["build_identity"]["git_sha"], sha)
+
     def test_writer_is_single_owner_with_release_and_ttl_recovery(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -95,6 +200,40 @@ class StateManagementTests(TestCase):
             self.assertIn("dirty_paths", drift)
             self.assertIn("untracked_paths", drift)
             self.assertIn("content_hashes", drift)
+
+    def test_remote_tracking_head_is_not_reported_as_authoritative_remote_head(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, head = init_repo(root)
+            remote = root / "remote.git"
+            subprocess.run(["git", "init", "-q", "--bare", remote], check=True)
+            subprocess.run(
+                ["git", "remote", "add", "origin", str(remote)], cwd=repo, check=True
+            )
+            subprocess.run(
+                ["git", "push", "-qu", "origin", "main"], cwd=repo, check=True
+            )
+            kwargs = dict(
+                project_id="fixture",
+                installed_service_version="1",
+                installed_service_git_sha=head,
+                protocol_version="test",
+                writer_owner=None,
+                logical_task=None,
+            )
+            local_only = collect_state_snapshot(repo, **kwargs)
+            self.assertEqual(local_only["remote_tracking_head"], head)
+            self.assertIsNone(local_only["remote_head"])
+            verified = collect_state_snapshot(
+                repo,
+                **kwargs,
+                authoritative_remote_head=head,
+                push_verified=True,
+            )
+            self.assertEqual(verified["remote_head"], head)
+            self.assertTrue(verified["push_verified"])
 
     def test_sensitive_untracked_name_is_not_persisted(self) -> None:
         with TemporaryDirectory() as tmp:

@@ -102,7 +102,7 @@ dogfood-mcp:
 dogfood-runner:
 	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) benchmarks/dogfood/mcp_deterministic_runner.py \
 		--endpoint http://127.0.0.1:$(DOGFOOD_PORT)/mcp \
-		--server-command "$(PYTHON) -m coding_tools_mcp --workspace {workspace} --host 127.0.0.1 --port $(DOGFOOD_PORT)"
+		--server-command "$(PYTHON) -m coding_tools_mcp --workspace {workspace} --host 127.0.0.1 --port $(DOGFOOD_PORT) --permission-mode trusted"
 
 dogfood-smoke: dogfood-mcp dogfood-runner
 

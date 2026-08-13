@@ -15,8 +15,10 @@ import urllib.parse
 import urllib.request
 from collections.abc import Callable
 from typing import Any
+from unittest.mock import patch
 
 from coding_tools_mcp.server import MAX_HTTP_REQUEST_BYTES
+from scripts.mcp_smoke import command_succeeded
 from tests.compliance.mcp_client import (
     FORBIDDEN_TOOL_NAMES,
     FORBIDDEN_TOOL_TERMS,
@@ -32,6 +34,29 @@ from tests.compliance.test_support import ComplianceTestCase
 
 
 class MCPContractTests(ComplianceTestCase):
+    def test_mcp_smoke_accepts_current_exec_command_success_contract(self) -> None:
+        server_command = (
+            f"{sys.executable} -m coding_tools_mcp --workspace {{workspace}} "
+            "--host 127.0.0.1 --port {port} --sandbox-backend unsafe "
+            "--permission-mode trusted"
+        )
+        with patch.dict(
+            os.environ, {"CODING_TOOLS_MCP_SERVER_CMD": server_command}, clear=False
+        ):
+            with MCPClient(self.workspace.root, permission_mode="trusted") as client:
+                result = self.assert_tool_success(
+                    client.call_tool(
+                        "exec_command",
+                        {
+                            "cmd": "python --version",
+                            "timeout_ms": 30000,
+                            "yield_time_ms": 30000,
+                        },
+                    )
+                )
+        self.assertEqual(result.get("status"), "success", result)
+        self.assertTrue(command_succeeded(result), result)
+
     def test_initialize_succeeds_and_tools_list_is_available(self) -> None:
         tools = self.client.list_tools()
         self.assertIsInstance(tools, list)
@@ -436,6 +461,25 @@ class MCPContractTests(ComplianceTestCase):
 
         still_alive = self.client.rpc("ping", {})
         self.assertEqual(still_alive, {})
+
+    def test_http_post_accepts_tunnel_and_tool_subpaths(self) -> None:
+        body = b'{"jsonrpc":"2.0","id":1,"method":"ping","params":{}}'
+        session_header = {"Mcp-Session-Id": str(self.client.session_id)}
+        for path in (
+            "/",
+            "/mcp",
+            "/mcp/mcp",
+            "/list_projects",
+            "/current_project",
+            "/mcp/list_projects",
+            "/mcp/current_project",
+        ):
+            with self.subTest(path=path):
+                status, response = self.raw_http_post(
+                    body, headers=session_header, path=path
+                )
+                self.assertEqual(status, 200, f"Path {path} returned status {status}")
+                self.assertEqual(response.get("result"), {})
 
     def test_http_discovery_endpoints_return_server_card_metadata(self) -> None:
         self.assertIsNotNone(self.client.url)

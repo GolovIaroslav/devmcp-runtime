@@ -20,6 +20,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from tests.compliance.mcp_client import MCPClient  # noqa: E402
 
 
+def command_succeeded(result: dict[str, object]) -> bool:
+    """Return whether an exec_command result represents a clean command exit."""
+    return (
+        result.get("status") == "success"
+        and result.get("command_success") is True
+        and result.get("exit_code") == 0
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("url", help="MCP endpoint, e.g. http://127.0.0.1:8765/mcp")
@@ -55,7 +64,7 @@ def main(argv: list[str] | None = None) -> int:
                     "exec_command",
                     {"cmd": cmd, "timeout_ms": 30000, "yield_time_ms": 30000},
                 )["structuredContent"]
-                if result.get("status") != "exited" or result.get("exit_code") != 0:
+                if not command_succeeded(result):
                     raise SystemExit(f"command failed: {cmd!r} -> {result}")
                 print(f"ok: {cmd}")
     except BaseException as exc:

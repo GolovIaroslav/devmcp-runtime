@@ -3702,6 +3702,7 @@ Maven home: /usr/share/maven
             init_git(repo)
             tracked.write_text("value = 2\n", encoding="utf-8")
             subprocess.run(["git", "add", "tracked.py"], cwd=repo, check=True)
+            (repo / "untracked.py").write_text("value = 3\n", encoding="utf-8")
             installed_sha = "a" * 40
             with patch.dict(
                 os.environ,
@@ -3721,6 +3722,9 @@ Maven home: /usr/share/maven
             )
             self.assertIn("tracked.py", snapshot["dirty_paths"])
             self.assertIn("tracked.py", snapshot["staged_paths"])
+            self.assertIn("untracked.py", snapshot["dirty_paths"])
+            self.assertIn("untracked.py", snapshot["untracked_paths"])
+            self.assertNotIn("untracked.py", snapshot["staged_paths"])
             self.assertEqual(len(str(snapshot["head"])), 40)
 
     def test_inspect_symbol_returns_definition_references_and_tests(self) -> None:

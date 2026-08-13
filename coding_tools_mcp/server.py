@@ -3074,7 +3074,16 @@ class Runtime:
                 str(item.get("path", ""))
                 for item in entries
                 if isinstance(item, dict)
-                and str(item.get("index_status", " ")) != " "
+                and str(item.get("index_status", " ")) not in {" ", "?"}
+                and item.get("path")
+            }
+        )
+        untracked_paths = sorted(
+            {
+                str(item.get("path", ""))
+                for item in entries
+                if isinstance(item, dict)
+                and str(item.get("index_status", " ")) == "?"
                 and item.get("path")
             }
         )
@@ -3094,6 +3103,7 @@ class Runtime:
             "behind": status.get("behind", 0),
             "dirty_paths": dirty_paths,
             "staged_paths": staged_paths,
+            "untracked_paths": untracked_paths,
             "service": {
                 "version": __version__,
                 "installed_sha": installed_sha,
@@ -12171,6 +12181,16 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             head_only=head_only,
         )
 
+    def _is_mcp_path(self, path: str) -> bool:
+        normalized = posixpath.normpath(path)
+        if normalized in {"/mcp", "/"} or normalized.startswith("/mcp/"):
+            return True
+        tool_name = normalized.lstrip("/")
+        try:
+            return tool_name in self.runtime.exposed_tool_names()
+        except Exception:
+            return False
+
     def do_GET(self) -> None:
         self.handle_metadata_request(head_only=False)
 
@@ -12179,7 +12199,8 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
 
     def do_DELETE(self) -> None:
         request_path = self.path.split("?", 1)[0]
-        if posixpath.normpath(request_path) != MCP_ENDPOINT_PATH:
+        normalized = posixpath.normpath(request_path)
+        if not self._is_mcp_path(normalized):
             self.send_json({"error": "Unknown endpoint"}, status=404)
             return
         if not self.is_authorized():
@@ -12196,16 +12217,20 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
 
     def do_OPTIONS(self) -> None:
         request_path = self.path.split("?", 1)[0]
-        if posixpath.normpath(request_path) not in {
-            MCP_ENDPOINT_PATH,
-            "/.well-known/mcp.json",
-            "/.well-known/mcp/server-card.json",
-            "/.well-known/oauth-authorization-server",
-            "/.well-known/oauth-protected-resource",
-            "/oauth/authorize",
-            "/oauth/token",
-            "/oauth/register",
-        }:
+        normalized = posixpath.normpath(request_path)
+        if not (
+            self._is_mcp_path(normalized)
+            or normalized
+            in {
+                "/.well-known/mcp.json",
+                "/.well-known/mcp/server-card.json",
+                "/.well-known/oauth-authorization-server",
+                "/.well-known/oauth-protected-resource",
+                "/oauth/authorize",
+                "/oauth/token",
+                "/oauth/register",
+            }
+        ):
             self.send_json({"error": "Unknown endpoint"}, status=404)
             return
         origin = self.headers.get("Origin")
@@ -12243,7 +12268,13 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         if normalized == "/oauth/authorize" and not head_only:
             self.handle_oauth_authorize_get()
             return
-        if normalized == MCP_ENDPOINT_PATH:
+        if normalized in {"/.well-known/mcp.json", "/.well-known/mcp/server-card.json"}:
+            self.send_json(
+                server_card_payload(self.runtime, oauth_base_url=self.oauth_base_url()),
+                head_only=head_only,
+            )
+            return
+        if self._is_mcp_path(normalized):
             origin = self.headers.get("Origin")
             if origin and not is_allowed_origin(origin):
                 self.send_json(
@@ -12261,12 +12292,6 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
                 head_only=head_only,
             )
             return
-        if normalized in {"/.well-known/mcp.json", "/.well-known/mcp/server-card.json"}:
-            self.send_json(
-                server_card_payload(self.runtime, oauth_base_url=self.oauth_base_url()),
-                head_only=head_only,
-            )
-            return
         self.send_json({"error": "Unknown endpoint"}, status=404, head_only=head_only)
 
     def do_POST(self) -> None:
@@ -12281,7 +12306,7 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         if normalized == "/oauth/register":
             self.handle_oauth_register()
             return
-        if normalized != MCP_ENDPOINT_PATH:
+        if not self._is_mcp_path(normalized):
             self.send_rpc_error(-32601, "Unknown endpoint", status=404)
             return
         origin = self.headers.get("Origin")

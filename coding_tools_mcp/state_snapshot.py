@@ -18,7 +18,7 @@ DRIFT_FIELDS = (
     "branch",
     "local_head",
     "upstream",
-    "remote_head",
+    "remote_tracking_head",
     "dirty_paths",
     "staged_paths",
     "untracked_paths",
@@ -156,6 +156,7 @@ def collect_state_snapshot(
     logical_task: str | None,
     git_env: dict[str, str] | None = None,
     push_verified: bool | None = None,
+    authoritative_remote_head: str | None = None,
     timestamp: str | None = None,
 ) -> dict[str, Any]:
     project = project.resolve()
@@ -166,7 +167,7 @@ def collect_state_snapshot(
         ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
         env=git_env,
     )
-    remote_head = (
+    remote_tracking_head = (
         git_text(project, ["rev-parse", upstream], env=git_env) if upstream else None
     )
     unstaged = git_paths(project, ["diff", "--name-only", "-z"], env=git_env)
@@ -204,7 +205,8 @@ def collect_state_snapshot(
         "branch": branch,
         "local_head": local_head,
         "upstream": upstream,
-        "remote_head": remote_head,
+        "remote_head": authoritative_remote_head,
+        "remote_tracking_head": remote_tracking_head,
         "pr_number": None,
         "pr_head": None,
         "dirty_paths": dirty_paths,
@@ -280,6 +282,7 @@ def handoff_text(
         f"local_head={current.get('local_head')}",
         f"upstream={current.get('upstream')}",
         f"remote_head={current.get('remote_head')}",
+        f"remote_tracking_head={current.get('remote_tracking_head')}",
         f"dirty_paths={json.dumps(current.get('dirty_paths', []), ensure_ascii=False)}",
         f"staged_paths={json.dumps(current.get('staged_paths', []), ensure_ascii=False)}",
         f"untracked_paths={json.dumps(current.get('untracked_paths', []), ensure_ascii=False)}",
