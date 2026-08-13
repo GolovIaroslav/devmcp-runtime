@@ -501,6 +501,7 @@ def main(argv: list[str] | None = None) -> int:
 
     report = run_benchmark(args)
     write_reports(report, args.report_json, args.report_md)
+    print(json.dumps(report, indent=2, sort_keys=True))
     return 0 if report["conclusion"] == "PASS" else 1
 
 
