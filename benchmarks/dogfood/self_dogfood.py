@@ -236,7 +236,12 @@ def exercise(client: McpHttpClient, total_lines: int) -> None:
         call(
             client,
             "read_files",
-            {"paths": [LARGE_FILE, TARGET_TEST]},
+            {
+                "paths": [
+                    {"path": LARGE_FILE, "start_line": total_lines - 3},
+                    TARGET_TEST,
+                ]
+            },
         ),
         "DOGFOOD_END",
         "read_files large source",
