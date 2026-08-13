@@ -2363,15 +2363,16 @@ class Runtime:
             write=write,
             task_scope_id=self._task_scope_id(),
         )
-        if lease_id is None:
+        if lease_id is None and self.execution_mode != "build":
             raise ToolFailure(
                 "PATH_OUTSIDE_WORKSPACE",
                 "Path is outside the current authorized root set.",
                 category="security",
             )
-        used = getattr(self.request_context, "used_capability_leases", None)
-        if isinstance(used, set):
-            used.add(lease_id)
+        if lease_id is not None:
+            used = getattr(self.request_context, "used_capability_leases", None)
+            if isinstance(used, set):
+                used.add(lease_id)
 
     def _matching_capability_lease(
         self,

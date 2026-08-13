@@ -43,11 +43,12 @@ class HTTPSessionStateTests(unittest.TestCase):
         active_project_file: Path | None = None,
         logical_context_ttl: int = 3600,
         completed_job_ttl: int = 300,
+        execution_mode: str = "build",
     ) -> Iterator[MCPClient]:
         command = (
             "{python} -m coding_tools_mcp --workspace {workspace} "
             f"--project-root {shlex.quote(str(project_root))} "
-            "--policy-profile autonomous --host 127.0.0.1 --port {port}"
+            f"--execution-mode {execution_mode} --host 127.0.0.1 --port {{port}}"
         )
         if os.environ.get("DEVMCP_HTTP_TEST_NESTED") == "1":
             # Local self-dogfood already runs inside DevMCP bwrap; a second
@@ -349,7 +350,7 @@ class HTTPSessionStateTests(unittest.TestCase):
             target = library / "lib.txt"
             target.write_text("shared-library\n", encoding="utf-8")
 
-            with self._server(repo_a, projects) as client_a:
+            with self._server(repo_a, projects, execution_mode="plan") as client_a:
                 selected_a = structured(
                     client_a.call_tool("select_project", {"project": "a"})
                 )

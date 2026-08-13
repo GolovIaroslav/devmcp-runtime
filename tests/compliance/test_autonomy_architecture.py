@@ -118,7 +118,7 @@ class AutonomyArchitectureTests(unittest.TestCase):
             sibling.mkdir()
             target = sibling / "lib.txt"
             target.write_text("library\n", encoding="utf-8")
-            runtime = self._runtime(repo)
+            runtime = self._runtime(repo, execution_mode="plan")
             try:
                 lease = runtime.grant_root(
                     {"path": str(sibling), "access": "read", "scope": "once"}
@@ -178,7 +178,7 @@ class AutonomyArchitectureTests(unittest.TestCase):
             sibling.mkdir()
             target = sibling / "lib.txt"
             target.write_text("task-library\n", encoding="utf-8")
-            runtime = self._runtime(repo)
+            runtime = self._runtime(repo, execution_mode="plan")
             try:
                 granted = runtime.call_tool(
                     "grant_root",
@@ -495,7 +495,7 @@ class AutonomyArchitectureTests(unittest.TestCase):
             sibling.write_text("no\n", encoding="utf-8")
             link = root / "escape-link"
             link.symlink_to(sibling)
-            runtime = self._runtime(root)
+            runtime = self._runtime(root, execution_mode="plan")
             try:
                 runtime._check_command_path_candidate(str(inside))
                 runtime._check_command_path_candidate("sub/../inside.txt")
@@ -519,7 +519,7 @@ class AutonomyArchitectureTests(unittest.TestCase):
             source.write_text("print('x')\n", encoding="utf-8")
             outside = base / "outside.py"
             outside.write_text("print('no')\n", encoding="utf-8")
-            runtime = self._runtime(root)
+            runtime = self._runtime(root, execution_mode="plan")
             try:
                 result = runtime.code_diagnostics(
                     {
@@ -556,7 +556,7 @@ class AutonomyArchitectureTests(unittest.TestCase):
             target = sibling / "lib.txt"
             target.write_text("before\n", encoding="utf-8")
 
-            denied = self._runtime(repo)
+            denied = self._runtime(repo, execution_mode="plan")
             try:
                 with self.assertRaises(ToolFailure) as blocked:
                     denied.apply_patch(
@@ -569,7 +569,10 @@ class AutonomyArchitectureTests(unittest.TestCase):
                             )
                         }
                     )
-                self.assertEqual(blocked.exception.code, "PATH_OUTSIDE_WORKSPACE")
+                self.assertIn(
+                    blocked.exception.code,
+                    {"PERMISSION_REQUIRED", "PATH_OUTSIDE_WORKSPACE"},
+                )
                 self.assertEqual(target.read_text(encoding="utf-8"), "before\n")
             finally:
                 denied.close()

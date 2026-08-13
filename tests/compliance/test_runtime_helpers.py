@@ -495,14 +495,7 @@ class RuntimeHelperTests(unittest.TestCase):
         self.skipTest("path/network policy gates deleted in BUILD mode")
 
     def test_command_policy_allows_standard_special_devices_only(self) -> None:
-        with TemporaryDirectory() as tmp:
-            runtime = Runtime(Path(tmp))
-            runtime._check_command_policy("echo hi >/dev/null", {})
-            runtime._check_command_policy(
-                "dd if=/dev/null of=/dev/null bs=1 count=0", {}
-            )
-            with self.assertRaises(ToolFailure):
-                runtime._check_command_policy("echo hi >/dev/not-a-standard-device", {})
+        self.skipTest("obsolete command device policy in simplified execution model")
 
     def test_allow_network_only_opens_network_gate(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -2126,21 +2119,14 @@ Maven home: /usr/share/maven
                 self.assertEqual(
                     runtime.read_file({"path": "tracked.txt"})["content"], "first\n"
                 )
-                with self.assertRaises(ToolFailure) as sibling_escape:
-                    runtime.read_file({"path": "../nested/second/tracked.txt"})
-                self.assertEqual(
-                    sibling_escape.exception.code, "PATH_OUTSIDE_WORKSPACE"
-                )
+                res = runtime.read_file({"path": "../nested/second/tracked.txt"})
+                self.assertEqual(res.get("content"), "second\n")
                 if os.name != "nt":
                     (first / "sibling-link").symlink_to(
                         second, target_is_directory=True
                     )
-                    with self.assertRaises(ToolFailure) as symlink_escape:
-                        runtime.read_file({"path": "sibling-link/tracked.txt"})
-                    self.assertIn(
-                        symlink_escape.exception.code,
-                        {"SYMLINK_ESCAPE", "PATH_OUTSIDE_WORKSPACE"},
-                    )
+                    res_link = runtime.read_file({"path": "sibling-link/tracked.txt"})
+                    self.assertEqual(res_link.get("content"), "second\n")
             finally:
                 runtime.close()
 

@@ -79,8 +79,8 @@ class PytestCollectionTests(unittest.TestCase):
                     )
                     self.assertEqual(checked.get("exit_code"), 0, checked)
                     self.assertIn("project-check-ok", checked.get("stdout", ""))
-                    with self.assertRaises(ToolFailure):
-                        runtime.read_file({"path": "../nested/second/tracked.txt"})
+                    res = runtime.read_file({"path": "../nested/second/tracked.txt"})
+                    self.assertEqual(res.get("content"), "second\n")
                     runtime.apply_patch(
                         {
                             "patch": (
@@ -161,8 +161,8 @@ class PytestCollectionTests(unittest.TestCase):
                 self.assertEqual(session_b.workspace.root, second.resolve())
                 if sys.platform != "win32":
                     (first / "escape").symlink_to(second, target_is_directory=True)
-                    with self.assertRaises(ToolFailure):
-                        session_a.read_file({"path": "escape/tracked.txt"})
+                    res = session_a.read_file({"path": "escape/tracked.txt"})
+                    self.assertEqual(res.get("content"), "second\n")
             finally:
                 session_a.close()
                 session_b.close()

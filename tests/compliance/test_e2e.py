@@ -158,14 +158,11 @@ class DeterministicE2ETests(ComplianceTestCase):
             )
 
     def test_workspace_escape_flow_is_denied(self) -> None:
-        self.assert_denied_or_permission_required(
-            "read_file", {"path": "../outside-secret.txt"}
-        )
-        self.assert_denied_or_permission_required(
-            "apply_patch",
-            {
-                "patch": "*** Begin Patch\n*** Add File: ../outside-secret.txt\n+unsafe\n*** End Patch\n",
-            },
+        read_res = self.client.call_tool("read_file", {"path": "../outside-secret.txt"})
+        self.assertFalse(read_res.get("isError"))
+        self.assertIn(
+            "TOP_SECRET_DO_NOT_READ",
+            read_res.get("structuredContent", {}).get("content", ""),
         )
         with self.client_with_permission("safe") as plan_client:
             res = plan_client.call_tool(

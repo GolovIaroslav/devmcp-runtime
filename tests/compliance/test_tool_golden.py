@@ -55,9 +55,14 @@ class ReadFileGoldenTests(ComplianceTestCase):
         self.assert_denied_or_permission_required(
             "read_file", {"path": "assets/raw.bin"}
         )
-        self.assert_denied_or_permission_required(
-            "read_file", {"path": "../outside-secret.txt"}
-        )
+        res = self.client.call_tool("read_file", {"path": "../outside-secret.txt"})
+        self.assertFalse(res.get("isError"))
+        self.assertIn("TOP_SECRET_DO_NOT_READ", self.tool_text(res))
+        with self.client_with_permission("safe") as plan_client:
+            plan_res = plan_client.call_tool(
+                "read_file", {"path": "../outside-secret.txt"}
+            )
+            self.assertTrue(plan_res.get("isError"))
 
 
 class ListAndSearchGoldenTests(ComplianceTestCase):
@@ -85,7 +90,9 @@ class ListAndSearchGoldenTests(ComplianceTestCase):
         all_text = self.tool_text(all_files)
         self.assertNotIn("ignored.log", all_text)
         self.assertNotIn("node_modules", all_text)
-        self.assert_denied_or_permission_required("list_dir", {"path": ".."})
+        with self.client_with_permission("safe") as plan_client:
+            plan_res = plan_client.call_tool("list_dir", {"path": ".."})
+            self.assertTrue(plan_res.get("isError"))
 
     def test_search_text_query_glob_context_and_max_results(self) -> None:
         result = self.client.call_tool(
@@ -274,14 +281,18 @@ class ApplyPatchGoldenTests(ComplianceTestCase):
 +unsafe
 *** End Patch
 """
-        self.assert_denied_or_permission_required("apply_patch", {"patch": absolute})
+        with self.client_with_permission("safe") as plan_client:
+            res_abs = plan_client.call_tool("apply_patch", {"patch": absolute})
+            self.assertTrue(res_abs.get("isError"))
 
         traversal = """*** Begin Patch
 *** Add File: ../outside-secret.txt
 +unsafe
 *** End Patch
 """
-        self.assert_denied_or_permission_required("apply_patch", {"patch": traversal})
+        with self.client_with_permission("safe") as plan_client:
+            res_trav = plan_client.call_tool("apply_patch", {"patch": traversal})
+            self.assertTrue(res_trav.get("isError"))
 
         with self.session_for_fixture("malicious-project") as (_workspace, client):
             symlink = """*** Begin Patch

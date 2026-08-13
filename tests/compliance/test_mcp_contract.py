@@ -238,13 +238,16 @@ class MCPContractTests(ComplianceTestCase):
         self.assertIn("return a - b", text)
         self.assertNotEqual(text, json.dumps(payload, sort_keys=True))
 
-        failure = self.assert_denied_or_permission_required(
-            "read_file", {"path": "../outside-secret.txt"}
-        )
-        self.assertTrue(failure)
+        with self.client_with_permission("safe") as plan_client:
+            failure = plan_client.call_tool(
+                "read_file", {"path": "../outside-secret.txt"}
+            )
+            self.assertTrue(failure.get("isError"))
 
     def test_tool_error_result_has_mcp_error_shape_and_readable_text(self) -> None:
-        result = self.client.call_tool("read_file", {"path": "../outside-secret.txt"})
+        result = self.client.call_tool(
+            "read_file", {"path": "non_existent_file_xyz.txt"}
+        )
         self.assertTrue(result.get("isError"), f"expected tool error, got {result!r}")
         text = self.assert_content_text_is_agent_readable(result)
         payload = result.get("structuredContent")
