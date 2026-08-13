@@ -21,7 +21,9 @@ def init_repo(root: Path) -> tuple[Path, str]:
     repo = root / "repo"
     repo.mkdir()
     subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"], cwd=repo, check=True
+    )
     subprocess.run(["git", "config", "user.name", "State Test"], cwd=repo, check=True)
     (repo / "tracked.txt").write_text("one\n", encoding="utf-8")
     subprocess.run(["git", "add", "tracked.txt"], cwd=repo, check=True)
@@ -43,7 +45,12 @@ class StateManagementTests(TestCase):
             repo, _head = init_repo(root)
             with patch.dict("os.environ", {"DEVMCP_CONFIG_DIR": str(root / "config")}):
                 acquire_writer_leases(
-                    repo, ["main"], owner="a", logical_task="task-a", now=100, ttl_seconds=10
+                    repo,
+                    ["main"],
+                    owner="a",
+                    logical_task="task-a",
+                    now=100,
+                    ttl_seconds=10,
                 )
                 with self.assertRaises(ToolFailure) as conflict:
                     acquire_writer_leases(
@@ -51,10 +58,17 @@ class StateManagementTests(TestCase):
                     )
                 self.assertEqual(conflict.exception.code, "WRITER_LEASE_CONFLICT")
                 self.assertTrue(
-                    release_writer_lease(repo, "main", owner="a", logical_task="task-a", now=102)
+                    release_writer_lease(
+                        repo, "main", owner="a", logical_task="task-a", now=102
+                    )
                 )
                 acquire_writer_leases(
-                    repo, ["main"], owner="b", logical_task="task-b", now=103, ttl_seconds=1
+                    repo,
+                    ["main"],
+                    owner="b",
+                    logical_task="task-b",
+                    now=103,
+                    ttl_seconds=1,
                 )
                 recovered = acquire_writer_leases(
                     repo, ["main"], owner="c", logical_task="task-c", now=105
@@ -118,7 +132,7 @@ class StateManagementTests(TestCase):
                 f'installed_runtime_sha = "{sha}"\n'
                 'installed_runtime_branch = "main"\n'
                 'installed_runtime_source_repo = "github.com/example/repo"\n'
-                'installed_runtime_dirty_build = false\n',
+                "installed_runtime_dirty_build = false\n",
                 encoding="utf-8",
             )
             identity = read_build_identity(
@@ -147,3 +161,38 @@ class StateManagementTests(TestCase):
             self.assertIn(f"local_head={sha}", text)
             self.assertIn(f"installed_service_git_sha={sha}", text)
             self.assertIn("github_external_state=not_collected_by_devmcp", text)
+
+    def test_untracked_disappearance_is_detected(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, head = init_repo(root)
+            probe = repo / "temporary.txt"
+            probe.write_text("temporary\n", encoding="utf-8")
+            kwargs = dict(
+                project_id="fixture",
+                installed_service_version="1",
+                installed_service_git_sha=head,
+                protocol_version="test",
+                writer_owner=None,
+                logical_task=None,
+            )
+            before = collect_state_snapshot(repo, **kwargs)
+            probe.unlink()
+            after = collect_state_snapshot(repo, **kwargs)
+            self.assertIn("untracked_paths", compare_snapshots(before, after))
+
+    def test_old_service_sha_is_observable_without_git_guessing(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, head = init_repo(root)
+            state = collect_state_snapshot(
+                repo,
+                project_id="fixture",
+                installed_service_version="1",
+                installed_service_git_sha="b" * 40,
+                protocol_version="test",
+                writer_owner=None,
+                logical_task=None,
+            )
+            self.assertEqual(state["local_head"], head)
+            self.assertNotEqual(state["installed_service_git_sha"], state["local_head"])

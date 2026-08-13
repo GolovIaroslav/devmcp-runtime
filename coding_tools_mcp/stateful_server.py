@@ -29,7 +29,9 @@ class StateManagedRuntime(core.Runtime):
         return self._task_scope_id()
 
     def _state_branch(self) -> str:
-        branch = git_text(self.workspace.root, ["branch", "--show-current"], env=self._git_env())
+        branch = git_text(
+            self.workspace.root, ["branch", "--show-current"], env=self._git_env()
+        )
         if not branch:
             raise ToolFailure(
                 "INVALID_STATE",
@@ -46,10 +48,10 @@ class StateManagedRuntime(core.Runtime):
             env_sha=os.environ.get("DEVMCP_INSTALLED_RUNTIME_SHA"),
         )
 
-    def _state_snapshot(
-        self, *, push_verified: bool | None = None
-    ) -> dict[str, Any]:
-        branch = git_text(self.workspace.root, ["branch", "--show-current"], env=self._git_env())
+    def _state_snapshot(self, *, push_verified: bool | None = None) -> dict[str, Any]:
+        branch = git_text(
+            self.workspace.root, ["branch", "--show-current"], env=self._git_env()
+        )
         lease = inspect_writer_lease(self.workspace.root, branch) if branch else None
         return collect_state_snapshot(
             self.workspace.root,
@@ -118,7 +120,10 @@ class StateManagedRuntime(core.Runtime):
             owner=self._state_owner(),
             logical_task=self._state_task(),
             outcome="started",
-            previous_checkpoint_id=str((expected_record or {}).get("checkpoint_id") or "") or None,
+            previous_checkpoint_id=str(
+                (expected_record or {}).get("checkpoint_id") or ""
+            )
+            or None,
         )
         return branch, expected_record, actual
 
@@ -142,7 +147,8 @@ class StateManagedRuntime(core.Runtime):
             owner=self._state_owner(),
             logical_task=self._state_task(),
             outcome=outcome,
-            previous_checkpoint_id=str((previous or {}).get("checkpoint_id") or "") or None,
+            previous_checkpoint_id=str((previous or {}).get("checkpoint_id") or "")
+            or None,
         )
 
     def _guarded(
@@ -162,3 +168,26 @@ class StateManagedRuntime(core.Runtime):
             raise
         checkpoint = self._state_after(operation, branch, previous, outcome="success")
         return result, checkpoint
+
+    def apply_patch(self, args: dict[str, Any]) -> dict[str, Any]:
+        result, checkpoint = self._guarded(
+            "apply_patch", lambda: core.Runtime.apply_patch(self, args)
+        )
+        result["state_checkpoint"] = checkpoint
+        return result
+
+    def git_commit(self, args: dict[str, Any]) -> dict[str, Any]:
+        result, checkpoint = self._guarded(
+            "git_commit", lambda: core.Runtime.git_commit(self, args)
+        )
+        result["state_checkpoint"] = checkpoint
+        return result
+
+
+def main(argv: list[str] | None = None) -> int:
+    original_runtime = core.Runtime
+    setattr(core, "Runtime", StateManagedRuntime)
+    try:
+        return core.main(argv)
+    finally:
+        setattr(core, "Runtime", original_runtime)

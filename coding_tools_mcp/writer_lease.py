@@ -68,8 +68,7 @@ def acquire_writer_leases(
     acquired: dict[str, dict[str, Any]] = {}
     with project_lock(project):
         existing = {
-            branch: read_json(lease_path(project, branch))
-            for branch in unique_branches
+            branch: read_json(lease_path(project, branch)) for branch in unique_branches
         }
         conflicts: list[dict[str, Any]] = []
         for branch, record in existing.items():

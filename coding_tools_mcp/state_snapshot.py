@@ -118,7 +118,11 @@ def content_hashes(project: Path, paths: list[str]) -> dict[str, str]:
             stat = candidate.lstat()
         except OSError:
             continue
-        if candidate.is_symlink() or not candidate.is_file() or stat.st_size > MAX_HASH_BYTES:
+        if (
+            candidate.is_symlink()
+            or not candidate.is_file()
+            or stat.st_size > MAX_HASH_BYTES
+        ):
             continue
         digest = hashlib.sha256()
         try:
@@ -162,7 +166,9 @@ def collect_state_snapshot(
         ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
         env=git_env,
     )
-    remote_head = git_text(project, ["rev-parse", upstream], env=git_env) if upstream else None
+    remote_head = (
+        git_text(project, ["rev-parse", upstream], env=git_env) if upstream else None
+    )
     unstaged = git_paths(project, ["diff", "--name-only", "-z"], env=git_env)
     staged = git_paths(project, ["diff", "--cached", "--name-only", "-z"], env=git_env)
     untracked = git_paths(
@@ -173,7 +179,9 @@ def collect_state_snapshot(
     staged_paths = sorted({inventory_key(item) for item in staged})
     untracked_paths = sorted({inventory_key(item) for item in untracked})
     hashes = content_hashes(project, sorted(set(dirty_raw) | set(untracked)))
-    repo = sanitize_repo_url(git_text(project, ["remote", "get-url", "origin"], env=git_env))
+    repo = sanitize_repo_url(
+        git_text(project, ["remote", "get-url", "origin"], env=git_env)
+    )
     last_raw = git_text(
         project,
         ["log", "-1", "--format=%H%x1f%P%x1f%an%x1f%aI%x1f%s"],
@@ -292,9 +300,13 @@ def handoff_text(
         and current.get("local_head")
         and current.get("installed_service_git_sha") != current.get("local_head")
     ):
-        lines.append("next_safe_action=verify or update the installed DevMCP service build")
+        lines.append(
+            "next_safe_action=verify or update the installed DevMCP service build"
+        )
     elif current.get("dirty_paths") or current.get("untracked_paths"):
         lines.append("next_safe_action=review the current working-tree inventory")
     else:
-        lines.append("next_safe_action=refresh authoritative GitHub PR/CI state before remote decisions")
+        lines.append(
+            "next_safe_action=refresh authoritative GitHub PR/CI state before remote decisions"
+        )
     return "\n".join(lines)
