@@ -516,6 +516,21 @@ def prepare_workspace(base_dir: Path | None = None) -> tuple[Path, Path]:
     (root / "outside-secret.txt").write_text(
         "DOGFOOD-OUTSIDE-SECRET\n", encoding="utf-8"
     )
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=str(workspace), check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "dogfood@example.invalid"],
+        cwd=str(workspace),
+        check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Dogfood Runner"], cwd=str(workspace), check=True
+    )
+    subprocess.run(["git", "add", "-A"], cwd=str(workspace), check=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "initial dogfood commit"],
+        cwd=str(workspace),
+        check=True,
+    )
     return root, workspace
 
 
