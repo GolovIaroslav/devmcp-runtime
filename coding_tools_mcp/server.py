@@ -1897,7 +1897,13 @@ class Runtime:
             if git_credentials_file is not None and git_credentials_file.is_file()
             else None
         )
-        self.sandbox_backend = detect_sandbox_backend(sandbox_backend)
+        self.sandbox_backend = detect_sandbox_backend(
+            sandbox_backend,
+            allow_legacy_inherited=(
+                not self._profile_managed
+                and self._is_devmcp_source_checkout(self.workspace.root)
+            ),
+        )
         self.executor_registry = ExecutorRegistry.from_environment(
             sandbox_backend_name=self.sandbox_backend.name,
             sandbox_secure=self.sandbox_backend.secure,

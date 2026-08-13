@@ -356,7 +356,12 @@ workspace-write on Linux, direct subprocess for full-access. Specialized
 features for explicit policy-managed deployments; they are not layered on top
 of the normal development fast path. Self-host state is exposed by
 `local_state_snapshot`, and explicit development service updates may install a
-clean pinned feature-branch HEAD for testing without first merging it.
+clean pinned feature-branch HEAD for testing without first merging it. When a
+DevMCP source checkout is itself running inside an older installed DevMCP that
+predates the inherited-sandbox marker, the child recognizes the old private
+`coding-tools-mcp/.../sandboxes/sandbox-*` HOME/TMP contract and reuses that
+outer boundary instead of attempting a nested bwrap. That weaker compatibility
+heuristic is enabled only for a checkout that identifies itself as DevMCP.
 
 `exec_command` and `write_stdin` default `yield_time_ms` to `10000` and honor
 requested initial waits up to the schema maximum of 300 seconds. Short commands

@@ -97,12 +97,53 @@ def inherited_sandbox_backend() -> SandboxBackend | None:
     )
 
 
-def detect_sandbox_backend(preference: str = "bwrap") -> SandboxBackend:
+def legacy_devmcp_parent_sandbox_backend() -> SandboxBackend | None:
+    """Recognize the private-directory contract emitted by older DevMCP parents.
+
+    This is deliberately weaker than kernel attestation and must only be enabled
+    by a caller that already knows it is self-hosting a DevMCP source checkout.
+    """
+
+    if sys.platform != "linux":
+        return None
+    try:
+        pwd = Path(os.environ.get("PWD", os.getcwd())).resolve(strict=True)
+        home = Path(os.environ.get("HOME", "")).resolve(strict=True)
+        tmpdir = Path(os.environ.get("TMPDIR", "")).resolve(strict=True)
+        tmp = Path(os.environ.get("TMP", "")).resolve(strict=True)
+        temp = Path(os.environ.get("TEMP", "")).resolve(strict=True)
+    except (OSError, RuntimeError):
+        return None
+    if home.name != ".devmcp-home" or home.parent != pwd:
+        return None
+    if any(
+        path.name != ".devmcp-tmp" or path.parent != pwd
+        for path in (tmpdir, tmp, temp)
+    ):
+        return None
+    parts = pwd.parts
+    if "coding-tools-mcp" not in parts or not any(
+        part.startswith("sandbox-") for part in parts
+    ):
+        return None
+    return SandboxBackend(
+        "inherited",
+        True,
+        True,
+        "execution confined by a legacy parent DevMCP private sandbox contract",
+    )
+
+
+def detect_sandbox_backend(
+    preference: str = "bwrap", *, allow_legacy_inherited: bool = False
+) -> SandboxBackend:
     """Return backend facts; never silently downgrade a requested backend."""
 
     normalized = preference.strip().lower()
     if normalized == "bwrap":
         inherited = inherited_sandbox_backend()
+        if inherited is None and allow_legacy_inherited:
+            inherited = legacy_devmcp_parent_sandbox_backend()
         if inherited is not None:
             return inherited
         available = shutil.which("bwrap") is not None

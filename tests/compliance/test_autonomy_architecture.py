@@ -20,6 +20,7 @@ from coding_tools_mcp.sandbox import (
     _linux_mountinfo_has_private_tmp,
     detect_sandbox_backend,
     inherited_sandbox_backend,
+    legacy_devmcp_parent_sandbox_backend,
 )
 from coding_tools_mcp.server import Runtime, tool_definition
 from coding_tools_mcp.system_view import forbidden_system_paths, readonly_system_paths
@@ -827,6 +828,46 @@ class AutonomyArchitectureTests(unittest.TestCase):
         self.assertIsNotNone(backend)
         assert backend is not None
         self.assertTrue(backend.secure)
+
+    @unittest.skipUnless(
+        sys.platform == "linux",
+        "legacy inherited sandbox detection is Linux-specific",
+    )
+    def test_legacy_parent_detection_requires_explicit_self_host_opt_in(self) -> None:
+        with TemporaryDirectory(prefix="coding-tools-mcp-") as tmp:
+            root = (
+                Path(tmp)
+                / "coding-tools-mcp"
+                / "instance"
+                / "sandboxes"
+                / "sandbox-fixture"
+            )
+            root.mkdir(parents=True)
+            home = root / ".devmcp-home"
+            private_tmp = root / ".devmcp-tmp"
+            home.mkdir()
+            private_tmp.mkdir()
+            env = {
+                "PWD": str(root),
+                "HOME": str(home),
+                "TMPDIR": str(private_tmp),
+                "TMP": str(private_tmp),
+                "TEMP": str(private_tmp),
+            }
+            with patch.dict(os.environ, env, clear=False):
+                legacy = legacy_devmcp_parent_sandbox_backend()
+                self.assertIsNotNone(legacy)
+                with patch(
+                    "coding_tools_mcp.sandbox.inherited_sandbox_backend",
+                    return_value=None,
+                ):
+                    default = detect_sandbox_backend("bwrap")
+                    self_host = detect_sandbox_backend(
+                        "bwrap", allow_legacy_inherited=True
+                    )
+            self.assertNotEqual(default.name, "inherited")
+            self.assertEqual(self_host.name, "inherited")
+            self.assertTrue(self_host.secure)
 
     def test_executor_registry_prefers_secure_local_and_fails_cleanly_for_missing_container(
         self,
