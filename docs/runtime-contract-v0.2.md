@@ -481,7 +481,7 @@ Supports Add/Update/Delete/Move operations inside a `*** Begin Patch` /
 
 ### exec_command
 
-Inputs: `"cmd"`, `"argv"`, `"cwd"`, `"workdir"`, `"timeout_ms"`, `"yield_time_ms"`, `"env"`, `"transaction_mode"`, `"max_bytes"`, `"max_output_bytes"`, `"preview_bytes"`, `"tty"`, `"stdin"`, `"verbosity"`, `"task_id"`.
+Inputs: `"cmd"`, `"argv"`, `"cwd"`, `"workdir"`, `"timeout_ms"`, `"yield_time_ms"`, `"env"`, `"transaction_mode"`, `"state_effect"`, `"max_bytes"`, `"max_output_bytes"`, `"preview_bytes"`, `"tty"`, `"stdin"`, `"verbosity"`, `"task_id"`.
 
 Annotations: `{"title":"Exec command","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
 
@@ -497,13 +497,15 @@ Exactly one of `cmd` or `argv` is required. BUILD is the default execution mode 
 
 `transaction_mode="apply"` remains an explicit bounded transactional compatibility path. It is separate from BUILD authority and retains baseline/conflict checks so concurrent or user WIP is not overwritten.
 
+`state_effect="none"` is the default and leaves repository state unmanaged. `state_effect="selected_repo"` is an explicit state-managed mutation contract: the command runs synchronously and advances the selected-repository checkpoint only after exit 0. Failed or timed-out commands do not accept partial repository changes.
+
 ### exec_argv
 
-Inputs: `"argv"`, `"cwd"`, `"workdir"`, `"timeout_ms"`, `"yield_time_ms"`, `"env"`, `"transaction_mode"`, `"max_output_bytes"`, `"tty"`, `"stdin"`, `"verbosity"`, `"preview_bytes"`, `"task_id"`.
+Inputs: `"argv"`, `"cwd"`, `"workdir"`, `"timeout_ms"`, `"yield_time_ms"`, `"env"`, `"transaction_mode"`, `"state_effect"`, `"max_output_bytes"`, `"tty"`, `"stdin"`, `"verbosity"`, `"preview_bytes"`, `"task_id"`.
 
 Annotations: `{"title":"Exec argv","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
 
-Preferred structured developer execution primitive. It never invokes a shell to interpret `argv`. BUILD runs directly with host-user authority; PLAN denies execution. `transaction_mode="apply"` remains an explicit bounded snapshot/commit compatibility path; baseline conflicts fail with `TRANSACTION_CONFLICT` rather than overwriting concurrent/user WIP. No rollback path uses `git reset --hard`.
+Preferred structured developer execution primitive. It never invokes a shell to interpret `argv`. BUILD runs directly with host-user authority; PLAN denies execution. `transaction_mode="apply"` remains an explicit bounded snapshot/commit compatibility path; baseline conflicts fail with `TRANSACTION_CONFLICT` rather than overwriting concurrent/user WIP. `state_effect` has the same unmanaged-by-default / explicit `selected_repo` semantics as `exec_command`. No rollback path uses `git reset --hard`.
 
 ### run_task
 

@@ -635,6 +635,307 @@ class StateManagementTests(TestCase):
                 finally:
                     runtime.close()
 
+    def test_plain_exec_successful_tracked_mutation_still_causes_drift(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, _head = init_repo(root)
+            with patch.dict("os.environ", {"DEVMCP_CONFIG_DIR": str(root / "config")}):
+                runtime = StateManagedRuntime(workspace=repo, sandbox_backend="unsafe")
+                try:
+                    result = runtime.exec_command(
+                        {"cmd": "printf 'two\\n' > tracked.txt", "yield_time_ms": 5000}
+                    )
+                    self.assertTrue(result["command_success"])
+                    self.assertNotIn("state_checkpoint", result)
+                    with self.assertRaises(ToolFailure) as drift:
+                        runtime.git_create_branch({"name": "blocked-after-plain-exec"})
+                    self.assertEqual(drift.exception.code, "STATE_DRIFT")
+                    self.assertIsNone(inspect_writer_lease(repo, "main"))
+                finally:
+                    runtime.close()
+
+    def test_managed_exec_successful_tracked_mutation_advances_checkpoint(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, _head = init_repo(root)
+            with patch.dict("os.environ", {"DEVMCP_CONFIG_DIR": str(root / "config")}):
+                runtime = StateManagedRuntime(workspace=repo, sandbox_backend="unsafe")
+                try:
+                    result = runtime.exec_command(
+                        {
+                            "cmd": "printf 'two\\n' > tracked.txt",
+                            "state_effect": "selected_repo",
+                            "yield_time_ms": 1,
+                        }
+                    )
+                    self.assertTrue(result["command_success"])
+                    self.assertEqual(
+                        result["state_checkpoint"]["snapshot"]["dirty_paths"],
+                        ["tracked.txt"],
+                    )
+                    self.assertIsNone(inspect_writer_lease(repo, "main"))
+                    runtime.git_create_branch({"name": "after-managed-exec"})
+                finally:
+                    runtime.close()
+
+    def test_managed_exec_argv_accepts_untracked_creation(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, _head = init_repo(root)
+            with patch.dict("os.environ", {"DEVMCP_CONFIG_DIR": str(root / "config")}):
+                runtime = StateManagedRuntime(workspace=repo, sandbox_backend="unsafe")
+                try:
+                    result = runtime.exec_argv(
+                        {
+                            "argv": [
+                                "python3",
+                                "-c",
+                                "from pathlib import Path; Path('created.txt').write_text('new\\n')",
+                            ],
+                            "state_effect": "selected_repo",
+                            "yield_time_ms": 1,
+                        }
+                    )
+                    self.assertEqual(
+                        result["state_checkpoint"]["snapshot"]["untracked_paths"],
+                        ["created.txt"],
+                    )
+                    self.assertIsNone(inspect_writer_lease(repo, "main"))
+                    runtime.git_create_branch({"name": "after-untracked"})
+                finally:
+                    runtime.close()
+
+    def test_managed_exec_argv_uses_direct_mode_on_bwrap_backend(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, _head = init_repo(root)
+            with patch.dict("os.environ", {"DEVMCP_CONFIG_DIR": str(root / "config")}):
+                runtime = StateManagedRuntime(workspace=repo, sandbox_backend="bwrap")
+                try:
+                    result = runtime.exec_argv(
+                        {
+                            "argv": [
+                                "python3",
+                                "-c",
+                                "from pathlib import Path; Path('created.txt').write_text('new\\n')",
+                            ],
+                            "state_effect": "selected_repo",
+                        }
+                    )
+                    self.assertTrue(result["command_success"])
+                    self.assertEqual(result["transaction"]["mode"], "direct")
+                    self.assertIn("state_checkpoint", result)
+                    self.assertIsNone(inspect_writer_lease(repo, "main"))
+                finally:
+                    runtime.close()
+
+    def test_managed_exec_argv_accepts_staging(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, _head = init_repo(root)
+            (repo / "tracked.txt").write_text("two\n", encoding="utf-8")
+            with patch.dict("os.environ", {"DEVMCP_CONFIG_DIR": str(root / "config")}):
+                runtime = StateManagedRuntime(workspace=repo, sandbox_backend="unsafe")
+                try:
+                    result = runtime.exec_argv(
+                        {
+                            "argv": ["git", "add", "tracked.txt"],
+                            "state_effect": "selected_repo",
+                        }
+                    )
+                    self.assertEqual(
+                        result["state_checkpoint"]["snapshot"]["staged_paths"],
+                        ["tracked.txt"],
+                    )
+                    runtime.git_create_branch({"name": "after-stage"})
+                finally:
+                    runtime.close()
+
+    def test_managed_exec_argv_accepts_git_commit(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, head = init_repo(root)
+            (repo / "tracked.txt").write_text("two\n", encoding="utf-8")
+            with patch.dict("os.environ", {"DEVMCP_CONFIG_DIR": str(root / "config")}):
+                runtime = StateManagedRuntime(workspace=repo, sandbox_backend="unsafe")
+                try:
+                    result = runtime.exec_argv(
+                        {
+                            "argv": ["git", "commit", "-am", "managed exec commit"],
+                            "state_effect": "selected_repo",
+                        }
+                    )
+                    new_head = result["state_checkpoint"]["snapshot"]["local_head"]
+                    self.assertNotEqual(new_head, head)
+                    self.assertIsNone(inspect_writer_lease(repo, "main"))
+                    runtime.git_create_branch({"name": "after-commit"})
+                finally:
+                    runtime.close()
+
+    def test_managed_exec_nonzero_without_mutation_keeps_previous_baseline(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, _head = init_repo(root)
+            with patch.dict("os.environ", {"DEVMCP_CONFIG_DIR": str(root / "config")}):
+                runtime = StateManagedRuntime(workspace=repo, sandbox_backend="unsafe")
+                try:
+                    result = runtime.exec_argv(
+                        {
+                            "argv": ["python3", "-c", "raise SystemExit(7)"],
+                            "state_effect": "selected_repo",
+                        }
+                    )
+                    self.assertEqual(result["exit_code"], 7)
+                    self.assertNotIn("state_checkpoint", result)
+                    self.assertIsNone(inspect_writer_lease(repo, "main"))
+                    runtime.git_create_branch({"name": "after-clean-failure"})
+                finally:
+                    runtime.close()
+
+    def test_managed_exec_nonzero_after_partial_mutation_leaves_drift(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, _head = init_repo(root)
+            with patch.dict("os.environ", {"DEVMCP_CONFIG_DIR": str(root / "config")}):
+                runtime = StateManagedRuntime(workspace=repo, sandbox_backend="unsafe")
+                try:
+                    result = runtime.exec_argv(
+                        {
+                            "argv": [
+                                "python3",
+                                "-c",
+                                "from pathlib import Path; Path('partial.txt').write_text('partial\\n'); raise SystemExit(9)",
+                            ],
+                            "state_effect": "selected_repo",
+                        }
+                    )
+                    self.assertEqual(result["exit_code"], 9)
+                    self.assertNotIn("state_checkpoint", result)
+                    self.assertIsNone(inspect_writer_lease(repo, "main"))
+                    with self.assertRaises(ToolFailure) as drift:
+                        runtime.git_create_branch({"name": "blocked-after-partial"})
+                    self.assertEqual(drift.exception.code, "STATE_DRIFT")
+                    self.assertIsNone(inspect_writer_lease(repo, "main"))
+                finally:
+                    runtime.close()
+
+    def test_managed_exec_timeout_after_mutation_leaves_drift_and_no_writer(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, _head = init_repo(root)
+            with patch.dict("os.environ", {"DEVMCP_CONFIG_DIR": str(root / "config")}):
+                runtime = StateManagedRuntime(workspace=repo, sandbox_backend="unsafe")
+                try:
+                    result = runtime.exec_argv(
+                        {
+                            "argv": [
+                                "python3",
+                                "-c",
+                                "from pathlib import Path; import time; Path('partial.txt').write_text('partial\\n'); time.sleep(5); Path('late.txt').write_text('late\\n')",
+                            ],
+                            "state_effect": "selected_repo",
+                            "timeout_ms": 80,
+                            "yield_time_ms": 1,
+                        }
+                    )
+                    self.assertTrue(result["timed_out"])
+                    self.assertNotIn("state_checkpoint", result)
+                    self.assertFalse((repo / "late.txt").exists())
+                    self.assertIsNone(inspect_writer_lease(repo, "main"))
+                    with self.assertRaises(ToolFailure) as drift:
+                        runtime.git_create_branch({"name": "blocked-after-timeout"})
+                    self.assertEqual(drift.exception.code, "STATE_DRIFT")
+                    self.assertIsNone(inspect_writer_lease(repo, "main"))
+                finally:
+                    runtime.close()
+
+    def test_managed_exec_forces_foreground_despite_short_yield(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, _head = init_repo(root)
+            with patch.dict("os.environ", {"DEVMCP_CONFIG_DIR": str(root / "config")}):
+                runtime = StateManagedRuntime(workspace=repo, sandbox_backend="unsafe")
+                try:
+                    result = runtime.exec_argv(
+                        {
+                            "argv": [
+                                "python3",
+                                "-c",
+                                "from pathlib import Path; import time; time.sleep(0.08); Path('foreground.txt').write_text('done\\n')",
+                            ],
+                            "state_effect": "selected_repo",
+                            "timeout_ms": 1000,
+                            "yield_time_ms": 1,
+                        }
+                    )
+                    self.assertEqual(result["status"], "success")
+                    self.assertTrue((repo / "foreground.txt").exists())
+                    self.assertIn("state_checkpoint", result)
+                    self.assertIsNone(inspect_writer_lease(repo, "main"))
+                finally:
+                    runtime.close()
+
+    def test_external_mutation_after_successful_managed_exec_still_drifts(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, _head = init_repo(root)
+            with patch.dict("os.environ", {"DEVMCP_CONFIG_DIR": str(root / "config")}):
+                runtime = StateManagedRuntime(workspace=repo, sandbox_backend="unsafe")
+                try:
+                    managed = runtime.exec_argv(
+                        {
+                            "argv": [
+                                "python3",
+                                "-c",
+                                "from pathlib import Path; Path('managed.txt').write_text('managed\\n')",
+                            ],
+                            "state_effect": "selected_repo",
+                        }
+                    )
+                    self.assertIn("state_checkpoint", managed)
+                    (repo / "external.txt").write_text("external\n", encoding="utf-8")
+                    with self.assertRaises(ToolFailure) as drift:
+                        runtime.git_create_branch({"name": "blocked-after-external"})
+                    self.assertEqual(drift.exception.code, "STATE_DRIFT")
+                    self.assertIsNone(inspect_writer_lease(repo, "main"))
+                finally:
+                    runtime.close()
+
+    def test_managed_exec_rejects_tty_and_transactional_apply(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, _head = init_repo(root)
+            with patch.dict("os.environ", {"DEVMCP_CONFIG_DIR": str(root / "config")}):
+                runtime = StateManagedRuntime(workspace=repo, sandbox_backend="unsafe")
+                try:
+                    with self.assertRaises(ToolFailure) as tty_error:
+                        runtime.exec_command(
+                            {
+                                "cmd": "true",
+                                "tty": True,
+                                "state_effect": "selected_repo",
+                            }
+                        )
+                    self.assertEqual(tty_error.exception.code, "INVALID_ARGUMENT")
+                    with self.assertRaises(ToolFailure) as transaction_error:
+                        runtime.exec_argv(
+                            {
+                                "argv": ["true"],
+                                "transaction_mode": "apply",
+                                "state_effect": "selected_repo",
+                            }
+                        )
+                    self.assertEqual(
+                        transaction_error.exception.code, "INVALID_ARGUMENT"
+                    )
+                    self.assertIsNone(inspect_writer_lease(repo, "main"))
+                finally:
+                    runtime.close()
+
     def test_raw_branch_switch_is_detected_against_context_anchor(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
