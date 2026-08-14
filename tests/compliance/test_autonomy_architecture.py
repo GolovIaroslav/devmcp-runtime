@@ -108,6 +108,17 @@ class AutonomyArchitectureTests(unittest.TestCase):
                 self.assertEqual(result["stdout"], "literal; printf not-shell")
                 definition = tool_definition("exec_argv")
                 self.assertIn("argv", definition["inputSchema"]["properties"])
+                self.assertEqual(
+                    definition["inputSchema"]["properties"]["state_effect"]["enum"],
+                    ["none", "selected_repo"],
+                )
+                exec_definition = tool_definition("exec_command")
+                self.assertEqual(
+                    exec_definition["inputSchema"]["properties"]["state_effect"][
+                        "enum"
+                    ],
+                    ["none", "selected_repo"],
+                )
             finally:
                 runtime.close()
 

@@ -29,6 +29,9 @@ from .writer_lease import (
 class StateManagedRuntime(StateMutationMixin, BuildIdentityMixin, core.Runtime):
     """Add cheap branch-level concurrency control around existing DevMCP tools."""
 
+    _EXEC_STATE_EFFECT_NONE = "none"
+    _EXEC_STATE_EFFECT_SELECTED_REPO = "selected_repo"
+
     def _state_owner(self) -> str:
         return self._active_context_id() or f"runtime:{self.server_instance_id}"
 
@@ -79,7 +82,75 @@ class StateManagedRuntime(StateMutationMixin, BuildIdentityMixin, core.Runtime):
 
     def _profile_exec_command(self, args: dict[str, Any]) -> dict[str, Any]:
         self._ensure_state_baseline()
-        return super()._profile_exec_command(args)
+        state_effect = str(
+            args.get("state_effect", self._EXEC_STATE_EFFECT_NONE)
+        ).strip()
+        if state_effect == self._EXEC_STATE_EFFECT_NONE:
+            return super()._profile_exec_command(args)
+        if state_effect != self._EXEC_STATE_EFFECT_SELECTED_REPO:
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                "state_effect must be none or selected_repo.",
+                category="validation",
+            )
+        if bool(args.get("tty", False)):
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                "state_effect=selected_repo is incompatible with tty=true because the command must finish in the same tool call.",
+                category="validation",
+            )
+        transaction_mode = str(args.get("transaction_mode", "discard")).strip().lower()
+        if transaction_mode != "discard":
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                "state_effect=selected_repo requires direct non-transactional execution.",
+                category="validation",
+            )
+
+        managed_args = dict(args)
+        timeout_ms = int(managed_args.get("timeout_ms", 30000))
+        managed_args["yield_time_ms"] = timeout_ms
+
+        branch, previous, _before = self._state_preflight("exec_command")
+        try:
+            result = super()._profile_exec_command(managed_args)
+            if result.get("status") == "running":
+                raise ToolFailure(
+                    "INVALID_STATE",
+                    "State-managed exec did not reach a terminal state in the tool call.",
+                    category="runtime",
+                )
+            if result.get("command_success") is True:
+                current_branch = self._state_branch()
+                if current_branch != branch:
+                    raise ToolFailure(
+                        "INVALID_STATE",
+                        "State-managed exec changed the current branch; the result was not accepted as authoritative state.",
+                        category="conflict",
+                        retryable=True,
+                        details={
+                            "before_branch": branch,
+                            "after_branch": current_branch,
+                        },
+                    )
+                checkpoint = self._state_after(
+                    "exec_command", branch, previous, outcome="success"
+                )
+                result["state_checkpoint"] = checkpoint
+            return result
+        finally:
+            self._release_state_owner_leases()
+
+    def exec_argv(self, args: dict[str, Any]) -> dict[str, Any]:
+        state_effect = str(
+            args.get("state_effect", self._EXEC_STATE_EFFECT_NONE)
+        ).strip()
+        if (
+            state_effect == self._EXEC_STATE_EFFECT_SELECTED_REPO
+            and "transaction_mode" not in args
+        ):
+            args = {**args, "transaction_mode": "discard"}
+        return super().exec_argv(args)
 
     def _execute_task_argv(
         self, argv: list[str], args: dict[str, Any], capabilities: set[str]

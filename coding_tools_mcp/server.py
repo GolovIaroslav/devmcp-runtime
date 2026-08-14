@@ -9892,6 +9892,12 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                     "default": "discard",
                     "description": "Shell execution is non-transactional by default; apply is an explicit compatibility opt-in for bounded transactional execution.",
                 },
+                "state_effect": {
+                    **string,
+                    "enum": ["none", "selected_repo"],
+                    "default": "none",
+                    "description": "Default none leaves repository state unmanaged; selected_repo runs synchronously and advances the selected repository checkpoint only after exit 0.",
+                },
                 "max_bytes": {
                     **integer,
                     "minimum": 1,
@@ -9944,6 +9950,12 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                     "enum": ["discard", "apply"],
                     "default": "discard",
                     "description": "Shell execution is non-transactional by default; apply is an explicit compatibility opt-in for bounded transactional execution.",
+                },
+                "state_effect": {
+                    **string,
+                    "enum": ["none", "selected_repo"],
+                    "default": "none",
+                    "description": "Default none leaves repository state unmanaged; selected_repo runs synchronously and advances the selected repository checkpoint only after exit 0.",
                 },
                 "max_output_bytes": {
                     **integer,
