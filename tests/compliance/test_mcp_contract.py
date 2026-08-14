@@ -4,6 +4,7 @@ import base64
 import hashlib
 import json
 import http.client
+import inspect
 import os
 import select
 import signal
@@ -17,7 +18,12 @@ from collections.abc import Callable
 from typing import Any
 from unittest.mock import patch
 
-from coding_tools_mcp.server import MAX_HTTP_REQUEST_BYTES
+from coding_tools_mcp.server import (
+    MAX_HTTP_REQUEST_BYTES,
+    TOOL_REGISTRY,
+    Runtime,
+    input_schemas,
+)
 from scripts.mcp_smoke import command_succeeded
 from tests.compliance.mcp_client import (
     FORBIDDEN_TOOL_NAMES,
@@ -135,6 +141,21 @@ class MCPContractTests(ComplianceTestCase):
         self.assertEqual(
             term_hits, [], f"product-layer tool terms exposed: {sorted(term_hits)}"
         )
+
+    def test_tool_registry_schema_and_runtime_handlers_stay_in_lockstep(self) -> None:
+        schemas = input_schemas()
+        self.assertEqual(set(TOOL_REGISTRY), set(schemas))
+        for name in TOOL_REGISTRY:
+            with self.subTest(tool=name):
+                handler = getattr(Runtime, name, None)
+                self.assertTrue(callable(handler), name)
+                parameters = list(inspect.signature(handler).parameters.values())
+                self.assertEqual([item.name for item in parameters], ["self", "args"])
+                self.assertEqual(
+                    schemas[name].get("additionalProperties"),
+                    False,
+                    f"{name} must reject undeclared runtime inputs",
+                )
 
     def test_each_tool_has_valid_basic_json_schema(self) -> None:
         for tool in self.client.list_tools():

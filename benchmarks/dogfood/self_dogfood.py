@@ -138,6 +138,14 @@ def prepare_workspace(workspace: Path) -> int:
     run_git(workspace, "config", "user.name", "DevMCP dogfood")
     run_git(workspace, "config", "user.email", "dogfood@example.invalid")
 
+    # The cloned self-dogfood checkout intentionally has no tracked virtualenv.
+    # Reuse the source project's existing environment explicitly so registered
+    # Python tasks exercise project-local tooling rather than the DevMCP service
+    # interpreter or an arbitrary system Python.
+    source_venv = ROOT / ".venv"
+    if source_venv.is_dir():
+        (workspace / ".venv").symlink_to(source_venv, target_is_directory=True)
+
     lines = ['START_MARKER = "DOGFOOD_START"']
     lines.extend(f"# filler line {number}" for number in range(2, 5001))
     lines.append('MIDDLE_MARKER = "DOGFOOD_MIDDLE"')

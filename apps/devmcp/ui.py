@@ -399,12 +399,12 @@ class UIHandler(http.server.BaseHTTPRequestHandler):
         if route == "tasks":
             tasks = TaskRegistry().list_tasks()
             task_rows = "".join(
-                f"<tr><td>{html.escape(str(item['id']))}</td><td>{html.escape(str(item['category']))}</td><td>{html.escape(str(item['executable']))}</td><td>{html.escape(str(item['network_requirement']))}</td><td>{html.escape(str(item['approval_class']))}</td></tr>"
+                f"<tr><td>{html.escape(str(item['id']))}</td><td>{html.escape(str(item['category']))}</td><td>{html.escape(str(item['executable']))}</td><td>{html.escape(str(item['network_requirement']))}</td></tr>"
                 for item in tasks
             )
             return _page(
                 "Tasks",
-                f"<h2>Task registry</h2><table><tr><th>ID</th><th>Category</th><th>Executable</th><th>Network</th><th>Policy</th></tr>{task_rows}</table>",
+                f"<h2>Task registry</h2><table><tr><th>ID</th><th>Category</th><th>Executable</th><th>Network</th></tr>{task_rows}</table>",
                 self.state,
             )
         if route == "services":

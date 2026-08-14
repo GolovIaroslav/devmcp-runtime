@@ -96,7 +96,6 @@ class SchemaDriftTests(unittest.TestCase):
         expected = {
             "search_text": {"is_regex", "context_lines"},
             "git_diff": {"context_lines"},
-            "exec_command": {"network_required", "task_id"},
             "run_task": {"cwd", "env"},
         }
         schemas = input_schemas()
@@ -109,6 +108,22 @@ class SchemaDriftTests(unittest.TestCase):
                 self.assertTrue(names <= schema_names)
                 for name in names:
                     self.assertRegex(source, rf'args\.(?:get|pop)\("{re.escape(name)}"')
+
+    def test_retired_execution_policy_inputs_are_not_public_schema(self) -> None:
+        retired = {
+            "approval_id",
+            "sensitive_env_names",
+            "execution_mode",
+            "executor_backend",
+            "network_required",
+            "network_targets",
+        }
+        for tool_name, schema in input_schemas().items():
+            with self.subTest(tool=tool_name):
+                properties = set(schema.get("properties", {}))
+                self.assertFalse(
+                    properties & retired, (tool_name, properties & retired)
+                )
 
     def test_exec_verbosity_schema_matches_runtime_integer_contract(self) -> None:
         schema = input_schemas()["exec_command"]["properties"]["verbosity"]

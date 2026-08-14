@@ -2,7 +2,7 @@
 """Smoke-check a running coding-tools-mcp HTTP server using the shared MCP client.
 
 Usage:
-    python scripts/mcp_smoke.py URL [--expect-permission-mode MODE] [CMD ...]
+    python scripts/mcp_smoke.py URL [--expect-execution-mode MODE] [CMD ...]
 
 Verifies initialize + tools/list + server_info, then runs each CMD through
 exec_command expecting a clean exit. Bearer auth is taken from the
@@ -32,7 +32,7 @@ def command_succeeded(result: dict[str, object]) -> bool:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("url", help="MCP endpoint, e.g. http://127.0.0.1:8765/mcp")
-    parser.add_argument("--expect-permission-mode", default=None)
+    parser.add_argument("--expect-execution-mode", default=None)
     parser.add_argument("commands", nargs="*", help="commands to run via exec_command")
     args = parser.parse_args(argv)
 
@@ -49,14 +49,14 @@ def main(argv: list[str] | None = None) -> int:
             stage = "server_info"
             info = client.call_tool("server_info", {})["structuredContent"]
             print(
-                f"server_info: permission_mode={info['permission_mode']} tool_count={info['tool_count']}"
+                f"server_info: execution_mode={info['execution_mode']} effective_access={info['effective_access']} tool_count={info['tool_count']}"
             )
             if (
-                args.expect_permission_mode
-                and info["permission_mode"] != args.expect_permission_mode
+                args.expect_execution_mode
+                and info["execution_mode"] != args.expect_execution_mode
             ):
                 raise SystemExit(
-                    f"expected permission_mode={args.expect_permission_mode}, got {info['permission_mode']}"
+                    f"expected execution_mode={args.expect_execution_mode}, got {info['execution_mode']}"
                 )
             for cmd in args.commands:
                 stage = f"exec_command {cmd!r}"

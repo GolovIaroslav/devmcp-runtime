@@ -52,21 +52,6 @@ To inspect service logs:
 journalctl --user -u devmcp-runtime.service -f
 ```
 
-## Out-of-Band Approval CLI (`devmcp`)
+## Execution authority
 
-When an untrusted shell execution is attempted by an AI agent, the runtime returns an approval challenge.
-
-To view pending approvals:
-```bash
-devmcp approvals
-```
-
-To approve a request:
-```bash
-devmcp approve <approval_id>
-```
-
-To deny a request:
-```bash
-devmcp deny <approval_id>
-```
+The default `build` mode runs as the current OS user with normal filesystem, HOME/PATH, toolchain, and network access. `plan` is read-only. The retired per-command approval workflow is not part of normal execution.

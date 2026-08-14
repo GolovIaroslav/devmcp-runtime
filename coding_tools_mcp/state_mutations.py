@@ -60,6 +60,24 @@ class StateMutationMixin:
         result["state_checkpoint"] = checkpoint
         return result
 
+    def git_fetch(self, args: dict[str, Any]) -> dict[str, Any]:
+        parent = super()
+        result, checkpoint = self._guarded(
+            "git_fetch",
+            lambda: parent.git_fetch(args),  # type: ignore[attr-defined]
+        )
+        result["state_checkpoint"] = checkpoint
+        return result
+
+    def git_pull(self, args: dict[str, Any]) -> dict[str, Any]:
+        parent = super()
+        result, checkpoint = self._guarded(
+            "git_pull",
+            lambda: parent.git_pull(args),  # type: ignore[attr-defined]
+        )
+        result["state_checkpoint"] = checkpoint
+        return result
+
     def git_merge_remote_branch(self, args: dict[str, Any]) -> dict[str, Any]:
         parent = super()
         result, checkpoint = self._guarded(
