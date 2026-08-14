@@ -11,7 +11,7 @@ app remains a draft.
 
 ## Fixed inventory
 
-The default catalog contains exactly 65 tools:
+The default catalog contains exactly 57 tools:
 
 - `server_info`: Server info.
 - `health`: Health check.
@@ -21,7 +21,6 @@ The default catalog contains exactly 65 tools:
 - `host_cli_probe`: Run bounded host-side `path`, `--version`, or `--help` discovery for an executable inside the selected project using a sanitized environment.
 - `service_restart`: Schedule a delayed restart of the DevMCP user services.
 - `service_update`: Update the installed DevMCP runtime from a clean pinned local source checkout; explicit development mode permits a clean feature branch.
-- `activate_policy_profile`: Persist a policy profile and schedule a safe restart.
 - `list_projects`: Discover Git repositories under operator-approved project roots.
 - `select_project`: Select one writable repository for the current MCP session.
 - `current_project`: Show the repository selected for the current MCP session.
@@ -32,11 +31,6 @@ The default catalog contains exactly 65 tools:
 - `read_file`: Read file.
 - `read_files`: Read multiple files.
 - `code_diagnostics`: Normalize compiler/traceback diagnostics without requiring an IDE/LSP dependency.
-- `grant_root`: Grant one operator-authorized directory as a temporary read/write root.
-- `grant_capability`: Grant one narrow, expiring capability target.
-- `list_capability_leases`: List temporary capability leases owned by the current logical context.
-- `revoke_capability_lease`: Revoke one owned temporary capability lease.
-- `end_task_scope`: End one logical task scope and revoke its task-scoped leases.
 - `list_dir`: List directory.
 - `list_files`: List files.
 - `search_text`: Search text.
@@ -73,13 +67,12 @@ The default catalog contains exactly 65 tools:
 - `job_output`: Job output.
 - `job_input`: Job input.
 - `job_cancel`: Job cancel.
-- `approval_status`: Approval status.
-- `list_pending_approvals`: List pending approvals.
 - `check_exec_environment`: Check exec environment.
 - `get_default_cwd`: Get default cwd.
 - `set_default_cwd`: Set default cwd.
+
 `view_image` may be disabled when an installation cannot accept binary image
-content. That capability gate is not a tool profile. The other 64 tools are
+content. That capability gate is not a tool profile. The other 56 tools are
 always advertised, and `listChanged` is `false`.
 
 ## Autonomous continuation primitives

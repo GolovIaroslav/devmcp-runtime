@@ -667,8 +667,8 @@ class RuntimeManager:
             "127.0.0.1",
             "--port",
             str(profile.runtime.local_port),
-            "--permission-mode",
-            profile.runtime.permission_mode,
+            "--execution-mode",
+            getattr(profile.runtime, "execution_mode", "build"),
         ]
         if profile.auth.type == "oauth":
             env["CODING_TOOLS_MCP_OAUTH_PASSWORD"] = profile.auth.oauth_password

@@ -7,7 +7,6 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from coding_tools_mcp.approval import ApprovalEngine
 from coding_tools_mcp.errors import ToolFailure
 from coding_tools_mcp.executors import ExecutionRequirements, ExecutorRegistry
 from coding_tools_mcp.policy import legacy_profile
@@ -103,116 +102,6 @@ class AutonomyArchitectureTests(unittest.TestCase):
                 self.assertEqual(
                     runtime.resolve_for_write(str(root / "new.txt")).path,
                     root / "new.txt",
-                )
-            finally:
-                runtime.close()
-
-    def test_scoped_additional_root_grants_are_owner_local_and_once_is_consumed(
-        self,
-    ) -> None:
-        with TemporaryDirectory() as tmp:
-            base = Path(tmp)
-            repo = base / "repo"
-            sibling = base / "lib"
-            repo.mkdir()
-            sibling.mkdir()
-            target = sibling / "lib.txt"
-            target.write_text("library\n", encoding="utf-8")
-            runtime = self._runtime(repo, execution_mode="plan")
-            try:
-                lease = runtime.grant_root(
-                    {"path": str(sibling), "access": "read", "scope": "once"}
-                )
-                self.assertTrue(str(lease["lease_id"]).startswith("lease_"))
-                first = runtime.call_tool("read_file", {"path": str(target)})
-                self.assertFalse(first["isError"])
-                self.assertEqual(first["structuredContent"]["content"], "library\n")
-                consumed = runtime.call_tool("read_file", {"path": str(target)})
-                self.assertTrue(consumed["isError"])
-                self.assertEqual(
-                    consumed["structuredContent"]["error"]["code"],
-                    "PATH_OUTSIDE_WORKSPACE",
-                )
-
-                session_lease = runtime.grant_root(
-                    {"path": str(sibling), "access": "write", "scope": "session"}
-                )
-                self.assertEqual(session_lease["scope"], "session")
-                resolved = runtime.resolve_for_write(str(sibling / "generated.txt"))
-                self.assertEqual(resolved.path, sibling / "generated.txt")
-                roots = runtime.workspace_info({})
-                self.assertIn(str(sibling.resolve()), roots["readable_roots"])
-                self.assertIn(str(sibling.resolve()), roots["writable_roots"])
-            finally:
-                runtime.close()
-
-    def test_project_discovery_roots_are_not_implicit_grant_authority(self) -> None:
-        with TemporaryDirectory() as tmp:
-            base = Path(tmp)
-            repo = base / "repo"
-            sibling = base / "sibling"
-            repo.mkdir()
-            sibling.mkdir()
-            runtime = Runtime(
-                repo,
-                policy_profile="autonomous",
-                sandbox_backend="unsafe",
-                project_roots=[base],
-            )
-            try:
-                self.assertEqual(runtime.workspace_info({})["grantable_roots"], [])
-                with self.assertRaises(ToolFailure) as denied:
-                    runtime.grant_root(
-                        {"path": str(sibling), "access": "read", "scope": "session"}
-                    )
-                self.assertEqual(denied.exception.code, "ACCESS_DENIED")
-            finally:
-                runtime.close()
-
-    def test_task_scoped_root_grant_is_portable_and_revoked_on_scope_end(self) -> None:
-        with TemporaryDirectory() as tmp:
-            base = Path(tmp)
-            repo = base / "repo"
-            sibling = base / "lib"
-            repo.mkdir()
-            sibling.mkdir()
-            target = sibling / "lib.txt"
-            target.write_text("task-library\n", encoding="utf-8")
-            runtime = self._runtime(repo, execution_mode="plan")
-            try:
-                granted = runtime.call_tool(
-                    "grant_root",
-                    {"path": str(sibling), "access": "read", "scope": "task"},
-                )
-                self.assertFalse(granted["isError"])
-                payload = granted["structuredContent"]
-                task_scope_id = payload["task_scope_id"]
-                self.assertTrue(task_scope_id.startswith("task_"))
-
-                outside_scope = runtime.call_tool("read_file", {"path": str(target)})
-                self.assertTrue(outside_scope["isError"])
-                within_scope = runtime.call_tool(
-                    "read_file",
-                    {"path": str(target), "task_scope_id": task_scope_id},
-                )
-                self.assertFalse(within_scope["isError"])
-                self.assertEqual(
-                    within_scope["structuredContent"]["content"], "task-library\n"
-                )
-
-                ended = runtime.call_tool(
-                    "end_task_scope", {"task_scope_id": task_scope_id}
-                )
-                self.assertFalse(ended["isError"])
-                self.assertEqual(ended["structuredContent"]["revoked_leases"], 1)
-                after_end = runtime.call_tool(
-                    "read_file",
-                    {"path": str(target), "task_scope_id": task_scope_id},
-                )
-                self.assertTrue(after_end["isError"])
-                self.assertEqual(
-                    after_end["structuredContent"]["error"]["code"],
-                    "PATH_OUTSIDE_WORKSPACE",
                 )
             finally:
                 runtime.close()
@@ -350,10 +239,6 @@ class AutonomyArchitectureTests(unittest.TestCase):
             finally:
                 primary.cleanup()
                 extra.cleanup()
-
-    def test_approval_engine_closes_sqlite_connections(self) -> None:
-        engine = ApprovalEngine()
-        self.assertEqual(engine.get_status("id"), "approved")
 
     def test_transaction_preserves_preexisting_wip_and_applies_binary_changes(
         self,
@@ -546,57 +431,6 @@ class AutonomyArchitectureTests(unittest.TestCase):
             finally:
                 runtime.close()
 
-    def test_patch_engine_uses_same_additional_writable_root_authority(self) -> None:
-        with TemporaryDirectory() as tmp:
-            base = Path(tmp)
-            repo = base / "repo"
-            sibling = base / "library"
-            repo.mkdir()
-            sibling.mkdir()
-            target = sibling / "lib.txt"
-            target.write_text("before\n", encoding="utf-8")
-
-            denied = self._runtime(repo, execution_mode="plan")
-            try:
-                with self.assertRaises(ToolFailure) as blocked:
-                    denied.apply_patch(
-                        {
-                            "patch": (
-                                "*** Begin Patch\n"
-                                f"*** Update File: {target}\n"
-                                "@@\n-before\n+denied\n"
-                                "*** End Patch"
-                            )
-                        }
-                    )
-                self.assertIn(
-                    blocked.exception.code,
-                    {"PERMISSION_REQUIRED", "PATH_OUTSIDE_WORKSPACE"},
-                )
-                self.assertEqual(target.read_text(encoding="utf-8"), "before\n")
-            finally:
-                denied.close()
-
-            allowed = self._runtime(repo)
-            try:
-                allowed.grant_root(
-                    {"path": str(sibling), "access": "write", "scope": "session"}
-                )
-                result = allowed.apply_patch(
-                    {
-                        "patch": (
-                            "*** Begin Patch\n"
-                            f"*** Update File: {target}\n"
-                            "@@\n-before\n+after\n"
-                            "*** End Patch"
-                        )
-                    }
-                )
-                self.assertEqual(result["summary"], f"M {target}")
-                self.assertEqual(target.read_text(encoding="utf-8"), "after\n")
-            finally:
-                allowed.close()
-
     def test_private_temp_is_normal_writable_temp_not_host_tmp_capability(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -638,25 +472,6 @@ class AutonomyArchitectureTests(unittest.TestCase):
                     result["files"][2]["error"]["code"],
                     {"BINARY_FILE", "UNSUPPORTED_ENCODING"},
                 )
-            finally:
-                runtime.close()
-
-    def test_activate_policy_profile_noop_does_not_restart(self) -> None:
-        with TemporaryDirectory() as tmp:
-            runtime = Runtime(
-                Path(tmp),
-                policy_profile="autonomous",
-                sandbox_backend="unsafe",
-            )
-            try:
-                with (
-                    patch.object(runtime, "_schedule_devmcp_restart") as restart,
-                    patch("coding_tools_mcp.server.subprocess.run") as run,
-                ):
-                    result = runtime.activate_policy_profile({"profile": "autonomous"})
-                self.assertEqual(result["status"], "unchanged")
-                restart.assert_not_called()
-                run.assert_not_called()
             finally:
                 runtime.close()
 

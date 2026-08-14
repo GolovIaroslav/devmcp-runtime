@@ -155,7 +155,7 @@ Tool failures keep the same envelope with `isError: true`, a readable error in
 Known tool error codes include:
 
 ```json
-["ABSOLUTE_PATH_DENIED", "ACCESS_DENIED", "AGENT_TASK_FAILED", "BINARY_FILE", "CAPABILITY_LEASE_REQUIRED", "CAPABILITY_UNAVAILABLE", "CONTEXT_INVALID", "CONTEXT_NOT_FOUND", "EXECUTOR_FAILED", "EXECUTOR_PROTOCOL_ERROR", "GIT_CONFLICT", "GIT_ERROR", "GIT_NOT_FOUND", "HOST_CLI_PROBE_FAILED", "INTERNAL_ERROR", "INVALID_ARGUMENT", "INVALID_STATE", "IS_DIRECTORY", "NOT_A_DIRECTORY", "NOT_FOUND", "NOT_IMPLEMENTED", "OUTPUT_TOO_LARGE", "PATCH_BASELINE_LIMIT", "PATCH_CONFLICT", "PATCH_CONTEXT_AMBIGUOUS", "PATCH_CONTEXT_NOT_FOUND", "PATCH_FAILED", "PATCH_HUNKS_OVERLAP", "PATCH_ROLLBACK_FAILED", "PATH_OUTSIDE_WORKSPACE", "PERMISSION_REQUIRED", "PROJECT_ENVIRONMENT_ERROR", "REMOTE_HEAD_MISMATCH", "RUNTIME_DIR_UNWRITABLE", "SANDBOX_FAILED", "SANDBOX_UNAVAILABLE", "SERVICE_COMMAND_FAILED", "SERVICE_UNAVAILABLE", "SESSION_CLOSED", "SESSION_LIMIT_REACHED", "SESSION_NOT_FOUND", "STATE_DRIFT", "SYMLINK_ESCAPE", "TIMEOUT", "TRANSACTION_CONFLICT", "TRANSACTION_SNAPSHOT_FAILED", "TRANSACTION_TOO_LARGE", "TRANSACTION_UNSAFE_CHANGE", "TTY_UNSUPPORTED", "UNSUPPORTED_ENCODING", "WRITER_LEASE_CONFLICT"]
+["ABSOLUTE_PATH_DENIED", "ACCESS_DENIED", "AGENT_TASK_FAILED", "BINARY_FILE", "CAPABILITY_LEASE_REQUIRED", "CAPABILITY_UNAVAILABLE", "CONTEXT_INVALID", "CONTEXT_NOT_FOUND", "EXECUTION_DENIED", "EXECUTOR_FAILED", "EXECUTOR_PROTOCOL_ERROR", "GIT_CONFLICT", "GIT_ERROR", "GIT_NOT_FOUND", "HOST_CLI_PROBE_FAILED", "INTERNAL_ERROR", "INVALID_ARGUMENT", "INVALID_STATE", "IS_DIRECTORY", "NOT_A_DIRECTORY", "NOT_FOUND", "NOT_IMPLEMENTED", "OUTPUT_TOO_LARGE", "PATCH_BASELINE_LIMIT", "PATCH_CONFLICT", "PATCH_CONTEXT_AMBIGUOUS", "PATCH_CONTEXT_NOT_FOUND", "PATCH_FAILED", "PATCH_HUNKS_OVERLAP", "PATCH_ROLLBACK_FAILED", "PATH_OUTSIDE_WORKSPACE", "PERMISSION_REQUIRED", "PROJECT_ENVIRONMENT_ERROR", "REMOTE_HEAD_MISMATCH", "RUNTIME_DIR_UNWRITABLE", "SANDBOX_FAILED", "SANDBOX_UNAVAILABLE", "SERVICE_COMMAND_FAILED", "SERVICE_UNAVAILABLE", "SESSION_CLOSED", "SESSION_LIMIT_REACHED", "SESSION_NOT_FOUND", "STATE_DRIFT", "SYMLINK_ESCAPE", "TIMEOUT", "TRANSACTION_CONFLICT", "TRANSACTION_SNAPSHOT_FAILED", "TRANSACTION_TOO_LARGE", "TRANSACTION_UNSAFE_CHANGE", "TTY_UNSUPPORTED", "UNSUPPORTED_ENCODING", "WRITER_LEASE_CONFLICT"]
 ```
 
 Error categories are `validation`, `security`, `permission`, `runtime`,
@@ -313,19 +313,6 @@ installed runtime, and performs the same MCP-health-before-tunnel restart
 sequence as `service_restart`. No sudo or system-level package/service mutation
 is used.
 
-### activate_policy_profile
-
-Inputs: `"profile"`, `"approval_id"`.
-
-Annotations: `{"title":"Activate policy profile","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":false}`.
-
-Persists one supported host policy profile using the trusted DevMCP CLI and then
-schedules the same safe restart path as `service_restart`. Controlled by the
-dedicated `policy.manage` capability: Safe, Balanced, and Power ask; Autonomous
-auto-authorizes. This prevents a less-privileged profile from silently
-self-escalating. If restart scheduling fails after persistence, the runtime
-attempts to restore the previous profile before returning the failure.
-
 ### check_exec_environment
 
 Inputs: none.
@@ -464,56 +451,6 @@ The built-in `compiler-text` provider extracts path/line/column/severity without
 making an IDE or language server a core dependency. Reported paths are checked
 against the same authorized root resolver and annotated as authorized or
 outside-root; diagnostics themselves never grant filesystem authority.
-
-### grant_root
-
-Inputs: `"path"`, `"access"`, `"scope"`, `"ttl_seconds"`, `"task_scope_id"`, `"approval_id"`.
-
-Annotations: `{"title":"Grant additional root","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":false}`.
-
-Creates an opaque in-memory read/write root lease below the operator-configured
-grantable-root ceiling. Supported scopes are one operation, one logical task,
-and the logical session/context. Grants never survive restart and may not grant
-an ancestor of the primary workspace.
-
-### grant_capability
-
-Inputs: `"capability"`, `"target"`, `"scope"`, `"ttl_seconds"`, `"task_scope_id"`, `"approval_id"`.
-
-Annotations: `{"title":"Grant capability lease","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":false}`.
-
-Creates a narrow expiring capability lease for an executable/command pattern,
-dependency install, exact sensitive environment name, network target, or
-workspace mutation target. Destination-scoped network grants fail with
-`CAPABILITY_UNAVAILABLE` unless the selected operator backend can actually
-enforce those destinations. Permanent model-controlled escalation is not
-supported.
-
-### list_capability_leases
-
-Inputs: none.
-
-Annotations: `{"title":"List capability leases","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}`.
-
-Lists only non-expired leases owned by the current logical context/task scope.
-
-### revoke_capability_lease
-
-Inputs: `"lease_id"`.
-
-Annotations: `{"title":"Revoke capability lease","readOnlyHint":false,"destructiveHint":true,"idempotentHint":true,"openWorldHint":false}`.
-
-Revokes one owned lease. A lease from another context is not exposed as usable
-authority.
-
-### end_task_scope
-
-Inputs: none.
-
-Annotations: `{"title":"End task scope","readOnlyHint":false,"destructiveHint":true,"idempotentHint":true,"openWorldHint":false}`.
-
-Uses the common opaque `task_scope_id` argument to revoke all task-scoped leases
-owned by that logical task immediately; TTL remains fallback cleanup.
 
 ### list_dir
 
