@@ -50,7 +50,7 @@ def test_dashboard_loads_and_secret_is_not_rendered() -> None:
             thread.join(timeout=2)
 
 
-def test_policy_switch_and_csrf_failure() -> None:
+def test_execution_mode_switch_and_csrf_failure() -> None:
     with (
         tempfile.TemporaryDirectory() as tmp,
         patch.dict(os.environ, {"DEVMCP_CONFIG_DIR": tmp}, clear=False),
@@ -71,14 +71,22 @@ def test_policy_switch_and_csrf_failure() -> None:
                 csrf = page.locator('meta[name="csrf-token"]').get_attribute("content")
                 assert csrf
                 response = page.request.post(
-                    state.origin + "/api/policy/profile",
-                    form={"profile": "power", "csrf": csrf},
+                    state.origin + "/api/setup",
+                    form={
+                        "workspace": state.config["workspace"],
+                        "execution_mode": "plan",
+                        "csrf": csrf,
+                    },
                     headers={"Origin": state.origin},
                 )
                 assert response.status == 200
                 forbidden = page.request.post(
-                    state.origin + "/api/policy/profile",
-                    form={"profile": "safe", "csrf": csrf},
+                    state.origin + "/api/setup",
+                    form={
+                        "workspace": state.config["workspace"],
+                        "execution_mode": "build",
+                        "csrf": csrf,
+                    },
                     headers={"Origin": "http://evil.invalid"},
                 )
                 assert forbidden.status == 403
