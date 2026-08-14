@@ -145,6 +145,17 @@ def compare_snapshots(
     }
 
 
+def state_fingerprint(snapshot: dict[str, Any]) -> str:
+    canonical = {field: snapshot.get(field) for field in DRIFT_FIELDS}
+    encoded = json.dumps(
+        canonical,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def collect_state_snapshot(
     project: Path,
     *,

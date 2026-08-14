@@ -21,6 +21,8 @@ CHECKPOINT_FIELDS = {
     "active_slice",
     "branch",
     "head",
+    "checkpoint_id",
+    "state_fingerprint",
     "pr_number",
     "workflow_run_id",
     "dirty_state_summary",

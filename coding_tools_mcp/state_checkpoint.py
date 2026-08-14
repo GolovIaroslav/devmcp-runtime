@@ -5,6 +5,7 @@ from typing import Any
 
 from .state_store import (
     checkpoint_path,
+    context_checkpoint_path,
     new_checkpoint_id,
     now_iso,
     project_lock,
@@ -18,6 +19,13 @@ def read_state_checkpoint(project: Path, branch: str) -> dict[str, Any] | None:
         return read_json(checkpoint_path(project, branch))
 
 
+def read_authoritative_state_checkpoint(
+    project: Path, owner: str
+) -> dict[str, Any] | None:
+    with project_lock(project):
+        return read_json(context_checkpoint_path(project, owner))
+
+
 def write_state_checkpoint(
     project: Path,
     branch: str,
@@ -29,6 +37,7 @@ def write_state_checkpoint(
     logical_task: str | None,
     outcome: str,
     previous_checkpoint_id: str | None = None,
+    authority_owner: str | None = None,
 ) -> dict[str, Any]:
     record = {
         "version": 2,
@@ -47,4 +56,6 @@ def write_state_checkpoint(
     }
     with project_lock(project):
         write_json(checkpoint_path(project, branch, before=phase == "before"), record)
+        if authority_owner is not None and phase != "before":
+            write_json(context_checkpoint_path(project, authority_owner), record)
     return record
