@@ -216,7 +216,6 @@ class SessionTelemetry:
     def __init__(
         self,
         *,
-        permission_mode: str | None = None,
         execution_mode: str = "build",
         effective_access: str = "full-access",
         transport: str = "stdio",
@@ -231,9 +230,6 @@ class SessionTelemetry:
             "transport": _label(transport),
             "execution_mode": _label(execution_mode),
             "effective_access": _label(effective_access),
-            "legacy_permission_mode_compat": _label(
-                permission_mode or ("safe" if execution_mode == "plan" else "trusted")
-            ),
             "session_id": self._session_id,
             "$process_person_profile": False,
         }

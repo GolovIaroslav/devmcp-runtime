@@ -1,25 +1,28 @@
 # DevMCP Runtime
 
-Local sandboxed coding runtime for MCP clients, with configurable permissions,
-surgical patching, test/build workflows, and optional ChatGPT Developer Mode
-integration through Secure MCP Tunnel.
+Local coding runtime for MCP clients. BUILD is the default and runs with the
+current OS user's filesystem, environment, and network authority; PLAN is
+read-only. The selected project is coding context, not a BUILD filesystem
+security boundary. Optional ChatGPT Developer Mode integration is available
+through Secure MCP Tunnel.
 
 > This is an independent open-source project and is not affiliated with,
 > endorsed by, or supported by OpenAI.
 
 ## What is this?
 
-DevMCP Runtime gives an MCP client a local coding workspace with an explicit
-policy, a patch engine, registered tasks, sandboxed process execution, approval
-records, and a small local admin UI.
+DevMCP Runtime gives an MCP client a local coding context, patch engine,
+registered tasks, direct BUILD process execution, PLAN read-only operation,
+and a small local admin UI. High-level Git tools remain scoped to the selected
+project even though BUILD filesystem operations follow normal OS permissions.
 
 ```mermaid
 flowchart TD
   C[ChatGPT / any MCP client] --> R[DevMCP Runtime]
   R --> P[Patch engine]
-  R --> S[Sandbox]
+  R --> S[BUILD host execution / PLAN read-only]
   R --> T[Tests / builds / tasks]
-  R --> Q[Configurable policy]
+  R --> Q[Execution-mode adapter]
   R --> U[Loopback admin UI]
   R -. optional .-> X[Secure MCP Tunnel]
 ```
@@ -27,17 +30,16 @@ flowchart TD
 ## Why use it?
 
 - Keep the authoritative workspace separate from runtime state.
-- Let small, registered coding tasks run automatically while risky operations
-  create an exact, replay-resistant approval request.
-- Use Safe, Balanced, Power, or a fully data-driven Custom policy.
-- Inspect patches, audit events, services, and approvals locally.
+- Run registered coding tasks under the resolved PLAN/BUILD execution mode.
+- Use PLAN for read-only inspection or the default BUILD mode for normal local coding work.
+- Inspect patches, runtime status, services, and diagnostics locally.
 - Connect any MCP client; ChatGPT Developer Mode is documented as one optional
   integration, not the product identity.
 
 ## Quickstart (Linux)
 
-Prerequisites: Python 3.11+, Git, and bubblewrap (`bwrap`). A supported
-`tunnel-client` is optional for local-only use.
+Prerequisites: Python 3.11+ and Git. A supported `tunnel-client` is optional for
+local-only use. Bubblewrap is not required for normal BUILD execution.
 
 Before the first PyPI publication, install directly from the current source
 repository:
@@ -69,14 +71,14 @@ For long-running autonomous coding loops, see the
 [autonomous continuation protocol](docs/AGENT_AUTONOMY.md), including bounded
 external waits, durable non-secret checkpoints, and terminal-state rules.
 
-### ChatGPT permissions and DevMCP policy are separate
+### ChatGPT permissions and DevMCP execution modes are separate
 
-The ChatGPT app permission and DevMCP's local policy are two independent layers:
+The ChatGPT app permission and DevMCP's local execution mode are independent layers:
 
 - ChatGPT app permissions decide whether ChatGPT asks before invoking an app
   action.
-- DevMCP policy and approvals decide whether the local runtime allows, asks for,
-  or denies the operation.
+- DevMCP resolves PLAN/BUILD at startup. PLAN is read-only; BUILD uses the
+  current OS user's authority and does not add per-command approval gates.
 
 For the full MCP write/modify workflow, current OpenAI requirements are ChatGPT
 Business, Enterprise, or Edu, ChatGPT on the web, Developer Mode, and Secure MCP
@@ -94,42 +96,36 @@ persistent app permissions controlled by an administrator.
 
 `Never ask` disables ordinary ChatGPT app confirmation prompts, so use it only
 with an MCP server you trust. Especially risky actions may still be blocked by
-ChatGPT. DevMCP cannot programmatically disable ChatGPT approval prompts; its
-own local policy remains independent.
+ChatGPT. DevMCP cannot programmatically disable ChatGPT approval prompts.
 
 ## Features
 
 | Area | Behavior |
 | --- | --- |
-| Workspace | normalized relative paths, symlink-escape checks, Git inspection |
+| Workspace | selected project as default coding context/cwd; absolute BUILD paths follow OS permissions |
 | Patching | preview, baseline checks, atomic writes, rollback on commit failure |
-| Execution | argv-based registered tasks, `shell=False` by default, bounded output |
-| Sandbox | bubblewrap preferred on Linux; unsafe host mode is explicit and visible |
-| Approvals | expiry, exact operation digest, one-time consumption, stale cleanup |
+| Execution | BUILD runs direct current-user processes; PLAN is read-only; output remains bounded |
+| Git | high-level Git tools remain scoped to the selected repository |
 | Operations | structured logs and local audit records without secret values |
-| UI | loopback dashboard, policy matrix, approvals, diagnostics, service status |
+| UI | loopback dashboard, diagnostics, service status |
 
-## Permission profiles
+## Execution modes
 
-| Profile | Default behavior |
+| Mode | Behavior |
 | --- | --- |
-| Safe | read-only inspection and safe registered checks; delete/move require approval |
-| Balanced | default public profile; small coding loops auto-run, risky work asks |
-| Power | more local sandbox capabilities auto-run; host-boundary protections remain |
-| Custom | every capability is explicitly `AUTO`, `ASK`, or `DENY` |
+| PLAN | read-only runtime behavior |
+| BUILD | default; full access under the current OS user's filesystem, environment, and network authority |
 
-Change profiles with `devmcp policy profile balanced` or in the UI. The model
-cannot add workspace roots or weaken the minimum host-security floor through
-MCP operations.
+Legacy `permission_mode=safe|trusted|dangerous` inputs remain only as a thin
+compatibility adapter: `safe -> PLAN`, while `trusted` and `dangerous -> BUILD`.
 
 ## Safety Boundary
 
-Even Power does not authorize path traversal, symlink escape, arbitrary host
-filesystem access, access to `~/.ssh` or `~/.aws`, privilege escalation, daemon
-sockets, silent workspace replacement, or exposure of runtime secrets. Linux
-with bubblewrap is the supported security platform. macOS is experimental and
-core-only without an equivalent sandbox; Windows is experimental for protocol
-and selected workflows, not a bubblewrap-equivalent security claim.
+BUILD is not a filesystem sandbox: DevMCP executes as the current OS user and
+the operating system remains the authority boundary. The selected repository
+is context for coding and high-level Git tools, not a filesystem security root.
+PLAN remains the read-only mode. Transactional or external executor machinery
+may use isolation separately; that is not the normal BUILD execution model.
 
 ## Supported clients and integrations
 
@@ -142,9 +138,9 @@ or OpenAI product branding is used as the project identity.
 This beta does not claim screenshots or benchmark results that are not checked
 into the repository. Before public launch, capture real screenshots of:
 
-1. Balanced dashboard with MCP health and sandbox state;
-2. Permissions matrix and a changed Custom rule;
-3. Approval queue with an exact operation summary;
+1. Runtime dashboard with MCP health and BUILD/PLAN state;
+2. BUILD status showing current-user authority and no active sandbox;
+3. Selected-project context alongside high-level Git status;
 4. ChatGPT app in draft/development mode after `Scan Tools`.
 
 The deterministic coding-loop fixture is in `tests/compliance/fixtures`; run

@@ -2185,7 +2185,7 @@ class Runtime:
         tools = self.exposed_tool_names()
         landlock = landlock_status_payload()
         landlock["enabled"] = False
-        return {
+        payload = {
             "server": SERVER_NAME,
             "title": SERVER_TITLE,
             "version": __version__,
@@ -2205,8 +2205,6 @@ class Runtime:
             "execution_mode": self.execution_mode,
             "effective_access": self.effective_access,
             "project_roots": [str(root) for root in self.project_roots],
-            "readable_roots": [str(root) for root in self.readable_roots()],
-            "writable_roots": [str(root) for root in self.writable_roots()],
             "active_project": self.active_project,
             "patch_risk_thresholds": {
                 "max_removed_lines": self.max_removed_lines,
@@ -2233,7 +2231,6 @@ class Runtime:
             "permission_policy": {
                 "execution_mode": self.execution_mode,
                 "effective_access": self.effective_access,
-                "legacy_permission_mode_compat": self.permission_mode,
                 "status": "BUILD execution mode: direct host OS user authority (no in-process approval or command deny policy applied)"
                 if self.execution_mode == "build"
                 else "PLAN execution mode: read-only confinement",
@@ -2252,6 +2249,10 @@ class Runtime:
             "tools": tools,
             "tool_count": len(tools),
         }
+        if self.execution_mode != "build":
+            payload["readable_roots"] = [str(root) for root in self.readable_roots()]
+            payload["writable_roots"] = [str(root) for root in self.writable_roots()]
+        return payload
 
     def call_tool(
         self,
@@ -2656,7 +2657,6 @@ class Runtime:
             "untracked_paths": untracked_paths,
             "execution_mode": self.execution_mode,
             "effective_access": self.effective_access,
-            "permission_mode": self.permission_mode,
             "service": {
                 "version": __version__,
                 "installed_sha": installed_sha,
