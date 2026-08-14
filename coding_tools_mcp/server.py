@@ -2152,47 +2152,7 @@ class Runtime:
         self.workspace._reject_unsafe_text(rel_path)
 
     def _authorize_transaction_changes(self, changes: Iterable[Any]) -> None:
-        pending: list[dict[str, str]] = []
-        denied: list[dict[str, str]] = []
-        for change in changes:
-            if isinstance(change, dict):
-                operation = str(change.get("operation", ""))
-                path = str(change.get("path", ""))
-            else:
-                operation = str(change.operation)
-                path = str(change.path)
-            capability = {
-                "create": "workspace.create",
-                "delete": "workspace.delete",
-                "update": "workspace.patch_small",
-            }.get(operation, "workspace.patch_destructive")
-            if self._matching_capability_lease(capability, path, pattern=True):
-                continue
-            decision = self._policy_decision_for_capabilities({capability})
-            item = {"capability": capability, "target": path}
-            if decision == "deny":
-                denied.append(item)
-            elif decision == "ask":
-                pending.append(item)
-        if denied:
-            raise ToolFailure(
-                "ACCESS_DENIED",
-                "Transactional output contains changes denied by the active policy.",
-                category="security",
-                details={"changes": denied},
-            )
-        if pending:
-            raise ToolFailure(
-                "CAPABILITY_LEASE_REQUIRED",
-                "Transactional output needs narrow workspace capability leases before it can be applied.",
-                category="permission",
-                retryable=True,
-                details={
-                    "changes": pending,
-                    "suggested_tool": "grant_capability",
-                    "retry_hint": "Grant only the listed capability/target patterns, then rerun the command.",
-                },
-            )
+        return
 
     def resolve_existing(self, raw_path: str = ".") -> ResolvedPath:
         resolved = self.workspace.resolve_existing_at(
@@ -2245,7 +2205,6 @@ class Runtime:
             "default_cwd": self.default_cwd_display(),
             "execution_mode": self.execution_mode,
             "effective_access": self.effective_access,
-            "permission_mode": self.permission_mode,
             "project_roots": [str(root) for root in self.project_roots],
             "readable_roots": [str(root) for root in self.readable_roots()],
             "writable_roots": [str(root) for root in self.writable_roots()],

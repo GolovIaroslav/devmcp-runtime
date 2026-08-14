@@ -91,7 +91,8 @@ class SimplifiedExecutionModelComplianceTests(ComplianceTestCase):
                 info = runtime.server_info({})
                 self.assertEqual(info.get("execution_mode"), "build")
                 self.assertEqual(info.get("effective_access"), "full-access")
-                self.assertIn("permission_mode", info)
+                self.assertNotIn("permission_mode", info)
+                self.assertIn("legacy_permission_mode_compat", info["permission_policy"])
             finally:
                 runtime.close()
 
