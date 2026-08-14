@@ -359,12 +359,7 @@ than labeling pipes as a TTY.
 
 ## Legacy permission-mode compatibility
 
-`permission_mode=safe|trusted|dangerous` is the thin compatibility adapter for
-the new execution model: read-only, workspace-write, and full-access
-respectively. An explicitly selected policy profile keeps the older capability
-matrix behavior instead. `dangerous`/full-access disables the shell sandbox and
-secret filtering by design but still does not grant root, sudo, or automatic
-force-push. These compatibility names do not change the tool list.
+`permission_mode=safe|trusted|dangerous` is a thin ingress-only compatibility adapter for the execution model: `safe` maps to `plan` (read-only), while `trusted` and `dangerous` map to `build` (full-access). Mode resolution happens once at startup by `resolve_execution_mode()`. There is no runtime policy profile gate or in-process approval decision applied after resolution.
 
 `activate_policy_profile`, `grant_root`, `grant_capability`, and `end_task_scope`
 are retired as of v0.1.0b1 and no longer advertised in `tools/list`.

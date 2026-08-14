@@ -107,6 +107,9 @@ class RetirementRegressionTests(unittest.TestCase):
             "ModeCapabilities",
             "PERMISSION_MODE_CAPABILITIES",
             "AUTO_ALLOW_POLICY",
+            "policy_profile_from_args",
+            "policy_rules_from_config_file",
+            "permission_mode_from_args",
         )
         for pattern in forbidden_patterns:
             with self.subTest(pattern=pattern):
@@ -114,6 +117,18 @@ class RetirementRegressionTests(unittest.TestCase):
                     pattern,
                     text,
                     f"server.py must not contain retired pattern: {pattern}",
+                )
+
+    def test_runtime_init_signature_has_no_retired_kwargs(self) -> None:
+        import inspect
+
+        params = inspect.signature(Runtime.__init__).parameters
+        for param_name in ("policy_profile", "policy_rules", "grantable_roots"):
+            with self.subTest(param=param_name):
+                self.assertNotIn(
+                    param_name,
+                    params,
+                    f"Runtime.__init__ must not take retired parameter '{param_name}'",
                 )
 
 

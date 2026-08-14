@@ -20,15 +20,9 @@ operations.
 
 ## New permission model
 
-At Runtime initialization there is one effective capability matrix. An explicit
-policy profile is authoritative. When only a legacy permission mode is supplied,
-it is converted once (`safe -> safe`, `trusted -> power`,
-`dangerous -> autonomous`). After initialization command authorization does not
-consult a second legacy permission matrix.
+At Runtime initialization, execution authority is determined once by `resolve_execution_mode()`. DevMCP operates in two execution modes: PLAN (read-only confinement) and BUILD (full-access direct host user). Legacy `--permission-mode` flags act as ingress compatibility adapters (`safe -> plan`, `trusted` / `dangerous` -> `build`). All authority is resolved at startup; there is no runtime capability matrix, policy profile gate, or in-process approval decision.
 
-The matrix answers user-facing `auto` / `ask` / `deny`. It does **not** own the
-host-security floor. The floor remains non-negotiable even in `autonomous` or a
-legacy `dangerous` configuration.
+The host-security floor remains non-negotiable in all execution modes.
 
 ## Immutable host-security floor
 

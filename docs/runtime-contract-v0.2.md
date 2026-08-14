@@ -7,7 +7,7 @@ Protocol target: MCP `2025-11-25`, with explicit compatibility for `2025-06-18`.
 This contract describes one stable, model-neutral coding tool set. There are no
 tool profiles and the server does not add or remove process tools dynamically.
 `apply_patch` is the only direct file-mutation primitive; `edit_file` is not
-provided. Permission modes alter command policy, not the advertised catalog.
+provided. DevMCP operates in two execution modes: PLAN (read-only) and BUILD (full-access). Legacy --permission-mode flags map at ingress: safe -> plan, trusted/dangerous -> build.
 
 One switch, `--dangerously-fake-readonly-annotations`, rewrites the exposure hints
 in `tools/list` for test/debug compatibility with clients that gate on mutating
@@ -91,14 +91,9 @@ registry cleanup terminate/release owned resources.
   accepted only when their canonical targets remain inside an authorized root.
   NUL bytes, sibling/ancestor escapes, symlink escapes, and protected
   credential/runtime paths remain rejected.
-- The selected project is the primary root. `grant_root` may add an existing
-  directory below the operator-configured `DEVMCP_GRANTABLE_ROOTS` ceiling as
-  an in-memory `once`, `task`, or `session` read/write capability lease. Grants
-  never survive restart or expand the operator ceiling. Filesystem tools,
-  patching, and command path checks use the same root set. Normal shell
-  execution does not create a repository snapshot.
-  Project discovery roots are not grant authority; when
-  `DEVMCP_GRANTABLE_ROOTS` is unset, the additional-root ceiling is empty.
+- The selected project is the primary root. Path validation (workspace boundary,
+  symlink rejection, NUL/traversal rejection) applies to all file tools.
+  Normal shell execution does not create a repository snapshot.
 - `apply_patch` parses and validates every operation before committing.
 - Every replacement is prepared and fsynced in the target directory, then
   installed with `os.replace`.

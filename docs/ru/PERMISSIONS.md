@@ -1,37 +1,51 @@
-# Права
+# Права доступа DevMCP Runtime
 
-Политика хранится как данные и не меняет MCP-схемы. Профили: `safe`,
-`balanced`, `power`, `autonomous`, `custom`; для каждой capability задаётся `auto`, `ask`
-или `deny`.
+Права исполнения в runtime определяются один раз при старте единым резолвером:
+`resolve_execution_mode()` в `coding_tools_mcp/policy.py`.
 
-В Balanced чтение, поиск, маленькие патчи и зарегистрированные безопасные
-задачи выполняются автоматически. Сеть, зависимости, миграции, push,
-чувствительное окружение и разрушительные патчи требуют подтверждения.
-Минимальный security floor действует во всех профилях.
+## Режимы исполнения (Execution Modes)
 
-`autonomous` — явный режим для автономной разработки без локальной очереди
-approval: все реализованные capability получают `auto`, включая arbitrary exec
-в sandbox, сеть, зависимости, destructive workspace-операции, Git push,
-sensitive env, public bind и управление user-service DevMCP. Hard boundary при
-этом не отключается: privilege escalation (`sudo`, `su`, `doas`), setuid/setgid,
-выход за выбранный project, sandbox escape и Docker/Podman socket по-прежнему
-запрещены. Для host-side обслуживания доступны `service_status`,
-`service_doctor` и отложенный `service_restart`; restart ждёт успешный MCP
-health перед рестартом tunnel, чтобы не ловить race при запуске listener.
+Поддерживаются два режима:
 
-Для Git sync используется отдельная capability `git.sync`: fetch с prune и
-только fast-forward pull. Safe/Balanced требуют approval, Power/Autonomous
-разрешают автоматически. Удаление remote branch контролируется `git.push`.
+```text
+--execution-mode plan     # режим чтения (read-only); apply_patch и exec_command запрещены
+--execution-mode build    # полный доступ (full-access); права текущего пользователя ОС (по умолчанию)
+```
 
-Изменение persistent policy вынесено в отдельную `policy.manage`: Safe,
-Balanced и Power всегда требуют approval, Autonomous выполняет автоматически.
-`activate_policy_profile` сохраняет выбранный профиль и сам планирует безопасный
-restart, без arbitrary shell и ручного редактирования config.
+Примеры:
 
-Разрешения приложения ChatGPT и локальная policy DevMCP — независимые слои:
-первый определяет диалоги подтверждения ChatGPT, второй — allow/ask/deny внутри
-runtime. `Never ask` отключает обычные подтверждения только для приложения и
-должен использоваться только с доверенным сервером; DevMCP не может отключить
-эти диалоги программно, а особенно рискованные действия ChatGPT всё равно может
-заблокировать. В Business/Enterprise/Edu постоянные app permissions может
-контролировать администратор. См. [актуальную документацию OpenAI](https://help.openai.com/en/articles/12584461-developer-mode-and-full-mcp-connectors-in-chatgpt).
+```bash
+devmcp service update --execution-mode build   # явный запуск в режиме BUILD
+devmcp service update                          # BUILD используется по умолчанию
+```
+
+## Адаптеры совместимости (Ingress Adapters)
+
+Старый флаг `--permission-mode` сохраняется в качестве адаптера входного формата:
+
+| `--permission-mode` | Отображается в |
+|---|---|
+| `safe` | PLAN (read-only) |
+| `trusted` | BUILD (full-access) |
+| `dangerous` | BUILD (full-access) |
+
+Эти значения разрешаются только при запуске. Они не влияют на поведение runtime после разрешения режима.
+
+## Доступ в режиме BUILD
+
+В режиме BUILD сервер работает с правами текущего пользователя ОС. Никаких внутрипроцессных проверок approval, списков запрещенных команд или матриц профилей не применяется. Проверка путей (границы workspace, отказ от симлинков, проверка NUL/traversal) сохраняется для прямых файловых инструментов.
+
+## Доступ в режиме PLAN
+
+В режиме PLAN:
+- `read_file`, `read_files`, `list_dir`, `list_files`, `search_text`, `view_image`, `preview_patch`, `git_status`, `git_diff`, `git_log`, `git_show`, `git_blame` — разрешены
+- `apply_patch` — запрещён (`PERMISSION_REQUIRED`)
+- `exec_command` — запрещён (`PERMISSION_REQUIRED`)
+- Все остальные read-only инструменты — разрешены
+
+## Инварианты безопасности
+
+Применяются во всех режимах:
+- Прямые файловые инструменты отклоняют абсолютные пути, `..` traversal, NUL-байты и симлинки, выходящие за пределы workspace.
+- Проверки `exec_command` выполняются на уровне ОС.
+- Удаленный доступ требует аутентификации по Bearer или OAuth.

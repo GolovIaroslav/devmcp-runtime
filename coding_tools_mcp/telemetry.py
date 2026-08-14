@@ -231,7 +231,7 @@ class SessionTelemetry:
             "transport": _label(transport),
             "execution_mode": _label(execution_mode),
             "effective_access": _label(effective_access),
-            "permission_mode": _label(
+            "legacy_permission_mode_compat": _label(
                 permission_mode or ("safe" if execution_mode == "plan" else "trusted")
             ),
             "session_id": self._session_id,

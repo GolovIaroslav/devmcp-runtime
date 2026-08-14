@@ -599,7 +599,6 @@ class ReleaseLifecycleTests(unittest.TestCase):
             auth_token_file=None,
             host="0.0.0.0",
             port=8765,
-            policy_profile=None,
             permission_mode="trusted",
             allow_network=True,
             shell_env_inherit=None,

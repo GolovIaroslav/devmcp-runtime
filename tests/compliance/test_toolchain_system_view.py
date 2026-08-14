@@ -52,7 +52,7 @@ class ToolchainSystemViewTests(unittest.TestCase):
             raise unittest.SkipTest(f"real bwrap execution unavailable: {reason}")
 
     def _runtime(self, root: Path) -> Runtime:
-        return Runtime(root, policy_profile="autonomous", sandbox_backend="bwrap")
+        return Runtime(root, sandbox_backend="bwrap")
 
     def _workspace_runtime(self, root: Path) -> Runtime:
         return Runtime(root, permission_mode="trusted", sandbox_backend="bwrap")

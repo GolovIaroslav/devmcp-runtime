@@ -699,7 +699,6 @@ class RuntimeHelperTests(unittest.TestCase):
             runtime = Runtime(
                 Path(tmp),
                 permission_mode="dangerous",
-                policy_profile="autonomous",
                 shell_env_policy=ShellEnvPolicy(inherit="all"),
             )
             host_env = {
@@ -771,9 +770,7 @@ class RuntimeHelperTests(unittest.TestCase):
 
     def test_completed_execution_releases_owned_sandbox(self) -> None:
         with TemporaryDirectory() as tmp:
-            runtime = Runtime(
-                Path(tmp), policy_profile="balanced", sandbox_backend="unsafe"
-            )
+            runtime = Runtime(Path(tmp), sandbox_backend="unsafe")
             try:
                 result = runtime.run_task(
                     {"task_id": "test.echo", "timeout_ms": 5000, "yield_time_ms": 5000}
@@ -811,9 +808,7 @@ class RuntimeHelperTests(unittest.TestCase):
             (workspace / "Makefile").write_text(
                 "test:\n\t@printf 'project-check-ok\\n'\n", encoding="utf-8"
             )
-            runtime = Runtime(
-                workspace, policy_profile="balanced", sandbox_backend="unsafe"
-            )
+            runtime = Runtime(workspace, sandbox_backend="unsafe")
             try:
                 sandbox_root = runtime.runtime_dir / "sandboxes"
                 self.assertEqual(
@@ -1212,7 +1207,7 @@ class RuntimeHelperTests(unittest.TestCase):
             self.skipTest("git is not available")
         with TemporaryDirectory() as tmp:
             workspace = Path(tmp)
-            runtime = Runtime(workspace, policy_profile="autonomous")
+            runtime = Runtime(workspace)
             with patch.dict(
                 server_module.os.environ,
                 {"PATH": os.environ.get("PATH", "")},
@@ -2092,7 +2087,7 @@ Maven home: /usr/share/maven
             (second / "tracked.txt").write_text("second\n", encoding="utf-8")
             init_git(first)
             init_git(second)
-            runtime = Runtime(first, policy_profile="balanced", project_roots=[library])
+            runtime = Runtime(first, project_roots=[library])
             try:
                 projects = runtime.list_projects({})["projects"]
                 self.assertEqual(
@@ -2130,12 +2125,8 @@ Maven home: /usr/share/maven
             (second / "tracked.txt").write_text("second\n", encoding="utf-8")
             init_git(first)
             init_git(second)
-            session_a = Runtime(
-                first, policy_profile="balanced", project_roots=[library]
-            )
-            session_b = Runtime(
-                first, policy_profile="balanced", project_roots=[library]
-            )
+            session_a = Runtime(first, project_roots=[library])
+            session_b = Runtime(first, project_roots=[library])
             try:
                 session_a.select_project({"project": "first"})
                 session_b.select_project({"project": "second"})
@@ -2171,7 +2162,6 @@ Maven home: /usr/share/maven
             state_file = root / "config" / "active-project"
             first_session = Runtime(
                 first,
-                policy_profile="autonomous",
                 project_roots=[library],
                 active_project_file=state_file,
             )
@@ -2186,7 +2176,6 @@ Maven home: /usr/share/maven
                 first_session.close()
             fresh_session = Runtime(
                 first,
-                policy_profile="autonomous",
                 project_roots=[library],
                 active_project_file=state_file,
             )
@@ -2438,7 +2427,7 @@ Maven home: /usr/share/maven
                 encoding="utf-8",
             )
             fake.chmod(0o700)
-            runtime = Runtime(repo_b, policy_profile="autonomous", project_roots=[root])
+            runtime = Runtime(repo_b, project_roots=[root])
             try:
                 runtime.select_project({"project": "a"})
                 with patch.object(
@@ -2478,7 +2467,7 @@ Maven home: /usr/share/maven
                 encoding="utf-8",
             )
             fake.chmod(0o700)
-            runtime = Runtime(repo_a, policy_profile="autonomous", project_roots=[root])
+            runtime = Runtime(repo_a, project_roots=[root])
             try:
                 runtime.select_project({"project": "a"})
                 runtime.select_project({"project": "b"})
@@ -2521,13 +2510,11 @@ Maven home: /usr/share/maven
             fake.chmod(0o700)
             session_a = Runtime(
                 repo_a,
-                policy_profile="autonomous",
                 project_roots=[root],
                 active_project_file=state_file,
             )
             session_b = Runtime(
                 repo_a,
-                policy_profile="autonomous",
                 project_roots=[root],
                 active_project_file=state_file,
             )
@@ -2637,7 +2624,7 @@ Maven home: /usr/share/maven
                 encoding="utf-8",
             )
             fake.chmod(0o700)
-            runtime = Runtime(repo_a, policy_profile="autonomous", project_roots=[root])
+            runtime = Runtime(repo_a, project_roots=[root])
             try:
                 runtime.select_project({"project": "b"})
                 with patch.object(
@@ -2662,7 +2649,7 @@ Maven home: /usr/share/maven
                 (repo / "tracked.txt").write_text("base\n", encoding="utf-8")
                 init_git(repo)
             (repo_b / "tracked.txt").write_text("dirty-b\n", encoding="utf-8")
-            runtime = Runtime(repo_a, policy_profile="autonomous", project_roots=[root])
+            runtime = Runtime(repo_a, project_roots=[root])
             try:
                 runtime.select_project({"project": "b"})
                 with patch.object(runtime, "_antigravity_binary") as binary:
@@ -2697,7 +2684,7 @@ Maven home: /usr/share/maven
                 encoding="utf-8",
             )
             fake.chmod(0o700)
-            runtime = Runtime(repo, policy_profile="autonomous", project_roots=[root])
+            runtime = Runtime(repo, project_roots=[root])
             try:
                 with patch.object(
                     runtime, "_antigravity_binary", return_value=str(fake)
@@ -2740,7 +2727,7 @@ Maven home: /usr/share/maven
                 encoding="utf-8",
             )
             fake.chmod(0o700)
-            runtime = Runtime(repo, policy_profile="autonomous", project_roots=[root])
+            runtime = Runtime(repo, project_roots=[root])
             try:
                 with patch.object(
                     runtime, "_antigravity_binary", return_value=str(fake)
@@ -2779,7 +2766,7 @@ Maven home: /usr/share/maven
                 encoding="utf-8",
             )
             fake.chmod(0o700)
-            runtime = Runtime(repo, policy_profile="autonomous", project_roots=[root])
+            runtime = Runtime(repo, project_roots=[root])
             try:
                 with patch.object(
                     runtime, "_antigravity_binary", return_value=str(fake)
@@ -2840,7 +2827,7 @@ Maven home: /usr/share/maven
                 encoding="utf-8",
             )
             fake.chmod(0o700)
-            runtime = Runtime(repo, policy_profile="autonomous", project_roots=[root])
+            runtime = Runtime(repo, project_roots=[root])
             try:
                 with patch.object(
                     runtime, "_antigravity_binary", return_value=str(fake)
@@ -2903,7 +2890,7 @@ Maven home: /usr/share/maven
                 encoding="utf-8",
             )
             fake.chmod(0o700)
-            runtime = Runtime(repo, policy_profile="autonomous", project_roots=[root])
+            runtime = Runtime(repo, project_roots=[root])
             try:
                 with patch.object(
                     runtime, "_antigravity_binary", return_value=str(fake)
@@ -2944,7 +2931,7 @@ Maven home: /usr/share/maven
                 encoding="utf-8",
             )
             fake.chmod(0o700)
-            runtime = Runtime(repo, policy_profile="autonomous", project_roots=[root])
+            runtime = Runtime(repo, project_roots=[root])
             original_run = server_module.subprocess.run
 
             def fail_worktree_remove(*args: object, **kwargs: object) -> object:
@@ -2999,7 +2986,7 @@ Maven home: /usr/share/maven
                 encoding="utf-8",
             )
             fake.chmod(0o700)
-            runtime = Runtime(repo, policy_profile="autonomous", project_roots=[root])
+            runtime = Runtime(repo, project_roots=[root])
             try:
                 with patch.object(
                     runtime, "_antigravity_binary", return_value=str(fake)
@@ -3052,7 +3039,7 @@ Maven home: /usr/share/maven
                 encoding="utf-8",
             )
             fake.chmod(0o700)
-            runtime = Runtime(repo, policy_profile="autonomous", project_roots=[root])
+            runtime = Runtime(repo, project_roots=[root])
             try:
                 with patch.object(
                     runtime, "_antigravity_binary", return_value=str(fake)
@@ -3105,7 +3092,7 @@ Maven home: /usr/share/maven
                 encoding="utf-8",
             )
             fake.chmod(0o700)
-            runtime = Runtime(repo, policy_profile="autonomous", project_roots=[root])
+            runtime = Runtime(repo, project_roots=[root])
             try:
                 with patch.object(
                     runtime, "_antigravity_binary", return_value=str(fake)
@@ -3147,7 +3134,7 @@ Maven home: /usr/share/maven
                 encoding="utf-8",
             )
             fake.chmod(0o700)
-            runtime = Runtime(repo, policy_profile="autonomous", project_roots=[root])
+            runtime = Runtime(repo, project_roots=[root])
             try:
                 with patch.object(
                     runtime, "_antigravity_binary", return_value=str(fake)
@@ -3198,7 +3185,7 @@ Maven home: /usr/share/maven
                 {"DEVMCP_CONFIG_DIR": str(root / "config")},
                 clear=False,
             ):
-                runtime = Runtime(repo, policy_profile="balanced", project_roots=[root])
+                runtime = Runtime(repo, project_roots=[root])
                 try:
                     branch = runtime.git_create_branch({"name": "feature/p0"})
                     self.assertEqual(branch["branch"], "feature/p0")
@@ -3295,9 +3282,7 @@ Maven home: /usr/share/maven
             )
             (repo / "uv.lock").write_text("version = 1\n", encoding="utf-8")
             (repo / "tests").mkdir()
-            runtime = Runtime(
-                repo, policy_profile="balanced", project_roots=[Path(tmp)]
-            )
+            runtime = Runtime(repo, project_roots=[Path(tmp)])
             try:
                 checks = runtime.project_checks({})["checks"]
                 test_check = next(check for check in checks if check["id"] == "test")
@@ -3437,7 +3422,7 @@ Maven home: /usr/share/maven
 
     def test_broken_generic_git_tasks_are_not_advertised(self) -> None:
         with TemporaryDirectory() as tmp:
-            runtime = Runtime(Path(tmp), policy_profile="balanced")
+            runtime = Runtime(Path(tmp))
             try:
                 self.assertEqual(runtime.list_tasks({"category": "git"})["tasks"], [])
                 with self.assertRaises(ToolFailure) as missing:

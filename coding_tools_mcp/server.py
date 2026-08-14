@@ -544,34 +544,6 @@ def shell_env_policy_from_args(args: argparse.Namespace) -> ShellEnvPolicy:
     )
 
 
-def permission_mode_from_args(args: argparse.Namespace) -> str:
-    skip_all = bool(
-        getattr(args, "dangerously_skip_all_permissions", False)
-    ) or truthy_env(os.environ.get(f"{ENV_PREFIX}_DANGEROUSLY_SKIP_ALL_PERMISSIONS"))
-    raw_mode = (
-        getattr(args, "permission_mode", None)
-        or os.environ.get(f"{ENV_PREFIX}_PERMISSION_MODE")
-        or ("dangerous" if skip_all else "safe")
-    )
-    mode = raw_mode.strip().lower()
-    if mode not in PERMISSION_MODE_CHOICES:
-        supported = ", ".join(PERMISSION_MODE_CHOICES)
-        raise ValueError(f"permission mode must be one of: {supported}")
-    return "dangerous" if skip_all else mode
-
-
-def policy_profile_from_args(args: argparse.Namespace) -> None:
-    """Retired: policy profiles are no longer a runtime authority. Always returns None."""
-    return None
-
-
-def policy_rules_from_config_file(
-    path: str | None, profile: str | None
-) -> dict[str, str] | None:
-    """Retired: custom policy config file is no longer supported. Always returns None."""
-    return None
-
-
 @dataclass(frozen=True)
 class ToolSpec:
     """Single source of truth for one tool's title, description, and annotation hints.
@@ -1581,17 +1553,14 @@ class Runtime:
         project_context: ProjectContext | None = None,
         fake_readonly_annotations: bool = False,
         transport: str = "stdio",
-        policy_profile: str | None = None,
         sandbox_backend: str = "bwrap",
         max_removed_lines: int = 200,
         max_removed_percent: float = 30.0,
-        policy_rules: dict[str, Any] | None = None,
         project_roots: list[Path] | None = None,
         git_credentials_file: Path | None = None,
         active_project_file: Path | None = None,
         logical_context_registry: LogicalContextRegistry | None = None,
         shared_job_registry: SharedJobRegistry | None = None,
-        grantable_roots: list[Path] | None = None,
         persist_project_selection: bool = True,
     ) -> None:
         from .sandbox import ExecutionSandbox, detect_sandbox_backend

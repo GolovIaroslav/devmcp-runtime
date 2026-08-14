@@ -10,9 +10,7 @@ devmcp service install
 devmcp start
 ```
 
-Open the loopback admin UI with `devmcp ui`. Select a policy profile there (or
-with `devmcp policy profile balanced`); the runtime reads `config.toml` each
-time `devmcp serve` starts, including after `devmcp restart`.
+Select an execution mode (`--execution-mode build` for full-access default, or `--execution-mode plan` for read-only confinement); authority resolves once at startup.
 
 For a source checkout, use `uv pip install -e '.[dev]'`. After trusted
 publishing for `devmcp-runtime` has been deliberately configured, the install
