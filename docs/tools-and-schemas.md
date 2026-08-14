@@ -26,7 +26,7 @@ The default catalog contains exactly 57 tools:
 - `current_project`: Show the repository selected for the current MCP session.
 - `local_state_snapshot`: Return project, branch, HEAD/upstream, dirty/staged paths, runtime SHA/version, and self-host state in one call.
 - `project_checks`: Discover bounded project-native verification commands.
-- `run_project_check`: Run one discovered project-native check in the sandbox.
+- `run_project_check`: Run one discovered project-native check using the resolved PLAN/BUILD execution model.
 - `run_checks_for_diff`: Select relevant discovered checks from changed files and run them server-side in one MCP call.
 - `read_file`: Read file.
 - `read_files`: Read multiple files.
@@ -96,13 +96,9 @@ the checkpoint store into an arbitrary secret or blob store. Common credential
 and private-key value forms are rejected as well. `clear` removes the record
 after terminal completion.
 
-`service_status` and `service_doctor` execute only fixed DevMCP operator
-commands on the host; they do not accept arbitrary command text. `service_restart`
-is controlled by the `service.manage` policy capability and uses a delayed
-user-systemd transient unit so the current MCP response can complete before the
-running service is replaced.
+`service_status` and `service_doctor` execute only fixed DevMCP operator commands on the host; they do not accept arbitrary command text. `service_restart` uses a delayed user-systemd transient unit so the current MCP response can complete before the running service is replaced.
 
-`service_update` uses the same `service.manage` capability. It accepts an
+`service_update` accepts an
 optional `source_project` selector and only considers discovered local Git
 checkouts that identify themselves as the `devmcp-runtime` package. The normal
 path must be on `main`, have no tracked or staged changes, and exactly match
@@ -145,38 +141,13 @@ relative or absolute.
 
 ## Permission and capability model
 
-The normal execution model is the three-mode compatibility surface:
-`safe -> read-only`, `trusted -> workspace-write`, and
-`dangerous -> full-access`. Ordinary shell execution in those modes does not
-perform per-capability approval evaluation. Explicit policy profiles
-(`safe`, `balanced`, `power`, `autonomous`, `custom`) remain supported as a
-compatibility path and may still resolve named capabilities to `auto`, `ask`, or
-`deny`. `server_info` and `check_exec_environment` expose which compatibility
-policy is active.
+The internal execution model is `PLAN` and `BUILD`. PLAN is read-only. BUILD is the default and runs commands directly as the current OS user with normal host filesystem, HOME/PATH, environment, toolchains, temporary directories, and network access. The selected project is the default coding context/cwd, not a filesystem security boundary.
 
-High-level file and Git tools retain their canonical repository/path guardrails
-regardless of execution mode, and no mode grants sudo/root or automatic force
-push. Shell guarantees are intentionally mode-specific: read-only keeps a
-read-only workspace boundary; workspace-write grants direct selected-workspace
-writes and normal development network/toolchain access; full-access additionally
-inherits arbitrary user-readable/writable host filesystem access, ambient
-environment secrets, normal host network/TMP/HOME, and Docker/Podman access when
-the current user already has it. Explicit policy profiles may still apply the
-older capability/secret/network restrictions as a compatibility path.
-
-
-The local bwrap namespace cannot truthfully enforce `github.com`-only egress, so
-destination-scoped network leases remain meaningful only on explicit
-policy-managed/specialized executor paths with real target filtering. Normal
-workspace-write and full-access intentionally use ordinary development network
-access rather than per-destination approval.
+`permission_mode=safe|trusted|dangerous` is only an ingress compatibility adapter: `safe -> plan`, while `trusted` and `dangerous -> build`. There is no per-command ApprovalEngine, capability lease, network-target gate, or command deny-list evaluation in BUILD. High-level Git tools remain scoped to the selected repository and keep their correctness checks (explicit paths, branch/ref validation, CAS/state-drift checks, and force-push prohibition).
 
 ## Bounded Antigravity delegation
 
-`antigravity_delegate` is a fallback for a coding task that cannot be completed
-through a more specific DevMCP primitive. It is controlled by `agent.delegate`:
-Safe, Balanced, and Power deny it; Autonomous auto-authorizes it, and Custom may
-explicitly configure it. The tool runs the host `agy` binary in a temporary
+`antigravity_delegate` is a specialized fallback with its own worktree and validation constraints. It does not use the retired per-command capability/approval layer. The tool runs the host `agy` binary in a temporary
 detached Git worktree at the selected project's current HEAD, not in the
 operator's live checkout. The live checkout must have no tracked or staged
 modifications before delegation; untracked files are not copied into the
@@ -207,20 +178,14 @@ commit, push, and remote-branch deletion are host-side Git
 operations scoped to the selected repository rather than generic sandbox tasks.
 `git_commit` requires a non-empty path list, rejects unrelated pre-staged paths,
 and does not run `git add -A`. `git_push` accepts only a configured remote name,
-rejects force push, withholds raw push output on failure, and remains controlled
-by the `git.push` policy capability.
+rejects force push, withholds raw push output on failure, and verifies the authoritative remote branch head after push.
 
 `git_fetch` always uses `--prune`; `git_pull` always uses `--ff-only` and refuses
 to run with tracked or staged worktree changes. `git_merge_remote_branch` also
 requires a clean tracked/staged worktree, accepts only a fetched branch from a
-configured remote, and runs `git merge --abort` on failure. These operations are
-controlled by `git.sync`. Local branch deletion uses only `git branch -d`, never `-D`. Remote
-branch deletion accepts only a configured remote and is controlled by
-`git.push`.
+configured remote, and runs `git merge --abort` on failure. Successful fetch/pull/merge transitions refresh the state checkpoint; unexpected external mutations still fail with `STATE_DRIFT`. Local branch deletion uses only `git branch -d`, never `-D`. Remote branch deletion accepts only a configured remote.
 
-The generic task registry intentionally does not advertise Git commands because
-the execution sandbox does not expose repository Git metadata. Read-only Git
-inspection and mutations use the dedicated Git tools instead.
+The generic task registry intentionally does not advertise Git commands. High-level Git inspection and mutation tools remain explicitly scoped to the selected repository.
 
 ## Project-native verification
 
@@ -232,9 +197,7 @@ back to a host bare `pytest`. The resolved environment removes the isolated
 DevMCP Runtime venv bin from PATH, then prefers project-local tooling and a
 sanitized host PATH. `project_checks` reports the resolved interpreter/package
 manager/PATH; `run_project_check` preflights its executable and reports missing
-project dependencies explicitly. It executes only a discovered argv in the
-normal repository sandbox and does not auto-install dependencies or enable
-network access.
+project dependencies explicitly. It executes only a discovered argv using the resolved PLAN/BUILD execution model and does not auto-install dependencies.
 
 ## Result envelope
 
@@ -260,12 +223,7 @@ count, dimensions, resize metadata, and warnings, but no base64 or data URL.
 
 ## Patch behavior
 
-`apply_patch` accepts the standard envelope. Preview and small Add/Update
-patches are automatic. Delete and Move are controlled by the active data policy:
-Safe and Balanced ask, and Power can allow them. An Update is routed
-to local out-of-band approval only when it removes more than 200 existing lines
-or more than 30% of an existing file. Unique context, baseline/hash protection,
-atomic writes, rollback, and symlink defenses apply to every patch.
+`apply_patch` accepts the standard envelope. Patch parsing, exact context matching, baseline/hash preconditions, atomic writes, rollback on multi-file failure, symlink defenses, and destructive-change thresholds remain correctness safeguards. They do not require retired approval IDs.
 
 ```text
 *** Begin Patch
@@ -288,48 +246,13 @@ Mode bits, BOM, and newline style are preserved.
 
 ## Command and output behavior
 
-`exec_command` retains the compatibility shell-string surface and still accepts
-legacy `argv`. `exec_argv` is the preferred first-class structured execution
-primitive. It passes the argument vector without shell parsing and otherwise
-uses the same three execution modes as `exec_command`. Registered tasks and
-project checks reuse that process/session lifecycle rather than introducing a
-second executor.
+`exec_command` retains the compatibility shell-string surface and still accepts legacy `argv`. `exec_argv` is the preferred structured primitive. BUILD launches directly on the host as the current user; PLAN denies process execution. Registered tasks and project checks reuse the same process/session lifecycle.
 
-Shell syntax is not itself the security boundary. `$()`, pipes, redirection,
-heredocs, `&&`, and ordinary inline scripts are ordinary shell behavior. In
-read-only/workspace-write the bwrap mount layout supplies the filesystem
-boundary; full-access deliberately has no shell filesystem/network sandbox.
-Privilege escalation remains rejected and bwrap drops capabilities where bwrap
-is used.
+Shell syntax such as `$()`, pipes, redirection, heredocs, `&&`, and inline scripts is ordinary BUILD behavior. BUILD has no DevMCP filesystem/network sandbox; OS-user permissions are the authority. PLAN does not execute shell commands.
 
-Inside `bwrap`, `/tmp` is a writable private tmpfs and `TMPDIR`, `TMP`, and
-`TEMP` all point to `/tmp`; host `/tmp` is not the command's writable namespace.
-The read-only system view is declarative rather than a whole `/etc` bind: normal
-OS/linker/toolchain metadata is mounted read-only, CA/DNS metadata is added when
-network is granted, and sensitive account/credential files such as
-`/etc/shadow`, SSH, cloud, and package-registry credentials are excluded.
+Both `exec_command` and `exec_argv` default to non-transactional direct execution in BUILD. `transaction_mode: "apply"` remains an explicit compatibility path that creates a bounded snapshot, checks authoritative baselines, and applies a staged delta. Concurrent edits produce `TRANSACTION_CONFLICT`; no path uses `git reset --hard` or erases pre-existing dirty WIP.
 
-Both `exec_command` and `exec_argv` default to non-transactional execution.
-Read-only mounts the authoritative workspace read-only; workspace-write mounts
-that same tree read-write; full-access launches directly on the host as the
-current user. None of those normal paths copies `.venv` or the repository.
-`transaction_mode: "apply"` remains explicit opt-in: only that compatibility
-path creates a filtered snapshot, checks authoritative baselines, and applies a
-bounded staged delta. Concurrent edits produce `TRANSACTION_CONFLICT`; no path
-uses `git reset --hard` or erases pre-existing dirty WIP.
-
-The normal local path is intentionally simple: bwrap-only for read-only and
-workspace-write on Linux, direct subprocess for full-access. Specialized
-`inherited_sandbox`/`ephemeral_container` executor inputs remain compatibility
-features for explicit policy-managed deployments; they are not layered on top
-of the normal development fast path. Self-host state is exposed by
-`local_state_snapshot`, and explicit development service updates may install a
-clean pinned feature-branch HEAD for testing without first merging it. When a
-DevMCP source checkout is itself running inside an older installed DevMCP that
-predates the inherited-sandbox marker, the child recognizes the old private
-`coding-tools-mcp/.../sandboxes/sandbox-*` HOME/TMP contract and reuses that
-outer boundary instead of attempting a nested bwrap. That weaker compatibility
-heuristic is enabled only for a checkout that identifies itself as DevMCP.
+The normal BUILD path is a direct subprocess of the current OS user. It does not layer bwrap, Landlock, a repository snapshot, or a specialized executor on ordinary development commands. Self-host identity is exposed through `local_state_snapshot`, `server_info`, and `service_status`.
 
 `exec_command` and `write_stdin` default `yield_time_ms` to `10000` and honor
 requested initial waits up to the schema maximum of 300 seconds. Short commands
@@ -348,10 +271,7 @@ owner-context checked across `job_status`, `job_output`, `job_input`,
 bound active commands, retained completed jobs/sessions, per-session output,
 total output, and retention time.
 
-Repository snapshots are not part of normal execution. The private `sandboxes/`
-lease lifecycle applies only to explicit transactional compatibility execution;
-terminal completion, failure, timeout, cancellation, and runtime shutdown still
-clean those owned snapshots safely.
+Repository snapshots are not part of normal BUILD execution. They exist only for the explicit transactional compatibility path; completion, failure, timeout, cancellation, and runtime shutdown still clean owned snapshots safely.
 
 Use `tty: true` only when a program requires a terminal. POSIX receives a real
 PTY (`isatty()` is true). This build returns `TTY_UNSUPPORTED` on Windows rather

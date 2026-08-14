@@ -192,16 +192,7 @@ runtime bytes are bounded. Completed sessions have a TTL. POSIX `tty=true` uses
 a real pseudo-terminal; Windows reports `TTY_UNSUPPORTED` in this build instead
 of pretending pipes are a TTY.
 
-Normal non-transactional execution never creates a repository-sized snapshot.
-`read-only` executes against the authoritative workspace mounted read-only by
-bwrap on Linux, with a private writable `/tmp`. `workspace-write` executes
-against the authoritative workspace mounted read-write by bwrap and uses the
-project's real environment/toolchain. Those normal bwrap paths do not add a
-second Landlock filesystem policy. `full-access` executes directly as the
-current user without bwrap, Landlock, or a workspace snapshot; it inherits the
-normal host filesystem, environment, temporary directories, network, and
-available user-level container tooling. `full-access` does not imply root or
-privilege escalation, and `sudo`/`su`/`doas` remain rejected.
+Normal non-transactional BUILD execution never creates a repository-sized snapshot and runs directly as the current OS user. It inherits the normal host filesystem, environment, temporary directories, network, and available user-level tooling. PLAN does not execute commands. BUILD does not imply root; authority remains whatever the current OS user has.
 
 Repository snapshots remain only for explicit `transaction_mode="apply"`
 compatibility execution. Those owned snapshots still carry runtime ownership
@@ -243,9 +234,7 @@ Inputs: none.
 
 Annotations: `{"title":"Server info","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}`.
 
-Returns server version, protocol, workspace, cwd, fixed tool count, auth state,
-permission mode, runtime directories, project-context metadata, exec policy,
-and the auto-allow/approval/deny permission policy.
+Returns server version, protocol, schema/build identity, workspace, cwd, fixed tool count, auth state, runtime directories, project-context metadata, PLAN/BUILD execution state, and schema reconnect diagnostics.
 
 ### service_status
 
@@ -280,22 +269,22 @@ Arbitrary argv and arbitrary environment injection are not exposed.
 
 ### service_restart
 
-Inputs: `"approval_id"`.
+Inputs: none.
 
 Annotations: `{"title":"Restart DevMCP services","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":false}`.
 
-Controlled by `service.manage`. Schedules a delayed trusted `devmcp restart` in
+Schedules a delayed `devmcp restart` in
 a separate user-systemd transient unit so the current tool response can complete
 before the serving process is replaced. The CLI restarts MCP first, waits for a
 successful MCP health probe, then restarts the tunnel if its unit is installed.
 
 ### service_update
 
-Inputs: `"source_project"`, `"development_mode"`, `"approval_id"`.
+Inputs: `"source_project"`, `"development_mode"`.
 
 Annotations: `{"title":"Update DevMCP service runtime","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
 
-Controlled by `service.manage`. Resolves exactly one discovered local Git
+Resolves exactly one discovered local Git
 checkout whose `pyproject.toml` declares `project.name = "devmcp-runtime"`.
 The normal source must be on `main`, have no tracked or staged changes, and
 satisfy `HEAD == origin/main`; untracked files do not block the update. Explicit
@@ -391,7 +380,7 @@ a project `.venv` has priority over package-manager fallback; uv fallback uses
 
 ### run_project_check
 
-Inputs: `"check_id"`, `"timeout_ms"`, `"yield_time_ms"`, `"max_output_bytes"`, `"approval_id"`.
+Inputs: `"check_id"`, `"timeout_ms"`, `"yield_time_ms"`, `"max_output_bytes"`.
 
 Annotations: `{"title":"Run project check","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":false}`.
 
@@ -406,7 +395,7 @@ module/tool output is classified as `PROJECT_DEPENDENCY_MISSING`.
 
 ### run_checks_for_diff
 
-Inputs: `"timeout_ms"`, `"max_output_bytes"`, `"max_checks"`, `"approval_id"`.
+Inputs: `"timeout_ms"`, `"max_output_bytes"`, `"max_checks"`.
 
 Annotations: `{"title":"Run checks for diff","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":false}`.
 
@@ -483,23 +472,16 @@ primitive rather than a language-server replacement.
 
 ### apply_patch
 
-Inputs: `"patch"`, `"dry_run"`, `"approval_id"`.
+Inputs: `"patch"`, `"dry_run"`.
 
 Annotations: `{"title":"Apply patch","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":false}`.
 
 Supports Add/Update/Delete/Move operations inside a `*** Begin Patch` /
-`*** End Patch` envelope. Canonical path validation, baseline hashes/modes, and
-atomic replacement remain mandatory. In normal `workspace-write`, create,
-update, and move apply directly to the authoritative workspace when their
-preconditions still match; there is no whole-repository transaction snapshot.
-Delete and destructive-threshold patches retain explicit confirmation. Safe and
-explicit compatibility-policy profiles may impose stricter approval behavior.
-Preview returns a unified diff, line counts, removal percentage, and risk
-classification.
+`*** End Patch` envelope. Canonical path validation, baseline hashes/modes, precondition checks, and atomic replacement remain mandatory. These are correctness/concurrency safeguards, not per-command sandbox policy. Preview returns a unified diff, line counts, removal percentage, and risk classification.
 
 ### exec_command
 
-Inputs: `"cmd"`, `"argv"`, `"cwd"`, `"workdir"`, `"timeout_ms"`, `"yield_time_ms"`, `"env"`, `"sensitive_env_names"`, `"transaction_mode"`, `"execution_mode"`, `"executor_backend"`, `"max_bytes"`, `"max_output_bytes"`, `"preview_bytes"`, `"tty"`, `"stdin"`, `"verbosity"`, `"network_required"`, `"network_targets"`, `"task_id"`, `"approval_id"`.
+Inputs: `"cmd"`, `"argv"`, `"cwd"`, `"workdir"`, `"timeout_ms"`, `"yield_time_ms"`, `"env"`, `"transaction_mode"`, `"max_bytes"`, `"max_output_bytes"`, `"preview_bytes"`, `"tty"`, `"stdin"`, `"verbosity"`, `"task_id"`.
 
 Annotations: `{"title":"Exec command","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
 
@@ -511,49 +493,25 @@ Completed commands use `status: "success"` for exit code 0 and
 therefore means the tool call itself completed structurally; callers must use
 `command_success`/`status` for command outcome.
 
-Exactly one of `cmd` or `argv` is required. `cmd` retains the shell-string path
-for compatibility and defaults to non-transactional execution. The default
-execution mode follows the legacy compatibility mapping: `safe -> read-only`,
-`trusted -> workspace-write`, `dangerous -> full-access`. Normal read-only and
-workspace-write use the authoritative working tree through one bwrap filesystem
-boundary on Linux; normal workspace-write exposes the real project `.venv`,
-PATH/toolchain, and network rather than capability-by-capability approvals.
-`full-access` directly inherits the current user's environment, filesystem,
-temporary directories, and network, including sensitive environment values that
-the service itself inherited. Legacy `argv` remains accepted here for
-compatibility, but new callers should prefer `exec_argv`.
+Exactly one of `cmd` or `argv` is required. BUILD is the default execution mode and launches directly as the current OS user with normal host filesystem, HOME/PATH, environment, toolchains, temporary directories, and network access. PLAN denies process execution. `cmd` retains the shell-string path for compatibility; new structured callers should prefer `exec_argv`.
 
-`transaction_mode="apply"` is explicit compatibility opt-in and is the only
-normal shell path that builds a repository snapshot/transaction. Explicit
-policy profiles continue to use the older approval/capability machinery as a
-compatibility layer. `network_targets` and `executor_backend` remain public
-compatibility inputs for those policy-managed/specialized executor paths; they
-are not additional permission layers around the normal real-workspace fast path.
+`transaction_mode="apply"` remains an explicit bounded transactional compatibility path. It is separate from BUILD authority and retains baseline/conflict checks so concurrent or user WIP is not overwritten.
 
 ### exec_argv
 
-Inputs: `"argv"`, `"cwd"`, `"workdir"`, `"timeout_ms"`, `"yield_time_ms"`, `"env"`, `"sensitive_env_names"`, `"transaction_mode"`, `"execution_mode"`, `"executor_backend"`, `"max_output_bytes"`, `"tty"`, `"stdin"`, `"verbosity"`, `"preview_bytes"`, `"network_required"`, `"network_targets"`, `"task_id"`, `"approval_id"`.
+Inputs: `"argv"`, `"cwd"`, `"workdir"`, `"timeout_ms"`, `"yield_time_ms"`, `"env"`, `"transaction_mode"`, `"max_output_bytes"`, `"tty"`, `"stdin"`, `"verbosity"`, `"preview_bytes"`, `"task_id"`.
 
 Annotations: `{"title":"Exec argv","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
 
-Preferred structured developer execution primitive. It never invokes a shell to
-interpret `argv` and has the same three execution modes and non-transactional
-default as `exec_command`. `transaction_mode="apply"` remains available as an
-explicit bounded snapshot/commit compatibility path; baseline conflicts fail
-with `TRANSACTION_CONFLICT` rather than overwriting concurrent/user WIP. No
-rollback path uses `git reset --hard`.
+Preferred structured developer execution primitive. It never invokes a shell to interpret `argv`. BUILD runs directly with host-user authority; PLAN denies execution. `transaction_mode="apply"` remains an explicit bounded snapshot/commit compatibility path; baseline conflicts fail with `TRANSACTION_CONFLICT` rather than overwriting concurrent/user WIP. No rollback path uses `git reset --hard`.
 
 ### run_task
 
-Inputs: `"task_id"`, `"args"`, `"path"`, `"cwd"`, `"env"`, `"timeout_ms"`, `"yield_time_ms"`, `"max_output_bytes"`, `"approval_id"`.
+Inputs: `"task_id"`, `"args"`, `"path"`, `"cwd"`, `"env"`, `"timeout_ms"`, `"yield_time_ms"`, `"max_output_bytes"`.
 
 Annotations: `{"title":"Run task","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
 
-Tasks use validated registry metadata and an argv-only subprocess path. In the
-normal compatibility modes they inherit the same read-only/workspace-write/
-full-access execution view as shell commands, so trusted development checks see
-the real project environment. Explicit policy profiles retain their policy
-authorization behavior.
+Tasks use validated registry metadata and an argv-only subprocess path. They follow the same PLAN/BUILD execution model as direct commands; BUILD sees the normal project and host development environment.
 
 ### write_stdin
 
@@ -611,16 +569,16 @@ Annotations: `{"title":"Git blame","readOnlyHint":true,"destructiveHint":false,"
 
 ### git_create_branch
 
-Inputs: `"name"`, `"approval_id"`.
+Inputs: `"name"`.
 
 Annotations: `{"title":"Create Git branch","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":false}`.
 
 Creates and switches to a validated local branch in the selected repository.
-The `git.branch` policy capability is authoritative.
+Branch/ref validation and state-drift checks remain authoritative correctness guards.
 
 ### git_switch_branch
 
-Inputs: `"name"`, `"approval_id"`.
+Inputs: `"name"`.
 
 Annotations: `{"title":"Switch Git branch","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":false}`.
 
@@ -628,27 +586,27 @@ Switches only to an existing validated local branch in the selected repository.
 
 ### git_fetch
 
-Inputs: `"remote"`, `"approval_id"`.
+Inputs: `"remote"`.
 
 Annotations: `{"title":"Fetch Git remote","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
 
 Fetches one configured remote using `--prune`. Arbitrary remote URLs are not
-accepted. Controlled by `git.sync`; failed fetch output is withheld to avoid
+accepted; failed fetch output is withheld to avoid
 credential disclosure.
 
 ### git_pull
 
-Inputs: `"remote"`, `"approval_id"`.
+Inputs: `"remote"`.
 
 Annotations: `{"title":"Pull Git branch","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
 
 Pulls the current branch from one configured remote using `--ff-only` only.
 Tracked or staged worktree changes cause `INVALID_STATE` before network access.
-Controlled by `git.sync`.
+The state checkpoint is refreshed after a successful fast-forward.
 
 ### git_merge_remote_branch
 
-Inputs: `"remote"`, `"branch"`, `"approval_id"`.
+Inputs: `"remote"`, `"branch"`.
 
 Annotations: `{"title":"Merge remote Git branch","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
 
@@ -656,31 +614,30 @@ Merges one already-fetched branch from a configured remote into the current
 branch. Tracked or staged worktree changes are rejected before mutation. The
 remote and branch names are validated, arbitrary URLs/options are not accepted,
 and a failed merge is immediately followed by `git merge --abort` before the
-tool returns `GIT_CONFLICT`, restoring the pre-merge branch state. Controlled by
-`git.sync`.
+tool returns `GIT_CONFLICT`, restoring the pre-merge branch state. State-drift checks protect unexpected concurrent mutations.
 
 ### git_delete_branch
 
-Inputs: `"name"`, `"approval_id"`.
+Inputs: `"name"`.
 
 Annotations: `{"title":"Delete local Git branch","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":false}`.
 
 Deletes only a non-current validated local branch using `git branch -d`; force
-deletion is not exposed. Controlled by `git.branch`.
+deletion is not exposed.
 
 ### git_delete_remote_branch
 
-Inputs: `"name"`, `"remote"`, `"approval_id"`.
+Inputs: `"name"`, `"remote"`.
 
 Annotations: `{"title":"Delete remote Git branch","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
 
 Deletes one validated branch from a configured remote. Arbitrary remote URLs are
-rejected. Controlled by `git.push`; failure output is withheld to avoid
+rejected; failure output is withheld to avoid
 credential disclosure.
 
 ### git_commit
 
-Inputs: `"message"`, `"paths"`, `"approval_id"`.
+Inputs: `"message"`, `"paths"`.
 
 Annotations: `{"title":"Git commit","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":false}`.
 
@@ -690,14 +647,12 @@ SHA, and committed path set.
 
 ### git_push
 
-Inputs: `"remote"`, `"force"`, `"approval_id"`.
+Inputs: `"remote"`, `"force"`.
 
 Annotations: `{"title":"Git push","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
 
 Pushes the current branch only to a configured remote name, normally `origin`.
-Arbitrary URL remotes and force push are rejected. `git.push` is controlled by
-the active policy profile, and failed push output is withheld to avoid credential
-disclosure.
+Arbitrary URL remotes and force push are rejected. Remote-head verification checks that the pushed branch matches the local HEAD; failed push output is withheld to avoid credential disclosure.
 
 ### wait_for_external
 
@@ -730,14 +685,12 @@ rejected, as are values matching common credential/private-key forms.
 
 ### antigravity_delegate
 
-Inputs: `"prompt"`, `"mode"`, `"timeout_seconds"`, `"retry_transient"`, `"approval_id"`.
+Inputs: `"prompt"`, `"mode"`, `"timeout_seconds"`, `"retry_transient"`.
 
 Annotations: `{"title":"Delegate to Antigravity","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
 
 Runs one bounded host-side Antigravity CLI task in a temporary detached Git
-worktree at the selected project's current HEAD. It is controlled by
-`agent.delegate`, which is automatically allowed by the built-in Autonomous
-profile and may also be explicitly configured by Custom. The live checkout must
+worktree at the selected project's current HEAD. It has its own delegation-specific worktree and validation constraints rather than the retired per-command capability policy. The live checkout must
 have no tracked or staged changes; untracked files are not copied into the
 delegate worktree. Sensitive tracked paths block delegation entirely.
 The binary is discovered from `DEVMCP_ANTIGRAVITY_BIN`, the service `PATH`,

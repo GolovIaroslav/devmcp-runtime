@@ -9,7 +9,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from coding_tools_mcp.policy import resolve_execution_mode
-from coding_tools_mcp.server import Runtime
+from coding_tools_mcp.server import TOOL_SCHEMA_VERSION, Runtime, input_schemas
 from tests.compliance.mcp_client import MCPClient
 from tests.compliance.test_support import ComplianceTestCase, structured_payload
 
@@ -92,7 +92,62 @@ class SimplifiedExecutionModelComplianceTests(ComplianceTestCase):
                 self.assertEqual(info.get("execution_mode"), "build")
                 self.assertEqual(info.get("effective_access"), "full-access")
                 self.assertNotIn("permission_mode", info)
-                self.assertIn("legacy_permission_mode_compat", info["permission_policy"])
+                self.assertIn(
+                    "legacy_permission_mode_compat", info["permission_policy"]
+                )
+            finally:
+                runtime.close()
+
+    def test_e_public_contract_matches_simplified_execution_model(self) -> None:
+        self.assertEqual(TOOL_SCHEMA_VERSION, "2.0")
+        schemas = input_schemas()
+        retired = {
+            "approval_id",
+            "sensitive_env_names",
+            "execution_mode",
+            "executor_backend",
+            "network_required",
+            "network_targets",
+        }
+        for tool_name in (
+            "service_restart",
+            "service_update",
+            "run_project_check",
+            "run_checks_for_diff",
+            "apply_patch",
+            "git_create_branch",
+            "git_switch_branch",
+            "git_fetch",
+            "git_pull",
+            "git_merge_remote_branch",
+            "git_delete_branch",
+            "git_delete_remote_branch",
+            "git_commit",
+            "git_push",
+            "run_task",
+            "exec_command",
+            "exec_argv",
+        ):
+            properties = set(schemas[tool_name].get("properties", {}))
+            self.assertFalse(properties & retired, (tool_name, properties & retired))
+
+        with TemporaryDirectory() as tmp:
+            runtime = Runtime(Path(tmp))
+            try:
+                initialized = runtime.initialize({"name": "contract-test"})
+                instructions = initialized["instructions"]
+                self.assertIn("current OS user's filesystem", instructions)
+                self.assertIn("default coding context and cwd", instructions)
+                self.assertIn("High-level Git tools", instructions)
+                self.assertNotIn("one writable Git repository", instructions)
+                self.assertNotIn("confined to that selected repository", instructions)
+                info = runtime.server_info({})
+                self.assertEqual(info["schema_version"], "2.0")
+                self.assertEqual(
+                    info["schema_status"]["status"],
+                    "RECONNECT_REQUIRED_AFTER_CONTRACT_CHANGE",
+                )
+                self.assertFalse(info["schema_status"]["list_changed_supported"])
             finally:
                 runtime.close()
 

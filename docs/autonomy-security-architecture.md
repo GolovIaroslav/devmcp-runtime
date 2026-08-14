@@ -77,9 +77,7 @@ scope could span transport reconnects and was explicitly terminated with
 `end_task_scope` (retired in v0.1.0b1); TTL was fallback cleanup. Leases were
 memory-only and could not be made permanent by the model.
 
-Ambient host secrets are always filtered. `sensitive_env_names` requests exact
-host variable names and requires exact-name `env.sensitive` leases; unrelated
-secrets remain absent.
+The capability-lease secret injection path is retired. BUILD inherits the host environment available to the DevMCP service; PLAN does not execute commands.
 
 ## Execution hierarchy
 

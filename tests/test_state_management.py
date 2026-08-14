@@ -51,6 +51,8 @@ class StateManagementTests(TestCase):
         for name in (
             "git_create_branch",
             "git_switch_branch",
+            "git_fetch",
+            "git_pull",
             "git_merge_remote_branch",
             "git_push",
             "service_update",
@@ -336,6 +338,30 @@ class StateManagementTests(TestCase):
             self.assertEqual(state["local_head"], head)
             self.assertNotEqual(state["installed_service_git_sha"], state["local_head"])
 
+    def test_unexpected_external_mutation_still_raises_state_drift(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, _head = init_repo(root)
+            runtime = StateManagedRuntime(workspace=repo, sandbox_backend="unsafe")
+            try:
+                patch_text = """*** Begin Patch
+*** Update File: tracked.txt
+@@ -1,1 +1,1 @@
+-one
++two
+*** End Patch
+"""
+                runtime.apply_patch({"patch": patch_text})
+                (repo / "external.txt").write_text("outside writer\n", encoding="utf-8")
+                with self.assertRaises(ToolFailure) as drift:
+                    runtime.git_create_branch({"name": "should-not-create"})
+                self.assertEqual(drift.exception.code, "STATE_DRIFT")
+                self.assertIn(
+                    "untracked_paths", drift.exception.details["changed_fields"]
+                )
+            finally:
+                runtime.close()
+
     def test_real_state_managed_runtime_mro_and_git_env(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -389,16 +415,21 @@ class StateManagementTests(TestCase):
             res_switch = runtime.git_switch_branch({"name": "main"})
             self.assertIn("state_checkpoint", res_switch)
 
-            # 7. guarded git_merge_remote_branch does not crash due to MRO
-            runtime.git_fetch({"remote": "origin"})
+            # 7. fetch/pull refresh automatic checkpoints before later mutations
+            res_fetch = runtime.git_fetch({"remote": "origin"})
+            self.assertIn("state_checkpoint", res_fetch)
+            res_pull = runtime.git_pull({"remote": "origin"})
+            self.assertIn("state_checkpoint", res_pull)
+
+            # 8. guarded git_merge_remote_branch does not crash due to MRO
             res_merge = runtime.git_merge_remote_branch({"branch": "main"})
             self.assertIn("state_checkpoint", res_merge)
 
-            # 8. guarded git_push does not crash due to MRO
+            # 9. guarded git_push does not crash due to MRO
             res_push = runtime.git_push({"remote": "origin"})
             self.assertIn("state_checkpoint", res_push)
 
-            # 9. guarded service_update does not crash due to MRO
+            # 10. guarded service_update does not crash due to MRO
             with patch.object(
                 core.Runtime, "service_update", return_value={"updated": True}
             ):

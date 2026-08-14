@@ -38,7 +38,7 @@ from .continuation import clear_checkpoint, read_checkpoint, write_checkpoint
 from .envutils import ENV_PREFIX, truthy_env
 from .errors import JsonRpcError, ToolFailure
 from .diagnostics import DiagnosticsRegistry, normalize_diagnostic_path
-from .executors import ExecutionRequirements, ExecutorRegistry
+from .executors import ExecutorRegistry
 from .landlock_exec import libc_syscall
 from .oauth import (
     OAUTH_CODE_TTL_SECONDS,
@@ -103,7 +103,7 @@ from .transport_stdio import serve_stdio
 
 SERVER_NAME = "devmcp-runtime"
 SERVER_TITLE = "DevMCP Runtime"
-TOOL_SCHEMA_VERSION = "1.0"
+TOOL_SCHEMA_VERSION = "2.0"
 MCP_ENDPOINT_PATH = "/mcp"
 DEVMCP_MCP_SERVICE = "devmcp-runtime.service"
 DEVMCP_TUNNEL_SERVICE = "devmcp-tunnel.service"
@@ -802,7 +802,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     ),
     "run_task": ToolSpec(
         title="Run task",
-        description="Run a registered local test, lint, typecheck, build, check, or dependency task in the isolated sandbox. Safe non-network tasks run automatically; network and higher-impact tasks require local policy approval.",
+        description="Run a registered local test, lint, typecheck, build, check, or dependency task using the resolved PLAN/BUILD execution model.",
         destructive=True,
         open_world=True,
     ),
@@ -1945,10 +1945,6 @@ class Runtime:
         # Landlock is not applied in BUILD mode (direct host execution).
         return False
 
-    def _policy_decision_for_capabilities(self, required: set[str]) -> str:
-        """Retired profile capability matrix — always returns auto in BUILD mode."""
-        return "auto"
-
     def landlock_write_roots(self) -> list[Path]:
         return [self.runtime_dir]
 
@@ -2049,11 +2045,14 @@ class Runtime:
                 "schemaVersion": TOOL_SCHEMA_VERSION,
             },
             "instructions": (
-                "DevMCP can select one writable Git repository per logical context. "
-                "When the user names or asks to continue a project, call list_projects, "
+                "In BUILD mode, DevMCP runs commands with the current OS user's filesystem, "
+                "environment, and network authority. The selected project is the default coding "
+                "context and cwd, not a filesystem security boundary; explicit absolute paths and "
+                "cwd values are available according to normal OS permissions. High-level Git tools "
+                "remain scoped to the selected repository until a separate multi-project Git "
+                "refactor. When the user names or asks to continue a project, call list_projects, "
                 "select the matching repository with select_project, then read the returned "
-                "authority_files before changing code. All subsequent file, patch, exec, and "
-                "Git operations are confined to that selected repository.\n\n"
+                "authority_files before changing that project.\n\n"
                 + self.project_context.server_instructions()
             ),
         }
@@ -2109,15 +2108,6 @@ class Runtime:
                 "Path is outside the current authorized root set.",
                 category="security",
             )
-
-    def _matching_capability_lease(
-        self,
-        capability: str,
-        target: str,
-        *,
-        pattern: bool = False,
-    ) -> str | None:
-        return None
 
     def _validate_transaction_relative_path(self, rel_path: str) -> None:
         pure = PurePosixPath(rel_path)
@@ -2200,6 +2190,15 @@ class Runtime:
             "title": SERVER_TITLE,
             "version": __version__,
             "schema_version": TOOL_SCHEMA_VERSION,
+            "schema_status": {
+                "status": "RECONNECT_REQUIRED_AFTER_CONTRACT_CHANGE",
+                "list_changed_supported": False,
+                "reason": (
+                    "The tool catalog is static for one server process. A service update restarts "
+                    "the MCP process; clients that cache tool schemas must reconnect to observe an "
+                    "incompatible schema version change."
+                ),
+            },
             "protocol_version": self.protocol_version,
             **self._exec_environment_summary(),
             "default_cwd": self.default_cwd_display(),
@@ -2844,8 +2843,6 @@ class Runtime:
             "yield_time_ms": args.get("yield_time_ms", 10000),
             "max_output_bytes": args.get("max_output_bytes", 262144),
             "env": task_env,
-            "approval_id": args.get("approval_id"),
-            "network_required": False,
         }
         authorized: set[str] = set()
         result = self._execute_task_argv(argv, exec_args, set(authorized))
@@ -2929,7 +2926,6 @@ class Runtime:
                     "timeout_ms": timeout_ms,
                     "yield_time_ms": timeout_ms,
                     "max_output_bytes": max_output_bytes,
-                    "approval_id": args.get("approval_id"),
                 }
             )
             results.append(result)
@@ -4087,216 +4083,6 @@ class Runtime:
             )
         return workdir
 
-    @staticmethod
-    def _network_capability(cmd: str, args: dict[str, Any]) -> str | None:
-        if not (
-            bool(args.get("network_required", False))
-            or (
-                NETWORK_RE.search(cmd) and not is_literal_network_reference_command(cmd)
-            )
-        ):
-            return None
-        local_markers = ("localhost", "127.0.0.1", "[::1]", "::1")
-        return (
-            "network.host_local"
-            if any(marker in cmd.lower() for marker in local_markers)
-            else "network.public"
-        )
-
-    @staticmethod
-    def _command_domain_capabilities(cmd: str) -> set[str]:
-        """Classify the explicitly surfaced policy domains of an exec request."""
-
-        compact = " ".join(cmd.split()).lower()
-        required: set[str] = set()
-        if re.search(
-            r"\b(?:npm|pnpm|yarn|bun|pip|uv|poetry|cargo|go)\s+(?:install|add|sync|tidy)\b",
-            compact,
-        ):
-            required.add("deps.install")
-        if re.search(
-            r"\b(?:alembic\s+upgrade|prisma\s+db\s+(?:push|migrate)|\w*migrate\b)",
-            compact,
-        ):
-            required.add("db.migrate")
-        if re.search(r"\bgit\s+(?:branch|switch|checkout\s+-b)\b", compact):
-            required.add("git.branch")
-        if re.search(r"\bgit\s+commit\b", compact):
-            required.add("git.commit")
-        if re.search(r"\bgit\s+(?:fetch|pull|remote\s+prune)\b", compact):
-            required.add("git.sync")
-        if re.search(r"\bgit\s+push\b", compact):
-            required.add("git.push")
-        return required
-
-    @staticmethod
-    def _shell_policy_segments(cmd: str) -> list[str]:
-        """Return top-level shell segments for policy classification.
-
-        This deliberately does not attempt to prove shell safety.  It separates
-        ordinary pipelines/conditionals so policy signals are attached to the
-        commands that cause them while bwrap/root/network enforcement remains
-        the actual boundary.
-        """
-
-        try:
-            tokens = shlex_split(strip_heredoc_payloads(cmd))
-        except ValueError:
-            return [cmd]
-        segments: list[list[str]] = []
-        current: list[str] = []
-        for token in tokens:
-            if token in SHELL_CONTROL_TOKENS:
-                if current:
-                    segments.append(current)
-                    current = []
-                continue
-            current.append(token)
-        if current:
-            segments.append(current)
-        return [shlex.join(segment) for segment in segments] or [cmd]
-
-    def _profile_command_capabilities(
-        self, cmd: str, args: dict[str, Any], registered_task: Any = None
-    ) -> set[str]:
-        required = {
-            "exec.registered" if registered_task is not None else "exec.arbitrary"
-        }
-        segments = self._shell_policy_segments(cmd)
-        args["_policy_segments"] = segments
-        for segment in segments:
-            required.update(self._command_domain_capabilities(segment))
-            network = self._network_capability(segment, args)
-            if network:
-                required.add(network)
-        if isinstance(args.get("network_targets"), list) and args.get(
-            "network_targets"
-        ):
-            required.add(self._network_capability(cmd, args) or "network.public")
-        env = args.get("env", {})
-        if isinstance(env, dict) and any(
-            is_filtered_env_var(str(key), str(value)) for key, value in env.items()
-        ):
-            required.add("env.sensitive")
-        sensitive_env_names = args.get("sensitive_env_names", [])
-        if isinstance(sensitive_env_names, list) and sensitive_env_names:
-            required.add("env.sensitive")
-        return required
-
-    def _command_executable_names(self, action: str | list[str]) -> list[str]:
-        if isinstance(action, list):
-            if not action:
-                return []
-            return [action[0]]
-        scannable = strip_heredoc_payloads(action)
-        try:
-            tokens = shlex_split(scannable)
-        except ValueError:
-            tokens = scannable.split()
-        return command_executables(tokens)
-
-    def _leased_command_capabilities(
-        self,
-        action: str | list[str],
-        args: dict[str, Any],
-        required: set[str],
-    ) -> set[str]:
-        covered: set[str] = set()
-        executables = self._command_executable_names(action)
-        if "exec.arbitrary" in required and executables:
-            if all(
-                self._matching_capability_lease(
-                    "exec.arbitrary", executable, pattern=True
-                )
-                or self._matching_capability_lease(
-                    "exec.arbitrary",
-                    PurePosixPath(executable.replace("\\", "/")).name,
-                    pattern=True,
-                )
-                for executable in executables
-            ):
-                covered.add("exec.arbitrary")
-        if "deps.install" in required:
-            command_text = action if isinstance(action, str) else shlex.join(action)
-            if self._matching_capability_lease(
-                "deps.install", command_text, pattern=True
-            ) or any(
-                self._matching_capability_lease(
-                    "deps.install",
-                    PurePosixPath(executable.replace("\\", "/")).name,
-                    pattern=True,
-                )
-                for executable in executables
-            ):
-                covered.add("deps.install")
-        for network_capability in ("network.public", "network.host_local"):
-            if network_capability not in required:
-                continue
-            network_targets = [
-                str(target)
-                for target in args.get("network_targets", [])
-                if isinstance(target, str) and target
-            ]
-            if network_targets:
-                if all(
-                    self._matching_capability_lease(
-                        network_capability, target, pattern=True
-                    )
-                    for target in network_targets
-                ):
-                    covered.add(network_capability)
-            elif self._matching_capability_lease(network_capability, "*"):
-                covered.add(network_capability)
-        if "env.sensitive" in required:
-            env = args.get("env", {})
-            env_items = env.items() if isinstance(env, dict) else ()
-            extra_sensitive_names = [
-                str(key)
-                for key, value in env_items
-                if is_filtered_env_var(str(key), str(value))
-            ]
-            requested_host_names = [
-                str(name)
-                for name in args.get("sensitive_env_names", [])
-                if isinstance(name, str) and name
-            ]
-            sensitive_names = list(
-                dict.fromkeys([*extra_sensitive_names, *requested_host_names])
-            )
-            matched_names = [
-                name
-                for name in sensitive_names
-                if self._matching_capability_lease("env.sensitive", name)
-            ]
-            if sensitive_names and len(matched_names) == len(sensitive_names):
-                covered.add("env.sensitive")
-            if requested_host_names:
-                leased_host_names = [
-                    name for name in requested_host_names if name in matched_names
-                ]
-                args["_leased_sensitive_env_names"] = leased_host_names
-                missing = [
-                    name for name in requested_host_names if name not in matched_names
-                ]
-                if missing:
-                    args["_missing_sensitive_env_names"] = missing
-        return covered
-
-    def _profile_authorize_command(
-        self,
-        action: str | list[str],
-        args: dict[str, Any],
-        *,
-        registered_task: Any = None,
-        task_id: str = "",
-    ) -> set[str] | dict[str, Any]:
-        return set()
-
-    def _profile_authorize_operation(
-        self, capability: str, args: dict[str, Any], action: str
-    ) -> dict[str, Any] | None:
-        return None
-
     def _profile_exec_command(self, args: dict[str, Any]) -> dict[str, Any]:
         if self.execution_mode == "plan":
             raise ToolFailure(
@@ -4334,7 +4120,6 @@ class Runtime:
                 category="validation",
             )
         internal_args = dict(args)
-        internal_args.pop("approval_id", None)
         internal_args["cmd"] = action
         internal_args["transaction_mode"] = (
             str(args.get("transaction_mode", "discard")).strip().lower()
@@ -4346,94 +4131,10 @@ class Runtime:
         if isinstance(action, list):
             internal_args["_argv_task"] = True
         return self._execute_command_legacy(internal_args)
-        if bool(args.get("tty", False)) and os.name == "nt":
-            raise ToolFailure(
-                "TTY_UNSUPPORTED",
-                "tty=true requires ConPTY support, which is not available in this build.",
-                category="runtime",
-                details={
-                    "platform": os.name,
-                    "retry_hint": "Run the command without tty=true.",
-                },
-            )
-        command_text = shlex.join(action) if isinstance(action, list) else action
-        network_capability = self._network_capability(command_text, args)
-        network_targets = [
-            str(target).strip()
-            for target in args.get("network_targets", [])
-            if isinstance(target, str) and target.strip()
-        ]
-        if network_targets:
-            for target in network_targets:
-                if len(target) > 255 or not re.fullmatch(
-                    r"(?:\*\.)?[A-Za-z0-9_.:-]+", target
-                ):
-                    raise ToolFailure(
-                        "INVALID_ARGUMENT",
-                        f"Invalid network target: {target}",
-                        category="validation",
-                    )
-            network_capability = network_capability or "network.public"
-        requirements = ExecutionRequirements(
-            readable_roots=len(self.readable_roots()),
-            writable_roots=len(self.writable_roots()),
-            network=network_capability is not None,
-            network_targets=bool(network_targets),
-            transactional_apply=str(args.get("transaction_mode", "")) == "apply",
-            interactive_tty=bool(args.get("tty", False)),
-        )
-        selected_executor = self.executor_registry.select(
-            requirements,
-            preferred=str(args.get("executor_backend", "auto")),
-        )
-        expected_executor = (
-            "unsafe_host"
-            if self._legacy_windows_process_fallback
-            else "local_sandbox"
-            if self.sandbox_backend.name == "bwrap"
-            else "inherited_sandbox"
-            if self.sandbox_backend.name == "inherited"
-            else "unsafe_host"
-            if self.sandbox_backend.name == "unsafe"
-            else None
-        )
-        if selected_executor.name not in {expected_executor, "ephemeral_container"}:
-            raise ToolFailure(
-                "CAPABILITY_UNAVAILABLE",
-                f"Executor backend '{selected_executor.name}' is planned but its command adapter is not enabled for this execution path.",
-                category="environment",
-                details={
-                    "backend": selected_executor.describe(),
-                    "requirements": {
-                        "readable_roots": requirements.readable_roots,
-                        "writable_roots": requirements.writable_roots,
-                        "network": requirements.network,
-                        "network_targets": requirements.network_targets,
-                        "transactional_apply": requirements.transactional_apply,
-                        "interactive_tty": requirements.interactive_tty,
-                    },
-                },
-            )
-        if selected_executor.name == "ephemeral_container":
-            pending = self._profile_authorize_operation(
-                "executor.container",
-                args,
-                "use operator-configured ephemeral container backend",
-            )
-            if pending is not None:
-                return pending
-        return self._execute_command_legacy(internal_args)
 
     def exec_command(self, args: dict[str, Any]) -> dict[str, Any]:
-        """Backward-compatible shell/argv entrypoint using one capability evaluator."""
+        """Run a shell command or argv directly with the resolved execution model."""
 
-        # Keep the public compatibility wrapper audit-explicit: these fields are
-        # consumed by _profile_exec_command, but are named here so schema/code
-        # drift tooling can verify that the security-sensitive inputs are not
-        # accidentally orphaned behind delegation.
-        args.get("approval_id")
-        args.get("network_required")
-        args.get("task_id")
         return self._profile_exec_command(args)
 
     def exec_argv(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -4458,344 +4159,6 @@ class Runtime:
             "apply" if self.sandbox_backend.name == "bwrap" else "discard",
         )
         return self._profile_exec_command(forwarded)
-
-    def _execute_ephemeral_container(
-        self, args: dict[str, Any], runner: str
-    ) -> dict[str, Any]:
-        """Execute through an operator-owned container runner using filtered snapshots."""
-
-        if not runner:
-            raise ToolFailure(
-                "CAPABILITY_UNAVAILABLE",
-                "Ephemeral container runner is not configured.",
-                category="environment",
-            )
-        if bool(args.get("tty", False)):
-            raise ToolFailure(
-                "CAPABILITY_UNAVAILABLE",
-                "Ephemeral container backend does not support interactive TTY sessions.",
-                category="environment",
-            )
-        action = args.get("cmd")
-        if not isinstance(action, (str, list)):
-            raise ToolFailure(
-                "INVALID_ARGUMENT",
-                "Container execution requires a shell command or argv action.",
-                category="validation",
-            )
-        self._ensure_runtime_dirs()
-        workdir = args.get("_resolved_workdir")
-        if not isinstance(workdir, Path):
-            workdir = self._operation_workdir(args).path
-        timeout_ms = int(args.get("timeout_ms", 30000))
-        max_output_bytes = int(args.get("max_output_bytes", 262144))
-        transaction_mode = str(args.get("transaction_mode", "discard"))
-
-        def bounded_env_int(name: str, default: int, minimum: int, maximum: int) -> int:
-            try:
-                value = int(os.environ.get(name, str(default)))
-            except ValueError as exc:
-                raise ToolFailure(
-                    "INVALID_ARGUMENT",
-                    f"{name} must be an integer.",
-                    category="validation",
-                ) from exc
-            if not minimum <= value <= maximum:
-                raise ToolFailure(
-                    "INVALID_ARGUMENT",
-                    f"{name} must be between {minimum} and {maximum}.",
-                    category="validation",
-                )
-            return value
-
-        limits = {
-            "timeout_ms": timeout_ms,
-            "cpu": bounded_env_int("DEVMCP_CONTAINER_CPU_LIMIT", 2, 1, 64),
-            "memory_mb": bounded_env_int(
-                "DEVMCP_CONTAINER_MEMORY_MB", 4096, 128, 131072
-            ),
-            "pids": bounded_env_int("DEVMCP_CONTAINER_PIDS_LIMIT", 512, 32, 4096),
-        }
-
-        from .sandbox import ExecutionSandbox
-
-        primary = ExecutionSandbox.create(
-            self.workspace.root, owner_root=self.runtime_dir / "container-sandboxes"
-        )
-        additional: list[tuple[Path, Any, bool]] = []
-        try:
-            additional = self._additional_execution_sandboxes()
-            mounts = [
-                {
-                    "source": str(primary.sandbox_dir),
-                    "destination": str(self.workspace.root),
-                    "writable": True,
-                },
-                *[
-                    {
-                        "source": str(snapshot.sandbox_dir),
-                        "destination": str(root),
-                        "writable": writable,
-                    }
-                    for root, snapshot, writable in additional
-                ],
-            ]
-            transactions: list[tuple[Path, ExecutionTransaction]] = []
-            if transaction_mode == "apply":
-                transactions.append(
-                    (
-                        self.workspace.root,
-                        ExecutionTransaction(
-                            authoritative_root=self.workspace.root,
-                            snapshot_root=primary.sandbox_dir,
-                            validate_relative_path=self._validate_transaction_relative_path,
-                        ),
-                    )
-                )
-                for root, snapshot, writable in additional:
-                    if writable:
-                        transactions.append(
-                            (
-                                root,
-                                ExecutionTransaction(
-                                    authoritative_root=root,
-                                    snapshot_root=snapshot.sandbox_dir,
-                                    validate_relative_path=self._validate_transaction_relative_path,
-                                ),
-                            )
-                        )
-
-            child_env = self._command_env(
-                args.get("env", {}),
-                allow_sensitive_extra=(
-                    "env.sensitive" in set(args.get("_approved_capabilities", []))
-                ),
-                inherited_sensitive_names=args.get("_leased_sensitive_env_names", []),
-                sandboxed=False,
-            )
-            child_env.update(
-                {
-                    "HOME": "/tmp/devmcp-home",
-                    "TMPDIR": "/tmp",
-                    "TMP": "/tmp",
-                    "TEMP": "/tmp",
-                    "XDG_CACHE_HOME": "/tmp/devmcp-cache",
-                    "XDG_CONFIG_HOME": "/tmp/devmcp-config",
-                    "XDG_STATE_HOME": "/tmp/devmcp-state",
-                    "PWD": str(workdir),
-                    "OLDPWD": str(workdir),
-                }
-            )
-            network_targets = list(args.get("network_targets", []))
-            network_capability = args.get("_network_capability")
-            required_enforcement = (
-                "filesystem_isolation",
-                "resource_limits",
-                "network_policy",
-                "private_tmp",
-                "no_host_container_socket",
-            )
-
-            with tempfile.TemporaryDirectory(
-                prefix="container-run-", dir=self.runtime_dir
-            ) as temp_root:
-                temp_dir = Path(temp_root)
-                manifest_path = temp_dir / "manifest.json"
-                result_path = temp_dir / "result.json"
-                manifest = {
-                    "protocol": "devmcp-ephemeral-container-v1",
-                    "action": (
-                        {"kind": "argv", "argv": [str(item) for item in action]}
-                        if isinstance(action, list)
-                        else {"kind": "shell", "command": action}
-                    ),
-                    "cwd": str(workdir),
-                    "env": child_env,
-                    "mounts": mounts,
-                    "network": {
-                        "enabled": isinstance(network_capability, str),
-                        "targets": network_targets,
-                    },
-                    "limits": limits,
-                    "filesystem": {
-                        "disposable_root": True,
-                        "private_tmp": True,
-                        "no_host_container_socket": True,
-                    },
-                    "required_enforcement": list(required_enforcement),
-                    "result_path": str(result_path),
-                    "max_output_bytes": max_output_bytes,
-                }
-                manifest_path.write_text(
-                    json.dumps(manifest, sort_keys=True), encoding="utf-8"
-                )
-                os.chmod(manifest_path, 0o600)
-                runner_env = {
-                    "PATH": os.environ.get("PATH", os.defpath),
-                    "HOME": str(self.runtime_dir),
-                    "TMPDIR": str(temp_dir),
-                    "TMP": str(temp_dir),
-                    "TEMP": str(temp_dir),
-                    "GIT_TERMINAL_PROMPT": "0",
-                    "GIT_ASKPASS": "/bin/false" if os.name != "nt" else "",
-                }
-                runner_result = run_bounded_process(
-                    [runner, "--manifest", str(manifest_path)],
-                    cwd=str(temp_dir),
-                    env=runner_env,
-                    timeout=max(1.0, timeout_ms / 1000.0 + 10.0),
-                    cancel_event=getattr(self.request_context, "cancel_event", None),
-                )
-                if runner_result.returncode != 0:
-                    raise ToolFailure(
-                        "EXECUTOR_FAILED",
-                        "Operator-configured ephemeral container runner failed.",
-                        category="runtime",
-                        details={
-                            "runner_exit_code": runner_result.returncode,
-                            "runner_stderr": str(
-                                redact_for_trace(runner_result.stderr[-16384:])
-                            ),
-                        },
-                    )
-                try:
-                    raw_result = json.loads(result_path.read_text(encoding="utf-8"))
-                except (OSError, json.JSONDecodeError) as exc:
-                    raise ToolFailure(
-                        "EXECUTOR_PROTOCOL_ERROR",
-                        "Ephemeral container runner did not produce a valid result document.",
-                        category="runtime",
-                    ) from exc
-                if not isinstance(raw_result, dict):
-                    raise ToolFailure(
-                        "EXECUTOR_PROTOCOL_ERROR",
-                        "Ephemeral container result must be an object.",
-                        category="runtime",
-                    )
-                enforcement = raw_result.get("enforcement")
-                if not isinstance(enforcement, dict) or any(
-                    enforcement.get(name) is not True for name in required_enforcement
-                ):
-                    missing = [
-                        name
-                        for name in required_enforcement
-                        if not isinstance(enforcement, dict)
-                        or enforcement.get(name) is not True
-                    ]
-                    raise ToolFailure(
-                        "EXECUTOR_PROTOCOL_ERROR",
-                        "Ephemeral container runner did not attest required isolation enforcement.",
-                        category="security",
-                        details={"missing_or_false": missing},
-                    )
-                status = str(raw_result.get("status", ""))
-                exit_code = raw_result.get("exit_code")
-                if status not in {"success", "failed", "timeout", "terminated"}:
-                    raise ToolFailure(
-                        "EXECUTOR_PROTOCOL_ERROR",
-                        "Ephemeral container runner returned an invalid status.",
-                        category="runtime",
-                        details={"status": status},
-                    )
-                if exit_code is not None and (
-                    isinstance(exit_code, bool) or not isinstance(exit_code, int)
-                ):
-                    raise ToolFailure(
-                        "EXECUTOR_PROTOCOL_ERROR",
-                        "Ephemeral container exit_code must be an integer or null.",
-                        category="runtime",
-                    )
-                if status == "success" and exit_code != 0:
-                    raise ToolFailure(
-                        "EXECUTOR_PROTOCOL_ERROR",
-                        "Ephemeral container success status requires exit_code=0.",
-                        category="runtime",
-                    )
-                command_success = status == "success" and exit_code == 0
-                stdout_bytes = str(raw_result.get("stdout", "")).encode("utf-8")
-                stderr_bytes = str(raw_result.get("stderr", "")).encode("utf-8")
-                payload: dict[str, Any] = {
-                    "status": status,
-                    "exit_code": exit_code,
-                    "signal": raw_result.get("signal"),
-                    "stdout": stdout_bytes[-max_output_bytes:].decode(
-                        "utf-8", errors="replace"
-                    ),
-                    "stderr": stderr_bytes[-max_output_bytes:].decode(
-                        "utf-8", errors="replace"
-                    ),
-                    "command_success": command_success,
-                    "executor_backend": "ephemeral_container",
-                    "enforcement": {name: True for name in required_enforcement},
-                }
-
-                if transaction_mode == "apply":
-                    staged_all: list[StagedFile] = []
-                    changes_all: list[dict[str, Any]] = []
-                    diffs: list[str] = []
-                    inspection_error: ToolFailure | None = None
-                    try:
-                        for root, transaction in transactions:
-                            staged, changes, diff = transaction.prepare()
-                            staged_all.extend(staged)
-                            for change in changes:
-                                changes_all.append(
-                                    {
-                                        "path": (
-                                            change.path
-                                            if root == self.workspace.root
-                                            else str(root / change.path)
-                                        ),
-                                        "operation": change.operation,
-                                        "bytes": change.bytes,
-                                        "mode": change.mode,
-                                    }
-                                )
-                            if diff:
-                                diffs.append(diff)
-                    except ToolFailure as exc:
-                        if command_success:
-                            raise
-                        inspection_error = exc
-                    if command_success:
-                        self._authorize_transaction_changes(changes_all)
-                        try:
-                            AtomicPatchCommitter().commit(staged_all)
-                        except ToolFailure as exc:
-                            if exc.code in {"PATCH_CONFLICT", "PATCH_ROLLBACK_FAILED"}:
-                                raise ToolFailure(
-                                    "TRANSACTION_CONFLICT",
-                                    "Container output conflicted with current workspace state; no user WIP was overwritten.",
-                                    category="conflict",
-                                    retryable=True,
-                                    details={
-                                        "cause_code": exc.code,
-                                        "cause": exc.message,
-                                    },
-                                ) from exc
-                            raise
-                        transaction_status = "applied" if staged_all else "unchanged"
-                    elif inspection_error is not None:
-                        transaction_status = "discarded_uninspectable"
-                    else:
-                        transaction_status = "discarded_on_command_failure"
-                    payload["transaction"] = {
-                        "mode": "apply",
-                        "status": transaction_status,
-                        "changed_count": len(changes_all),
-                        "changed_files": changes_all,
-                        "diff": "".join(diffs)[: 512 * 1024],
-                        "preexisting_dirty_preserved": True,
-                    }
-                    if inspection_error is not None:
-                        payload["transaction"]["inspection_error"] = {
-                            "code": inspection_error.code,
-                            "message": inspection_error.message,
-                        }
-                return payload
-        finally:
-            self._cleanup_additional_execution_sandboxes(additional)
-            primary.cleanup()
 
     def _execute_task_argv(
         self, argv: list[str], args: dict[str, Any], capabilities: set[str]
@@ -6885,11 +6248,6 @@ class Runtime:
         name = self._validate_branch_name(
             str(args.get("name", "")).strip(), git, git_env
         )
-        pending = self._profile_authorize_operation(
-            "git.branch", args, f"git create branch {name}"
-        )
-        if pending is not None:
-            return pending
         exists = self._run_git_text(
             [
                 git,
@@ -6930,11 +6288,6 @@ class Runtime:
         name = self._validate_branch_name(
             str(args.get("name", "")).strip(), git, git_env
         )
-        pending = self._profile_authorize_operation(
-            "git.branch", args, f"git switch branch {name}"
-        )
-        if pending is not None:
-            return pending
         exists = self._run_git_text(
             [
                 git,
@@ -6993,11 +6346,6 @@ class Runtime:
     def git_fetch(self, args: dict[str, Any]) -> dict[str, Any]:
         git, git_env = self._require_selected_git_repo()
         remote = self._configured_git_remote(git, git_env, args.get("remote", "origin"))
-        pending = self._profile_authorize_operation(
-            "git.sync", args, f"git fetch --prune {remote}"
-        )
-        if pending is not None:
-            return pending
         completed = self._run_git_text(
             [git, "-C", str(self.workspace.root), "fetch", "--prune", remote],
             timeout=120,
@@ -7038,11 +6386,6 @@ class Runtime:
                 "Tracked or staged changes must be clean before git_pull.",
                 category="conflict",
             )
-        pending = self._profile_authorize_operation(
-            "git.sync", args, f"git pull --ff-only {remote} {branch}"
-        )
-        if pending is not None:
-            return pending
         completed = self._run_git_text(
             [
                 git,
@@ -7107,11 +6450,6 @@ class Runtime:
                 category="not_found",
                 details={"remote": remote, "branch": branch},
             )
-        pending = self._profile_authorize_operation(
-            "git.sync", args, f"git merge --no-edit {remote}/{branch} into {current}"
-        )
-        if pending is not None:
-            return pending
         before = self._git_rev_parse(self.workspace.root, "HEAD", env=git_env)
         completed = self._run_git_text(
             [git, "-C", str(self.workspace.root), "merge", "--no-edit", remote_ref],
@@ -7151,11 +6489,6 @@ class Runtime:
                 "Cannot delete the currently checked out branch.",
                 category="conflict",
             )
-        pending = self._profile_authorize_operation(
-            "git.branch", args, f"git delete local branch {name}"
-        )
-        if pending is not None:
-            return pending
         completed = self._run_git_text(
             [git, "-C", str(self.workspace.root), "branch", "-d", name],
             timeout=30,
@@ -7175,11 +6508,6 @@ class Runtime:
             str(args.get("name", "")).strip(), git, git_env
         )
         remote = self._configured_git_remote(git, git_env, args.get("remote", "origin"))
-        pending = self._profile_authorize_operation(
-            "git.push", args, f"git push {remote} --delete {name}"
-        )
-        if pending is not None:
-            return pending
         completed = self._run_git_text(
             [git, "-C", str(self.workspace.root), "push", remote, "--delete", name],
             timeout=120,
@@ -7260,11 +6588,6 @@ class Runtime:
                 category="validation",
             )
         paths = self._explicit_git_paths(args.get("paths"))
-        pending = self._profile_authorize_operation(
-            "git.commit", args, f"git commit explicit paths: {', '.join(paths)}"
-        )
-        if pending is not None:
-            return pending
         branch = self._git_current_branch(git, git_env)
         already_staged = self._staged_git_paths(git, git_env)
         unrelated = sorted(set(already_staged) - set(paths))
@@ -7335,11 +6658,6 @@ class Runtime:
         git, git_env = self._require_selected_git_repo()
         branch = self._git_current_branch(git, git_env)
         remote = self._configured_git_remote(git, git_env, args.get("remote", "origin"))
-        pending = self._profile_authorize_operation(
-            "git.push", args, f"git push {remote} {branch}"
-        )
-        if pending is not None:
-            return pending
         completed = self._run_git_text(
             [
                 git,
@@ -7617,11 +6935,6 @@ class Runtime:
                 category="validation",
             )
         retry_transient = bool(args.get("retry_transient", False))
-        pending = self._profile_authorize_operation(
-            "agent.delegate", args, f"delegate {mode} task to Antigravity CLI"
-        )
-        if pending is not None:
-            return pending
         workspace, selected_root = self._antigravity_selected_workspace()
         git = workspace.git_path
         if not git or not self._is_git_checkout(selected_root):
@@ -8348,10 +7661,6 @@ class Runtime:
         }
 
     def service_restart(self, args: dict[str, Any]) -> dict[str, Any]:
-        action = "restart DevMCP user services"
-        pending = self._profile_authorize_operation("service.manage", args, action)
-        if pending is not None:
-            return pending
         return self._schedule_devmcp_restart()
 
     @staticmethod
@@ -8506,14 +7815,6 @@ class Runtime:
         if source_project == "":
             source_project = None
         development_mode = bool(args.get("development_mode", False))
-        action = (
-            "update installed DevMCP runtime from pinned clean development branch"
-            if development_mode
-            else "update installed DevMCP runtime from synced local main"
-        )
-        pending = self._profile_authorize_operation("service.manage", args, action)
-        if pending is not None:
-            return pending
         source, expected_sha = self._validated_devmcp_update_source(
             source_project, development_mode=development_mode
         )
@@ -10096,8 +9397,8 @@ def tool_definition(name: str, *, fake_readonly: bool = False) -> dict[str, Any]
                 "type": "string",
                 "minLength": 8,
                 "description": (
-                    "Opaque logical task scope for task-scoped capability leases. Reuse it across "
-                    "the operations that belong to the same coding task, then call end_task_scope."
+                    "Opaque logical task scope used to correlate state-management ownership across "
+                    "operations that belong to the same coding task."
                 ),
             },
         },
@@ -10161,12 +9462,11 @@ def input_schemas() -> dict[str, dict[str, Any]]:
             },
             ["path", "probe"],
         ),
-        "service_restart": object_schema({"approval_id": string}),
+        "service_restart": object_schema({}),
         "service_update": object_schema(
             {
                 "source_project": string,
                 "development_mode": {**boolean, "default": False},
-                "approval_id": string,
             }
         ),
         "list_projects": object_schema(),
@@ -10192,7 +9492,6 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                     "maximum": 1048576,
                     "default": 262144,
                 },
-                "approval_id": string,
             },
             ["check_id"],
         ),
@@ -10211,7 +9510,6 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                     "maximum": 8,
                     "default": 4,
                 },
-                "approval_id": string,
             }
         ),
         "read_file": object_schema(
@@ -10399,7 +9697,6 @@ def input_schemas() -> dict[str, dict[str, Any]]:
             {
                 "patch": {**string, "minLength": 1},
                 "dry_run": boolean,
-                "approval_id": string,
             },
             ["patch"],
         ),
@@ -10451,33 +9748,27 @@ def input_schemas() -> dict[str, dict[str, Any]]:
             ["path"],
         ),
         "git_create_branch": object_schema(
-            {"name": {**string, "minLength": 1}, "approval_id": string}, ["name"]
+            {"name": {**string, "minLength": 1}}, ["name"]
         ),
         "git_switch_branch": object_schema(
-            {"name": {**string, "minLength": 1}, "approval_id": string}, ["name"]
+            {"name": {**string, "minLength": 1}}, ["name"]
         ),
-        "git_fetch": object_schema(
-            {"remote": {**string, "default": "origin"}, "approval_id": string}
-        ),
-        "git_pull": object_schema(
-            {"remote": {**string, "default": "origin"}, "approval_id": string}
-        ),
+        "git_fetch": object_schema({"remote": {**string, "default": "origin"}}),
+        "git_pull": object_schema({"remote": {**string, "default": "origin"}}),
         "git_merge_remote_branch": object_schema(
             {
                 "remote": {**string, "default": "origin"},
                 "branch": {**string, "minLength": 1},
-                "approval_id": string,
             },
             ["branch"],
         ),
         "git_delete_branch": object_schema(
-            {"name": {**string, "minLength": 1}, "approval_id": string}, ["name"]
+            {"name": {**string, "minLength": 1}}, ["name"]
         ),
         "git_delete_remote_branch": object_schema(
             {
                 "name": {**string, "minLength": 1},
                 "remote": {**string, "default": "origin"},
-                "approval_id": string,
             },
             ["name"],
         ),
@@ -10485,7 +9776,6 @@ def input_schemas() -> dict[str, dict[str, Any]]:
             {
                 "message": {**string, "minLength": 1, "maxLength": 4096},
                 "paths": {**string_array, "minItems": 1, "maxItems": 100},
-                "approval_id": string,
             },
             ["message", "paths"],
         ),
@@ -10493,7 +9783,6 @@ def input_schemas() -> dict[str, dict[str, Any]]:
             {
                 "remote": {**string, "default": "origin"},
                 "force": {**boolean, "default": False},
-                "approval_id": string,
             }
         ),
         "wait_for_external": object_schema(
@@ -10539,7 +9828,6 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                     "default": 900,
                 },
                 "retry_transient": {**boolean, "default": False},
-                "approval_id": string,
             },
             ["prompt"],
         ),
@@ -10575,7 +9863,6 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                     "maximum": 1048576,
                     "default": 262144,
                 },
-                "approval_id": string,
             },
             ["task_id"],
         ),
@@ -10606,35 +9893,11 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                     "default": 10000,
                 },
                 "env": {"type": "object", "additionalProperties": {"type": "string"}},
-                "sensitive_env_names": {
-                    "type": "array",
-                    "items": {
-                        **string,
-                        "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
-                    },
-                    "maxItems": 64,
-                    "description": "Exact host environment variable names to inject only when matching env.sensitive capability leases exist.",
-                },
                 "transaction_mode": {
                     **string,
                     "enum": ["discard", "apply"],
                     "default": "discard",
                     "description": "Shell execution is non-transactional by default; apply is an explicit compatibility opt-in for bounded transactional execution.",
-                },
-                "execution_mode": {
-                    **string,
-                    "enum": ["read-only", "workspace-write", "full-access"],
-                    "description": "Execution model override. Legacy modes map safe->read-only, trusted->workspace-write, dangerous->full-access.",
-                },
-                "executor_backend": {
-                    **string,
-                    "enum": [
-                        "auto",
-                        "local_sandbox",
-                        "inherited_sandbox",
-                        "ephemeral_container",
-                    ],
-                    "default": "auto",
                 },
                 "max_bytes": {
                     **integer,
@@ -10657,15 +9920,7 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                     "maximum": 1048576,
                     "default": 2048,
                 },
-                "network_required": boolean,
-                "network_targets": {
-                    "type": "array",
-                    "items": {**string, "minLength": 1, "maxLength": 255},
-                    "maxItems": 128,
-                    "description": "Optional host/domain targets. Requires a backend with enforceable network target filtering.",
-                },
                 "task_id": string,
-                "approval_id": string,
             }
         ),
         "exec_argv": object_schema(
@@ -10691,35 +9946,11 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                     "default": 10000,
                 },
                 "env": {"type": "object", "additionalProperties": {"type": "string"}},
-                "sensitive_env_names": {
-                    "type": "array",
-                    "items": {
-                        **string,
-                        "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
-                    },
-                    "maxItems": 64,
-                    "description": "Exact host environment variable names to inject only when matching env.sensitive capability leases exist.",
-                },
                 "transaction_mode": {
                     **string,
                     "enum": ["discard", "apply"],
                     "default": "discard",
                     "description": "Shell execution is non-transactional by default; apply is an explicit compatibility opt-in for bounded transactional execution.",
-                },
-                "execution_mode": {
-                    **string,
-                    "enum": ["read-only", "workspace-write", "full-access"],
-                    "description": "Execution model override. Legacy modes map safe->read-only, trusted->workspace-write, dangerous->full-access.",
-                },
-                "executor_backend": {
-                    **string,
-                    "enum": [
-                        "auto",
-                        "local_sandbox",
-                        "inherited_sandbox",
-                        "ephemeral_container",
-                    ],
-                    "default": "auto",
                 },
                 "max_output_bytes": {
                     **integer,
@@ -10736,15 +9967,7 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                     "maximum": 1048576,
                     "default": 2048,
                 },
-                "network_required": boolean,
-                "network_targets": {
-                    "type": "array",
-                    "items": {**string, "minLength": 1, "maxLength": 255},
-                    "maxItems": 128,
-                    "description": "Optional host/domain targets. Requires a backend with enforceable network target filtering.",
-                },
                 "task_id": string,
-                "approval_id": string,
             },
             ["argv"],
         ),

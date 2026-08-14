@@ -16,12 +16,9 @@ If an older client or server reports `SANDBOX_UNAVAILABLE` as an error, upgrade 
 
 If the result returns `status: "running"`, poll with `write_stdin` using empty `chars`, or terminate with `kill_session`. Session deadlines still apply when the client stops polling.
 
-## Local Approval Is Out of Band
+## BUILD authority
 
-The model-facing catalog does not use MCP elicitation. Safe registered tasks and
-small patches run automatically. Risky operations return an `approval_required`
-record; approve it locally with `devmcp approve <approval_id>`, then retry the
-exact same operation with that `approval_id`.
+BUILD does not use per-command approval IDs or capability leases. Commands run with the current OS user's normal filesystem, HOME/PATH, toolchain, and network authority. The selected project is a default context/cwd, not a filesystem security boundary.
 
 ## Missing Toolchain Environment
 
@@ -31,7 +28,7 @@ exact same operation with that `approval_id`.
 CODING_TOOLS_MCP_SHELL_ENV_INHERIT=all coding-tools-mcp --workspace /path/to/repo
 ```
 
-This still filters secret-looking and loader/startup variables unless `--permission-mode dangerous` is also enabled.
+BUILD inherits the normal host environment subject only to explicit operator shell-environment configuration; PLAN does not execute processes.
 
 ## Exec Diagnostics
 
