@@ -5,7 +5,10 @@ from typing import Any, Callable
 
 from . import server as core
 from .errors import ToolFailure
-from .state_checkpoint import read_state_checkpoint, write_state_checkpoint
+from .state_checkpoint import (
+    read_authoritative_state_checkpoint,
+    write_state_checkpoint,
+)
 from .state_identity import BuildIdentityMixin
 from .state_mutations import StateMutationMixin
 from .state_snapshot import (
@@ -13,6 +16,7 @@ from .state_snapshot import (
     compare_snapshots,
     git_text,
     read_build_identity,
+    state_fingerprint,
 )
 from .state_store import now_iso
 from .writer_lease import (
@@ -30,6 +34,58 @@ class StateManagedRuntime(StateMutationMixin, BuildIdentityMixin, core.Runtime):
 
     def _state_task(self) -> str | None:
         return self._task_scope_id()
+
+    def _ensure_state_baseline(
+        self, *, owner: str | None = None
+    ) -> dict[str, Any] | None:
+        authority_owner = owner or self._state_owner()
+        existing = read_authoritative_state_checkpoint(
+            self.workspace.root, authority_owner
+        )
+        if existing is not None:
+            return existing
+        actual = self._state_snapshot()
+        branch = str(actual.get("branch") or "")
+        if not branch:
+            return None
+        return write_state_checkpoint(
+            self.workspace.root,
+            branch,
+            snapshot=actual,
+            phase="baseline",
+            operation="context_baseline",
+            owner=authority_owner,
+            logical_task=self._state_task(),
+            outcome="baseline",
+            authority_owner=authority_owner,
+        )
+
+    def initialize(self, client_info: dict[str, Any] | None = None) -> dict[str, Any]:
+        result = super().initialize(client_info)
+        owner = self._active_context_id()
+        if owner:
+            self._ensure_state_baseline(owner=owner)
+        return result
+
+    def _apply_logical_context_state(self, state: Any) -> None:
+        super()._apply_logical_context_state(state)
+        owner = str(getattr(state, "context_id", "") or "")
+        if owner:
+            self._ensure_state_baseline(owner=owner)
+
+    def local_state_snapshot(self, args: dict[str, Any]) -> dict[str, Any]:
+        self._ensure_state_baseline()
+        return super().local_state_snapshot(args)
+
+    def _profile_exec_command(self, args: dict[str, Any]) -> dict[str, Any]:
+        self._ensure_state_baseline()
+        return super()._profile_exec_command(args)
+
+    def _execute_task_argv(
+        self, argv: list[str], args: dict[str, Any], capabilities: set[str]
+    ) -> dict[str, Any]:
+        self._ensure_state_baseline()
+        return super()._execute_task_argv(argv, args, capabilities)
 
     def _state_branch(self) -> str:
         branch = git_text(
@@ -96,7 +152,12 @@ class StateManagedRuntime(StateMutationMixin, BuildIdentityMixin, core.Runtime):
         self, operation: str, *, extra_branches: list[str] | None = None
     ) -> tuple[str, dict[str, Any] | None, dict[str, Any]]:
         branch = self._state_branch()
-        expected_record = read_state_checkpoint(self.workspace.root, branch)
+        authority_owner = self._state_owner()
+        expected_record = read_authoritative_state_checkpoint(
+            self.workspace.root, authority_owner
+        )
+        if expected_record is None:
+            expected_record = self._ensure_state_baseline(owner=authority_owner)
         expected_snapshot = (
             expected_record.get("snapshot")
             if isinstance(expected_record, dict)
@@ -112,6 +173,14 @@ class StateManagedRuntime(StateMutationMixin, BuildIdentityMixin, core.Runtime):
             if expected_snapshot is not None:
                 drift = compare_snapshots(expected_snapshot, actual)
                 if drift:
+                    evidence = {
+                        "checkpoint_id": str(
+                            (expected_record or {}).get("checkpoint_id") or ""
+                        ),
+                        "branch": actual.get("branch"),
+                        "head": actual.get("local_head"),
+                        "state_fingerprint": state_fingerprint(actual),
+                    }
                     raise ToolFailure(
                         "STATE_DRIFT",
                         "Repository state changed since the last automatic checkpoint.",
@@ -121,10 +190,11 @@ class StateManagedRuntime(StateMutationMixin, BuildIdentityMixin, core.Runtime):
                             "expected": expected_snapshot,
                             "actual": actual,
                             "changed_fields": drift,
+                            "reconciliation_evidence": evidence,
                             "reconcile": (
-                                "Inspect the changed fields, then explicitly reconcile with "
-                                "continuation_checkpoint(action=write, payload={branch: <actual branch>, "
-                                "head: <actual local_head>})."
+                                "Inspect the changed fields, then pass the returned branch, head, "
+                                "checkpoint_id, and state_fingerprint back in the "
+                                "continuation_checkpoint write payload."
                             ),
                         },
                     )
@@ -173,6 +243,7 @@ class StateManagedRuntime(StateMutationMixin, BuildIdentityMixin, core.Runtime):
             outcome=outcome,
             previous_checkpoint_id=str((previous or {}).get("checkpoint_id") or "")
             or None,
+            authority_owner=self._state_owner(),
         )
 
     def _guarded(
@@ -219,13 +290,16 @@ class StateManagedRuntime(StateMutationMixin, BuildIdentityMixin, core.Runtime):
         if action != "write" or not isinstance(payload, dict):
             return result
 
+        requested_checkpoint_id = str(payload.get("checkpoint_id") or "").strip()
         requested_branch = str(payload.get("branch") or "").strip()
         requested_head = str(payload.get("head") or "").strip()
-        if not requested_branch or not requested_head:
-            return result
+        requested_fingerprint = str(payload.get("state_fingerprint") or "").strip()
 
         actual_branch = self._state_branch()
-        previous = read_state_checkpoint(self.workspace.root, actual_branch)
+        authority_owner = self._state_owner()
+        previous = read_authoritative_state_checkpoint(
+            self.workspace.root, authority_owner
+        )
         self._acquire_state_leases(
             [actual_branch],
             str((previous or {}).get("checkpoint_id") or "") or None,
@@ -233,12 +307,41 @@ class StateManagedRuntime(StateMutationMixin, BuildIdentityMixin, core.Runtime):
         try:
             actual = self._state_snapshot()
             actual_head = str(actual.get("local_head") or "")
+            actual_fingerprint = state_fingerprint(actual)
+            current_checkpoint_id = str((previous or {}).get("checkpoint_id") or "")
+            if (
+                not requested_checkpoint_id
+                or not requested_branch
+                or not requested_head
+                or not requested_fingerprint
+            ):
+                result["state_reconciliation"] = {
+                    "status": "not_applied",
+                    "reason": "missing_reconciliation_evidence",
+                }
+                return result
+            if requested_checkpoint_id != current_checkpoint_id:
+                result["state_reconciliation"] = {
+                    "status": "not_applied",
+                    "reason": "checkpoint_identity_mismatch",
+                    "requested_checkpoint_id": requested_checkpoint_id,
+                    "actual_checkpoint_id": current_checkpoint_id or None,
+                }
+                return result
             if requested_branch != actual_branch or requested_head != actual_head:
                 result["state_reconciliation"] = {
                     "status": "not_applied",
                     "reason": "payload_branch_head_mismatch",
                     "actual_branch": actual_branch,
                     "actual_head": actual_head,
+                }
+                return result
+            if requested_fingerprint != actual_fingerprint:
+                result["state_reconciliation"] = {
+                    "status": "not_applied",
+                    "reason": "state_fingerprint_mismatch",
+                    "requested_fingerprint": requested_fingerprint,
+                    "actual_fingerprint": actual_fingerprint,
                 }
                 return result
 
@@ -253,12 +356,14 @@ class StateManagedRuntime(StateMutationMixin, BuildIdentityMixin, core.Runtime):
                 outcome="reconciled",
                 previous_checkpoint_id=str((previous or {}).get("checkpoint_id") or "")
                 or None,
+                authority_owner=authority_owner,
             )
             result["state_reconciliation"] = {
                 "status": "reconciled",
                 "checkpoint_id": checkpoint["checkpoint_id"],
                 "branch": actual_branch,
                 "head": actual_head,
+                "state_fingerprint": actual_fingerprint,
             }
             return result
         finally:

@@ -17,6 +17,7 @@ from coding_tools_mcp.state_snapshot import (
     filter_ci_runs_for_sha,
     handoff_text,
     read_build_identity,
+    state_fingerprint,
 )
 from coding_tools_mcp.stateful_server import StateManagedRuntime
 from coding_tools_mcp.writer_lease import (
@@ -215,6 +216,27 @@ class StateManagementTests(TestCase):
             self.assertIn("untracked_paths", drift)
             self.assertIn("content_hashes", drift)
 
+    def test_state_fingerprint_uses_only_canonical_drift_fields(self) -> None:
+        base = {
+            "branch": "main",
+            "local_head": "a" * 40,
+            "upstream": None,
+            "remote_tracking_head": None,
+            "dirty_paths": ["tracked.txt"],
+            "staged_paths": [],
+            "untracked_paths": [],
+            "content_hashes": {"tracked.txt": "b" * 64},
+            "timestamp": "first",
+            "writer_owner": "one",
+        }
+        changed_metadata = {**base, "timestamp": "second", "writer_owner": "two"}
+        self.assertEqual(state_fingerprint(base), state_fingerprint(changed_metadata))
+        changed_content = {
+            **base,
+            "content_hashes": {"tracked.txt": "c" * 64},
+        }
+        self.assertNotEqual(state_fingerprint(base), state_fingerprint(changed_content))
+
     def test_remote_tracking_head_is_not_reported_as_authoritative_remote_head(
         self,
     ) -> None:
@@ -376,7 +398,7 @@ class StateManagementTests(TestCase):
             finally:
                 runtime.close()
 
-    def test_explicit_continuation_reconcile_requires_actual_branch_and_head(
+    def test_explicit_continuation_reconcile_requires_exact_observed_state(
         self,
     ) -> None:
         with TemporaryDirectory() as tmp:
@@ -402,15 +424,23 @@ class StateManagementTests(TestCase):
                     with self.assertRaises(ToolFailure) as drift:
                         runtime.git_create_branch({"name": "blocked-before-reconcile"})
                     self.assertEqual(drift.exception.code, "STATE_DRIFT")
+                    evidence = drift.exception.details["reconciliation_evidence"]
 
                     wrong = runtime.continuation_checkpoint(
                         {
                             "action": "write",
-                            "payload": {"branch": "main", "head": "0" * 40},
+                            "payload": {
+                                **evidence,
+                                "checkpoint_id": "wrong-checkpoint",
+                            },
                         }
                     )
                     self.assertEqual(
                         wrong["state_reconciliation"]["status"], "not_applied"
+                    )
+                    self.assertEqual(
+                        wrong["state_reconciliation"]["reason"],
+                        "checkpoint_identity_mismatch",
                     )
                     self.assertIsNone(inspect_writer_lease(repo, "main"))
                     with self.assertRaises(ToolFailure) as still_drift:
@@ -421,7 +451,7 @@ class StateManagementTests(TestCase):
                     reconciled = runtime.continuation_checkpoint(
                         {
                             "action": "write",
-                            "payload": {"branch": "main", "head": head},
+                            "payload": evidence,
                         }
                     )
                     self.assertEqual(
@@ -431,6 +461,237 @@ class StateManagementTests(TestCase):
                     created = runtime.git_create_branch({"name": "after-reconcile"})
                     self.assertEqual(created["branch"], "after-reconcile")
                     self.assertIsNone(inspect_writer_lease(repo, "after-reconcile"))
+
+                    old = runtime.continuation_checkpoint(
+                        {
+                            "action": "write",
+                            "payload": evidence,
+                        }
+                    )
+                    self.assertEqual(
+                        old["state_reconciliation"]["status"], "not_applied"
+                    )
+                    self.assertEqual(
+                        old["state_reconciliation"]["reason"],
+                        "checkpoint_identity_mismatch",
+                    )
+                    self.assertIsNone(inspect_writer_lease(repo, "after-reconcile"))
+                finally:
+                    runtime.close()
+
+    def test_reconcile_rejects_same_branch_head_after_untracked_toctou(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, _head = init_repo(root)
+            with patch.dict("os.environ", {"DEVMCP_CONFIG_DIR": str(root / "config")}):
+                runtime = StateManagedRuntime(workspace=repo, sandbox_backend="unsafe")
+                try:
+                    runtime.local_state_snapshot({})
+                    (repo / "reviewed.txt").write_text("B\n", encoding="utf-8")
+                    with self.assertRaises(ToolFailure) as drift:
+                        runtime.git_create_branch({"name": "blocked"})
+                    evidence = drift.exception.details["reconciliation_evidence"]
+                    (repo / "later.txt").write_text("C\n", encoding="utf-8")
+                    rejected = runtime.continuation_checkpoint(
+                        {
+                            "action": "write",
+                            "payload": evidence,
+                        }
+                    )
+                    self.assertEqual(
+                        rejected["state_reconciliation"]["status"], "not_applied"
+                    )
+                    self.assertEqual(
+                        rejected["state_reconciliation"]["reason"],
+                        "state_fingerprint_mismatch",
+                    )
+                    self.assertIsNone(inspect_writer_lease(repo, "main"))
+                    with self.assertRaises(ToolFailure) as still_drift:
+                        runtime.git_create_branch({"name": "still-blocked"})
+                    self.assertEqual(still_drift.exception.code, "STATE_DRIFT")
+                finally:
+                    runtime.close()
+
+    def test_reconcile_rejects_same_branch_head_after_staged_toctou(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, _head = init_repo(root)
+            with patch.dict("os.environ", {"DEVMCP_CONFIG_DIR": str(root / "config")}):
+                runtime = StateManagedRuntime(workspace=repo, sandbox_backend="unsafe")
+                try:
+                    runtime.local_state_snapshot({})
+                    (repo / "reviewed.txt").write_text("B\n", encoding="utf-8")
+                    with self.assertRaises(ToolFailure) as drift:
+                        runtime.git_create_branch({"name": "blocked"})
+                    evidence = drift.exception.details["reconciliation_evidence"]
+                    subprocess.run(["git", "add", "reviewed.txt"], cwd=repo, check=True)
+                    rejected = runtime.continuation_checkpoint(
+                        {
+                            "action": "write",
+                            "payload": evidence,
+                        }
+                    )
+                    self.assertEqual(
+                        rejected["state_reconciliation"]["status"], "not_applied"
+                    )
+                    self.assertEqual(
+                        rejected["state_reconciliation"]["reason"],
+                        "state_fingerprint_mismatch",
+                    )
+                    self.assertIsNone(inspect_writer_lease(repo, "main"))
+                finally:
+                    runtime.close()
+
+    def test_reconcile_rejects_same_branch_head_after_content_toctou(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, _head = init_repo(root)
+            with patch.dict("os.environ", {"DEVMCP_CONFIG_DIR": str(root / "config")}):
+                runtime = StateManagedRuntime(workspace=repo, sandbox_backend="unsafe")
+                try:
+                    runtime.local_state_snapshot({})
+                    (repo / "tracked.txt").write_text("B\n", encoding="utf-8")
+                    with self.assertRaises(ToolFailure) as drift:
+                        runtime.git_create_branch({"name": "blocked"})
+                    evidence = drift.exception.details["reconciliation_evidence"]
+                    (repo / "tracked.txt").write_text("C\n", encoding="utf-8")
+                    rejected = runtime.continuation_checkpoint(
+                        {
+                            "action": "write",
+                            "payload": evidence,
+                        }
+                    )
+                    self.assertEqual(
+                        rejected["state_reconciliation"]["status"], "not_applied"
+                    )
+                    self.assertEqual(
+                        rejected["state_reconciliation"]["reason"],
+                        "state_fingerprint_mismatch",
+                    )
+                    self.assertIsNone(inspect_writer_lease(repo, "main"))
+                finally:
+                    runtime.close()
+
+    def test_initial_dirty_repo_can_be_established_as_context_baseline(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, _head = init_repo(root)
+            (repo / "tracked.txt").write_text("existing WIP\n", encoding="utf-8")
+            (repo / "existing.txt").write_text("untracked WIP\n", encoding="utf-8")
+            with patch.dict("os.environ", {"DEVMCP_CONFIG_DIR": str(root / "config")}):
+                runtime = StateManagedRuntime(workspace=repo, sandbox_backend="unsafe")
+                try:
+                    baseline = runtime.local_state_snapshot({})
+                    self.assertIn("tracked.txt", baseline["dirty_paths"])
+                    created = runtime.git_create_branch({"name": "from-dirty-baseline"})
+                    self.assertEqual(created["branch"], "from-dirty-baseline")
+                    self.assertIsNone(inspect_writer_lease(repo, "from-dirty-baseline"))
+                finally:
+                    runtime.close()
+
+    def test_mutation_after_initial_baseline_raises_state_drift(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, _head = init_repo(root)
+            with patch.dict("os.environ", {"DEVMCP_CONFIG_DIR": str(root / "config")}):
+                runtime = StateManagedRuntime(workspace=repo, sandbox_backend="unsafe")
+                try:
+                    runtime.local_state_snapshot({})
+                    (repo / "after-baseline.txt").write_text(
+                        "changed\n", encoding="utf-8"
+                    )
+                    with self.assertRaises(ToolFailure) as drift:
+                        runtime.git_create_branch({"name": "blocked"})
+                    self.assertEqual(drift.exception.code, "STATE_DRIFT")
+                    self.assertIsNone(inspect_writer_lease(repo, "main"))
+                finally:
+                    runtime.close()
+
+    def test_plain_exec_establishes_baseline_before_first_command(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, _head = init_repo(root)
+            with patch.dict("os.environ", {"DEVMCP_CONFIG_DIR": str(root / "config")}):
+                runtime = StateManagedRuntime(workspace=repo, sandbox_backend="unsafe")
+                try:
+                    result = runtime.exec_argv(
+                        {
+                            "argv": [
+                                "python3",
+                                "-c",
+                                "from pathlib import Path; Path('via-exec.txt').write_text('changed\\n')",
+                            ],
+                            "cwd": ".",
+                        }
+                    )
+                    self.assertEqual(result["exit_code"], 0)
+                    with self.assertRaises(ToolFailure) as drift:
+                        runtime.git_create_branch({"name": "blocked-after-exec"})
+                    self.assertEqual(drift.exception.code, "STATE_DRIFT")
+                    self.assertIn(
+                        "untracked_paths", drift.exception.details["changed_fields"]
+                    )
+                    self.assertIsNone(inspect_writer_lease(repo, "main"))
+                finally:
+                    runtime.close()
+
+    def test_raw_branch_switch_is_detected_against_context_anchor(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, _head = init_repo(root)
+            with patch.dict("os.environ", {"DEVMCP_CONFIG_DIR": str(root / "config")}):
+                runtime = StateManagedRuntime(workspace=repo, sandbox_backend="unsafe")
+                try:
+                    runtime.local_state_snapshot({})
+                    subprocess.run(
+                        ["git", "switch", "-q", "-c", "raw-branch"],
+                        cwd=repo,
+                        check=True,
+                    )
+                    with self.assertRaises(ToolFailure) as drift:
+                        runtime.apply_patch(
+                            {
+                                "patch": """*** Begin Patch
+*** Update File: tracked.txt
+@@ -1,1 +1,1 @@
+-one
++two
+*** End Patch
+"""
+                            }
+                        )
+                    self.assertEqual(drift.exception.code, "STATE_DRIFT")
+                    self.assertIn("branch", drift.exception.details["changed_fields"])
+                    self.assertIsNone(inspect_writer_lease(repo, "raw-branch"))
+                finally:
+                    runtime.close()
+
+    def test_managed_branch_create_and_switch_refresh_context_anchor(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, _head = init_repo(root)
+            with patch.dict("os.environ", {"DEVMCP_CONFIG_DIR": str(root / "config")}):
+                runtime = StateManagedRuntime(workspace=repo, sandbox_backend="unsafe")
+                try:
+                    runtime.local_state_snapshot({})
+                    created = runtime.git_create_branch({"name": "managed"})
+                    self.assertEqual(created["branch"], "managed")
+                    self.assertIsNone(inspect_writer_lease(repo, "managed"))
+                    switched = runtime.git_switch_branch({"name": "main"})
+                    self.assertEqual(switched["branch"], "main")
+                    self.assertIsNone(inspect_writer_lease(repo, "main"))
+                    runtime.apply_patch(
+                        {
+                            "patch": """*** Begin Patch
+*** Update File: tracked.txt
+@@ -1,1 +1,1 @@
+-one
++two
+*** End Patch
+"""
+                        }
+                    )
+                    self.assertIsNone(inspect_writer_lease(repo, "main"))
                 finally:
                     runtime.close()
 

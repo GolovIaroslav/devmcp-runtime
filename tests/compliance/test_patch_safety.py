@@ -52,26 +52,27 @@ class PatchSafetyTests(ComplianceTestCase):
  Line 4001: Some content that must be perfectly preserved.
 *** End Patch
 """
-        self.assert_tool_success(self.client.call_tool("apply_patch", {"patch": patch}))
+        with self.client_with_permission(self.permission_mode) as client:
+            self.assert_tool_success(client.call_tool("apply_patch", {"patch": patch}))
 
-        modified_lines = test_file.read_text().splitlines()
-        self.assertEqual(modified_lines[100], "Line 100: MODIFIED REGION ONE.")
-        self.assertEqual(modified_lines[2500], "Line 2500: MODIFIED REGION TWO.")
-        self.assertEqual(modified_lines[4000], "Line 4000: MODIFIED REGION THREE.")
-        for index, value in enumerate(modified_lines):
-            if index not in {100, 2500, 4000}:
-                self.assertEqual(
-                    value, original_lines[index], f"unrelated line {index} changed"
-                )
+            modified_lines = test_file.read_text().splitlines()
+            self.assertEqual(modified_lines[100], "Line 100: MODIFIED REGION ONE.")
+            self.assertEqual(modified_lines[2500], "Line 2500: MODIFIED REGION TWO.")
+            self.assertEqual(modified_lines[4000], "Line 4000: MODIFIED REGION THREE.")
+            for index, value in enumerate(modified_lines):
+                if index not in {100, 2500, 4000}:
+                    self.assertEqual(
+                        value, original_lines[index], f"unrelated line {index} changed"
+                    )
 
-        destructive_patch = (
-            "*** Begin Patch\n*** Update File: 5000_lines.txt\n@@\n"
-            + "".join(f"-{line}\n" for line in modified_lines)
-            + "".join(f"+{line}\n" for line in original_lines[:100])
-            + "*** End Patch\n"
-        )
-        preview = self.client.call_tool("preview_patch", {"patch": destructive_patch})
-        preview_payload = self.assert_tool_success(preview)
-        self.assertGreater(preview_payload.get("removals", 0), 4800)
-        res = self.client.call_tool("apply_patch", {"patch": destructive_patch})
-        self.assertTrue(res.get("structuredContent", {}).get("clean"))
+            destructive_patch = (
+                "*** Begin Patch\n*** Update File: 5000_lines.txt\n@@\n"
+                + "".join(f"-{line}\n" for line in modified_lines)
+                + "".join(f"+{line}\n" for line in original_lines[:100])
+                + "*** End Patch\n"
+            )
+            preview = client.call_tool("preview_patch", {"patch": destructive_patch})
+            preview_payload = self.assert_tool_success(preview)
+            self.assertGreater(preview_payload.get("removals", 0), 4800)
+            res = client.call_tool("apply_patch", {"patch": destructive_patch})
+            self.assertTrue(res.get("structuredContent", {}).get("clean"))

@@ -144,5 +144,9 @@ def checkpoint_path(project: Path, branch: str, *, before: bool = False) -> Path
     return state_root(project) / "checkpoints" / f"{_scope_id(branch)}{suffix}"
 
 
+def context_checkpoint_path(project: Path, owner: str) -> Path:
+    return state_root(project) / "contexts" / f"{_scope_id(owner)}.json"
+
+
 def new_checkpoint_id() -> str:
     return uuid.uuid4().hex

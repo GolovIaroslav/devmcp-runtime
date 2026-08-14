@@ -30,7 +30,10 @@ class LiveDogfoodV5Tests(ComplianceTestCase):
                 "run_task",
                 {
                     "task_id": "pytest.all",
-                    "env": {"AUTHORITATIVE_WORKSPACE": str(self.workspace.root)},
+                    "env": {
+                        "AUTHORITATIVE_WORKSPACE": str(self.workspace.root),
+                        "PYTHONDONTWRITEBYTECODE": "1",
+                    },
                     "timeout_ms": 10000,
                     "yield_time_ms": 10000,
                 },
@@ -65,7 +68,10 @@ class LiveDogfoodV5Tests(ComplianceTestCase):
                 "run_task",
                 {
                     "task_id": "pytest.all",
-                    "env": {"AUTHORITATIVE_WORKSPACE": str(self.workspace.root)},
+                    "env": {
+                        "AUTHORITATIVE_WORKSPACE": str(self.workspace.root),
+                        "PYTHONDONTWRITEBYTECODE": "1",
+                    },
                     "timeout_ms": 10000,
                     "yield_time_ms": 10000,
                 },

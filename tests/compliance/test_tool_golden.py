@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from coding_tools_mcp.state_checkpoint import write_state_checkpoint
-from coding_tools_mcp.state_snapshot import collect_state_snapshot, git_text
 from tests.compliance.mcp_client import MCPError
 from tests.compliance.test_support import ComplianceTestCase
 
@@ -214,7 +212,8 @@ class ApplyPatchGoldenTests(ComplianceTestCase):
 +new
 *** End Patch
 """
-        self.assert_tool_success(self.client.call_tool("apply_patch", {"patch": patch}))
+        with self.client_with_permission(self.permission_mode) as client:
+            self.assert_tool_success(client.call_tool("apply_patch", {"patch": patch}))
         updated = crlf_file.read_bytes()
         self.assertTrue(updated.startswith("\ufeff".encode("utf-8")))
         self.assertIn(b"new\r\n", updated)
@@ -222,25 +221,6 @@ class ApplyPatchGoldenTests(ComplianceTestCase):
 
         duplicate_file = self.workspace.root / "src" / "duplicate.txt"
         duplicate_file.write_text("same\nsame\n", encoding="utf-8")
-        branch = git_text(self.workspace.root, ["branch", "--show-current"]) or "main"
-        write_state_checkpoint(
-            self.workspace.root,
-            branch,
-            snapshot=collect_state_snapshot(
-                self.workspace.root,
-                project_id="0:.",
-                installed_service_version="0.1.0b1",
-                installed_service_git_sha=None,
-                protocol_version="2025-11-25",
-                writer_owner=None,
-                logical_task=None,
-            ),
-            phase="after",
-            operation="reconcile",
-            owner="test",
-            logical_task=None,
-            outcome="success",
-        )
         ambiguous = """*** Begin Patch
 *** Update File: src/duplicate.txt
 @@
@@ -248,7 +228,10 @@ class ApplyPatchGoldenTests(ComplianceTestCase):
 +changed
 *** End Patch
 """
-        payload = self.assert_tool_error("apply_patch", {"patch": ambiguous})
+        with self.client_with_permission(self.permission_mode) as client:
+            result = client.call_tool("apply_patch", {"patch": ambiguous})
+        self.assertTrue(result.get("isError", False), result)
+        payload = result.get("structuredContent", {})
         self.assertEqual(
             payload.get("error", {}).get("code"), "PATCH_CONTEXT_AMBIGUOUS"
         )
@@ -268,7 +251,8 @@ class ApplyPatchGoldenTests(ComplianceTestCase):
 *** Move to: bin/run.sh
 *** End Patch
 """
-        result = self.client.call_tool("apply_patch", {"patch": move})
+        with self.client_with_permission(self.permission_mode) as client:
+            result = client.call_tool("apply_patch", {"patch": move})
         self.assert_tool_success(result)
         destination = self.workspace.root / "bin" / "run.sh"
         self.assertFalse(source.exists())
