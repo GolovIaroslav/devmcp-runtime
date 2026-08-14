@@ -105,7 +105,6 @@ class RegisteredTaskPolicyV5Tests(unittest.TestCase):
                 self.assertIsNotNone(task)
                 assert task is not None
                 self.assertFalse(task.network_requirement)
-                self.assertEqual(task.approval_class, "ALLOW")
                 self.assertEqual(registry.match_direct_argv(argv), task)
 
 

@@ -15,7 +15,6 @@ class TaskTemplate:
     argv: list[str] = field(default_factory=list)
     arg_definitions: dict[str, dict[str, Any]] = field(default_factory=dict)
     network_requirement: bool = False
-    approval_class: str = "ALLOW"
     cwd_policy: str = "workspace_root"
 
     @property
@@ -38,7 +37,6 @@ def _task(
     argv: list[str] | None = None,
     *,
     network: bool = False,
-    approval: str = "ALLOW",
     cwd: str = "workspace_root",
     arguments: dict[str, dict[str, Any]] | None = None,
 ) -> TaskTemplate:
@@ -50,7 +48,6 @@ def _task(
         list(argv or []),
         dict(arguments or _COMMON_ARGUMENTS),
         network,
-        approval,
         cwd,
     )
 
@@ -116,11 +113,10 @@ TASK_REGISTRY = [
     _task(
         "npm.install",
         "npm",
-        "Install npm dependencies with an approved network grant.",
+        "Install npm dependencies using normal BUILD network access.",
         "npm",
         ["install"],
         network=True,
-        approval="ASK",
     ),
     _task("npm.audit", "npm", "Run npm audit.", "npm", ["audit"]),
     _task("pnpm.test", "pnpm", "Run pnpm tests.", "pnpm", ["test"]),
@@ -129,11 +125,10 @@ TASK_REGISTRY = [
     _task(
         "pnpm.install",
         "pnpm",
-        "Install pnpm dependencies with an approved network grant.",
+        "Install pnpm dependencies using normal BUILD network access.",
         "pnpm",
         ["install"],
         network=True,
-        approval="ASK",
     ),
     _task("yarn.test", "yarn", "Run yarn tests.", "yarn", ["test"]),
     _task("yarn.build", "yarn", "Run yarn build.", "yarn", ["run", "build"]),
@@ -141,22 +136,20 @@ TASK_REGISTRY = [
     _task(
         "yarn.install",
         "yarn",
-        "Install yarn dependencies with an approved network grant.",
+        "Install yarn dependencies using normal BUILD network access.",
         "yarn",
         ["install"],
         network=True,
-        approval="ASK",
     ),
     _task("bun.test", "bun", "Run bun tests.", "bun", ["test"]),
     _task("bun.build", "bun", "Run bun build.", "bun", ["run", "build"]),
     _task(
         "bun.install",
         "bun",
-        "Install bun dependencies with an approved network grant.",
+        "Install bun dependencies using normal BUILD network access.",
         "bun",
         ["install"],
         network=True,
-        approval="ASK",
     ),
     _task("vitest.run", "javascript", "Run Vitest tests.", "vitest", ["run"]),
     _task("jest.run", "javascript", "Run Jest tests.", "jest"),
@@ -208,11 +201,10 @@ TASK_REGISTRY = [
     _task(
         "uv.sync",
         "python",
-        "Sync uv dependencies with an approved network grant.",
+        "Sync uv dependencies using normal BUILD network access.",
         "uv",
         ["sync"],
         network=True,
-        approval="ASK",
     ),
     _task("cargo.test", "rust", "Run cargo tests.", "cargo", ["test"]),
     _task("cargo.build", "rust", "Run cargo build.", "cargo", ["build"]),
@@ -233,11 +225,10 @@ TASK_REGISTRY = [
     _task(
         "go.mod_tidy",
         "go",
-        "Tidy Go dependencies with an approved network grant.",
+        "Tidy Go dependencies using normal BUILD network access.",
         "go",
         ["mod", "tidy"],
         network=True,
-        approval="ASK",
     ),
     _task("golangci_lint.run", "go", "Run golangci-lint.", "golangci-lint", ["run"]),
     _task("mvn.test", "java", "Run Maven tests.", "mvn", ["test"]),
@@ -246,7 +237,7 @@ TASK_REGISTRY = [
     _task("gradle.test", "java", "Run Gradle tests.", "./gradlew", ["test"]),
     _task("gradle.build", "java", "Build with Gradle.", "./gradlew", ["build"]),
     _task("make.all", "c", "Run make.", "make"),
-    _task("make.clean", "c", "Clean make outputs.", "make", ["clean"], approval="ASK"),
+    _task("make.clean", "c", "Clean make outputs.", "make", ["clean"]),
     _task("make.test", "c", "Run make tests.", "make", ["test"]),
     _task(
         "cmake.configure", "c", "Configure CMake.", "cmake", ["-S", ".", "-B", "build"]
@@ -288,7 +279,6 @@ TASK_REGISTRY = [
         "Push Prisma schema.",
         "npx",
         ["prisma", "db", "push"],
-        approval="ASK",
     ),
     _task(
         "alembic.upgrade",
@@ -296,16 +286,14 @@ TASK_REGISTRY = [
         "Upgrade the Alembic database.",
         "alembic",
         ["upgrade", "head"],
-        approval="ASK",
     ),
     _task(
         "http.health",
         "network",
-        "Check HTTP health with an approved network grant.",
+        "Check HTTP health using normal BUILD network access.",
         "curl",
         ["-sI"],
         network=True,
-        approval="ASK",
     ),
 ]
 
@@ -320,10 +308,9 @@ class TaskRegistry:
     def match_direct_argv(self, argv: list[str]) -> TaskTemplate | None:
         """Match only commands with a registered, fixed argv shape.
 
-        This is deliberately narrower than shell-command pattern matching. A
-        direct ``exec_command`` call is auto-allowed only when its argv is the
-        exact argv of a non-network registered task, or a registered pytest
-        file task with one validated workspace-relative path argument.
+        This is deliberately narrower than shell-command pattern matching. It
+        recognizes only the exact argv of a registered task, or a registered
+        pytest file task with one validated workspace-relative path argument.
         """
         if not argv:
             return None
@@ -367,7 +354,6 @@ class TaskRegistry:
                     "argv": list(task.argv),
                     "argument_definitions": task.arg_definitions,
                     "network_requirement": task.network_requirement,
-                    "approval_class": task.approval_class,
                     "cwd_policy": task.cwd_policy,
                 }
             )
@@ -388,7 +374,6 @@ class TaskRegistry:
             "argument_definitions": task.arg_definitions,
             "command": " ".join(task.command_args),
             "network_requirement": task.network_requirement,
-            "approval_class": task.approval_class,
             "cwd_policy": task.cwd_policy,
         }
 

@@ -4172,7 +4172,6 @@ class Runtime:
         task_args = dict(args)
         task_args["_resolved_workdir"] = self._operation_workdir(args).path
         task_args["cmd"] = argv
-        task_args["approval_class"] = "ALLOW"
         task_args["_argv_task"] = True
         task_args["_approved_capabilities"] = sorted(capabilities)
         execution_mode = (
@@ -8002,12 +8001,6 @@ class Runtime:
                 "NOT_FOUND", f"Task '{task_id}' not found.", category="validation"
             )
 
-        if template.approval_class == "DENY":
-            raise ToolFailure(
-                "ACCESS_DENIED",
-                f"Task '{task_id}' is unconditionally denied.",
-                category="security",
-            )
         cwd = self._operation_workdir(args)
         if template.cwd_policy == "workspace_root" and cwd.path != self.workspace.root:
             raise ToolFailure(
