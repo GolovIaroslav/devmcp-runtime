@@ -12,15 +12,12 @@ import json
 import os
 import re
 import secrets
-import shutil
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import tomllib
-
-from .policy import CAPABILITIES, DEFAULT_PROFILE, PROFILE_NAMES, effective_rules
 
 CONFIG_SCHEMA_VERSION = 1
 PUBLIC_CONFIG_ENV = "DEVMCP_CONFIG_DIR"
@@ -38,7 +35,6 @@ class ConfigPaths:
     control_plane_key: Path
     git_credentials: Path
     tunnel_health_url: Path
-    approvals_db: Path
     audit_log: Path
 
 
@@ -61,7 +57,6 @@ def paths() -> ConfigPaths:
         control_plane_key=secrets_dir / "control-plane-api-key",
         git_credentials=secrets_dir / "git-credentials",
         tunnel_health_url=root / "tunnel-health.url",
-        approvals_db=root / "approvals.db",
         audit_log=root / "audit.jsonl",
     )
 
@@ -72,8 +67,7 @@ def default_config(workspace: str | None = None) -> dict[str, Any]:
         "schema_version": CONFIG_SCHEMA_VERSION,
         "workspace": root,
         "workspaces": [root],
-        "profile": DEFAULT_PROFILE,
-        "sandbox_backend": "bwrap",
+        "sandbox_backend": "none",
         "mcp_host": "127.0.0.1",
         "mcp_port": 47157,
         "ui_host": "127.0.0.1",
@@ -82,7 +76,6 @@ def default_config(workspace: str | None = None) -> dict[str, Any]:
         "tunnel_alias": "devmcp-runtime",
         "tunnel_profile": "sample_mcp_with_dcr",
         "patch": {"max_removed_lines": 200, "max_removed_percent": 30.0},
-        "policy": {"custom": {capability: "deny" for capability in CAPABILITIES}},
         "telemetry": {"enabled": False},
     }
 
@@ -134,13 +127,6 @@ def migrate_legacy(target: ConfigPaths | None = None) -> list[str]:
         if source is not None:
             _copy_secret(source, selected.control_plane_key)
             imported.append("control-plane-api-key")
-    if not selected.approvals_db.exists():
-        legacy_db = LEGACY_RUNTIME_DIR / "approvals.db"
-        if legacy_db.is_file():
-            shutil.copy2(legacy_db, selected.approvals_db)
-            if os.name != "nt":
-                selected.approvals_db.chmod(0o600)
-            imported.append("approvals-db")
     return imported
 
 
@@ -201,17 +187,12 @@ def validate_config(config: dict[str, Any]) -> None:
         Path(str(item)).expanduser().is_absolute() for item in workspaces
     ):
         raise ValueError("workspaces must be a list of absolute paths")
-    profile = str(config.get("profile", DEFAULT_PROFILE)).lower()
-    if profile not in PROFILE_NAMES:
-        raise ValueError(f"profile must be one of: {', '.join(PROFILE_NAMES)}")
     patch = config.get("patch", {})
     if (
         int(patch.get("max_removed_lines", 0)) < 0
         or float(patch.get("max_removed_percent", 0)) < 0
     ):
         raise ValueError("patch thresholds cannot be negative")
-    custom = config.get("policy", {}).get("custom", {})
-    effective_rules(profile, custom)
 
 
 def _deep_merge(destination: dict[str, Any], source: dict[str, Any]) -> None:

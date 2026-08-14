@@ -134,7 +134,6 @@ class MCPClient:
     initialized: bool = False
     execution_mode: str | None = None
     permission_mode: str = "trusted"
-    policy_profile: str | None = None
 
     def __enter__(self) -> "MCPClient":
         if self.url is None:
@@ -167,8 +166,6 @@ class MCPClient:
             "DEVMCP_EXECUTION_MODE": eff_exec_mode,
             "CODING_TOOLS_MCP_PERMISSION_MODE": self.permission_mode,
         }
-        if self.policy_profile is not None:
-            env_overrides["DEVMCP_POLICY_PROFILE"] = self.policy_profile
         env = safe_server_env(
             **env_overrides,
         )

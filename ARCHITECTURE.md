@@ -11,15 +11,18 @@ The `ExecutionSandbox`:
 4. Is leased by active command sessions and deleted when the final command using it terminates, fails, times out, or is cancelled; runtime shutdown is a final cleanup path rather than the normal lifetime.
 5. Is recreated from the authoritative repository for later sequential execution instead of accumulating one repository-sized copy per MCP session.
 
-## Approval Engine
+## Execution Model
 
-The Approval Engine manages risky operations like untrusted shell execution. 
+DevMCP operates in two execution modes:
 
-1. Tool handlers (like `exec_command`) query the `ApprovalEngine` via `evaluate_command()`.
-2. Commands are flagged `ALLOW`, `DENY` (sudo, rm -rf), or `ASK`.
-3. If `ASK`, a JSON response `{"status": "approval_required", "approval_id": "uuid"}` is yielded.
-4. The user runs `devmcp approve <uuid>` via the CLI, rewriting state to `approvals.json`.
-5. The agent retries execution successfully.
+- **PLAN** (`--execution-mode plan`): read-only confinement. `apply_patch` and `exec_command` are denied.
+- **BUILD** (`--execution-mode build`): full-access, direct OS user. Default mode.
+
+Legacy `--permission-mode` values map at ingress: `safe` → plan, `trusted` / `dangerous` → build.
+
+All authority is resolved once at startup by `resolve_execution_mode()`. There is no
+runtime policy profile gate, no ApprovalEngine, and no in-process approval/deny decision
+applied after the mode is resolved.
 
 ## Task Registry
 

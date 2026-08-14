@@ -18,51 +18,19 @@ from coding_tools_mcp.config import (
     write_secret,
 )
 from coding_tools_mcp.errors import ToolFailure
-from coding_tools_mcp.policy import (
-    CAPABILITIES,
-    UNIMPLEMENTED_CAPABILITIES,
-    decision,
-    profile_rules,
-    validate_rules,
-)
 from coding_tools_mcp.server import Runtime, run_http
 
 
 class ReleaseConfigTests(unittest.TestCase):
-    def test_new_config_is_balanced_and_secret_status_is_redacted(self) -> None:
+    def test_new_config_is_valid_and_secret_status_is_redacted(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             with patch.dict(os.environ, {"DEVMCP_CONFIG_DIR": tmp}, clear=False):
                 selected = paths()
                 config = load_config(selected, workspace=tmp)
-                self.assertEqual(config["profile"], "balanced")
                 self.assertEqual(selected.root.stat().st_mode & 0o777, 0o700)
                 self.assertNotIn("super-secret-value", str(redact_config(config)))
                 save_config(config, selected)
                 self.assertTrue(selected.config_file.is_file())
-
-    def test_policy_profiles_cover_each_capability_and_custom_is_data(self) -> None:
-        self.assertEqual(set(profile_rules("balanced")), set(CAPABILITIES))
-        self.assertEqual(len(CAPABILITIES), len(set(CAPABILITIES)))
-        rules = {name: "auto" for name in CAPABILITIES}
-        self.assertEqual(validate_rules(rules)["agent.delegate"], "auto")
-        self.assertFalse(UNIMPLEMENTED_CAPABILITIES)
-        self.assertEqual(decision("safe", "workspace.delete"), "ask")
-        self.assertEqual(decision("safe", "git.branch"), "ask")
-        self.assertEqual(decision("balanced", "git.branch"), "auto")
-        self.assertEqual(decision("balanced", "git.commit"), "auto")
-        self.assertEqual(decision("balanced", "git.push"), "ask")
-        self.assertEqual(decision("power", "server.public"), "ask")
-        self.assertEqual(decision("power", "workspace.delete"), "auto")
-        self.assertEqual(decision("power", "service.manage"), "auto")
-        self.assertEqual(decision("balanced", "policy.manage"), "ask")
-        self.assertEqual(decision("power", "policy.manage"), "ask")
-        self.assertEqual(decision("balanced", "workspace.delete"), "ask")
-        for capability in CAPABILITIES:
-            with self.subTest(profile="autonomous", capability=capability):
-                self.assertEqual(decision("autonomous", capability), "auto")
-        self.assertEqual(decision("safe", "agent.delegate"), "deny")
-        self.assertEqual(decision("balanced", "agent.delegate"), "deny")
-        self.assertEqual(decision("power", "agent.delegate"), "deny")
 
     def test_ui_is_loopback_only(self) -> None:
         with (
@@ -254,7 +222,7 @@ class ReleaseLifecycleTests(unittest.TestCase):
     ) -> None:
         completed = subprocess.CompletedProcess([], 0, "operator-ok\n", "")
         with tempfile.TemporaryDirectory() as tmp:
-            runtime = Runtime(Path(tmp), policy_profile="autonomous")
+            runtime = Runtime(Path(tmp), execution_mode="build")
             try:
                 with patch(
                     "coding_tools_mcp.server.subprocess.run", return_value=completed
@@ -335,7 +303,7 @@ class ReleaseLifecycleTests(unittest.TestCase):
             )
             runtime = Runtime(
                 source,
-                policy_profile="autonomous",
+                execution_mode="build",
                 project_roots=[projects],
             )
             try:
@@ -391,7 +359,7 @@ class ReleaseLifecycleTests(unittest.TestCase):
             ).stdout.strip()
             runtime = Runtime(
                 source,
-                policy_profile="autonomous",
+                execution_mode="build",
                 project_roots=[projects],
             )
             try:
@@ -454,7 +422,7 @@ class ReleaseLifecycleTests(unittest.TestCase):
             tracked.write_text("# dirty\n", encoding="utf-8")
             runtime = Runtime(
                 source,
-                policy_profile="autonomous",
+                execution_mode="build",
                 project_roots=[root],
             )
             try:
@@ -576,35 +544,6 @@ class ReleaseLifecycleTests(unittest.TestCase):
             finally:
                 runtime.close()
 
-    def test_autonomous_profile_can_activate_policy_profile_and_schedule_restart(
-        self,
-    ) -> None:
-        completed = subprocess.CompletedProcess([], 0, "Policy profile: power\n", "")
-        with tempfile.TemporaryDirectory() as tmp:
-            runtime = Runtime(Path(tmp), policy_profile="autonomous")
-            try:
-                with (
-                    patch(
-                        "coding_tools_mcp.server.subprocess.run", return_value=completed
-                    ) as run,
-                    patch.object(
-                        runtime,
-                        "_schedule_devmcp_restart",
-                        return_value={"status": "scheduled", "unit": "fixture"},
-                    ) as schedule,
-                ):
-                    result = runtime.activate_policy_profile({"profile": "power"})
-
-                self.assertEqual(result["profile"], "power")
-                self.assertEqual(result["previous_profile"], "autonomous")
-                self.assertEqual(result["status"], "scheduled")
-                self.assertEqual(
-                    run.call_args.args[0][-3:], ["policy", "profile", "power"]
-                )
-                schedule.assert_called_once_with()
-            finally:
-                runtime.close()
-
     def test_custom_ask_requires_and_consumes_an_approval_before_execution(
         self,
     ) -> None:
@@ -660,7 +599,6 @@ class ReleaseLifecycleTests(unittest.TestCase):
             auth_token_file=None,
             host="0.0.0.0",
             port=8765,
-            policy_profile=None,
             permission_mode="trusted",
             allow_network=True,
             shell_env_inherit=None,

@@ -57,7 +57,6 @@ class PytestCollectionTests(unittest.TestCase):
             ):
                 runtime = Runtime(
                     first,
-                    policy_profile="balanced",
                     project_roots=[library],
                     sandbox_backend="unsafe",
                 )
@@ -142,12 +141,8 @@ class PytestCollectionTests(unittest.TestCase):
                 repo.mkdir(parents=True)
                 (repo / "tracked.txt").write_text(repo.name + "\n", encoding="utf-8")
                 init_git(repo)
-            session_a = Runtime(
-                first, policy_profile="balanced", project_roots=[library]
-            )
-            session_b = Runtime(
-                first, policy_profile="balanced", project_roots=[library]
-            )
+            session_a = Runtime(first, project_roots=[library])
+            session_b = Runtime(first, project_roots=[library])
             try:
                 session_a.select_project({"project": "first"})
                 session_b.select_project({"project": "second"})
@@ -176,9 +171,7 @@ class PytestCollectionTests(unittest.TestCase):
             )
             (uv_repo / "uv.lock").write_text("version = 1\n", encoding="utf-8")
             (uv_repo / "tests").mkdir()
-            runtime = Runtime(
-                uv_repo, policy_profile="balanced", project_roots=[library]
-            )
+            runtime = Runtime(uv_repo, project_roots=[library])
             try:
                 checks = runtime.project_checks({})["checks"]
                 test_check = next(item for item in checks if item["id"] == "test")

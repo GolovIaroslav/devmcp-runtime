@@ -90,13 +90,8 @@ from .session_state import (
 )
 from .system_view import readonly_system_paths
 from .policy import (
-    CAPABILITIES,
     EXECUTION_MODES,
-    PROFILE_NAMES,
-    decision as policy_decision,
-    legacy_profile,
     resolve_execution_mode,
-    validate_rules,
 )
 from .telemetry import SessionTelemetry
 from .textutils import DEFAULT_MAX_LINES, TextTruncation, truncate_text_head
@@ -154,49 +149,8 @@ RESERVED_EXEC_ENV_NAMES = {"DEVMCP_INHERITED_SANDBOX"}
 SHELL_ENV_INHERIT_CHOICES = ("core", "all", "none")
 
 
-@dataclass(frozen=True)
-class ModeCapabilities:
-    """What a permission mode allows. Gates consult this instead of comparing mode strings."""
-
-    network: bool
-    shell_expansion: bool
-    inline_script: bool
-    landlock: bool
-    secret_env_filter: bool
-    global_tmp_write: str  # "blocked" | "tmp-prefix" | "allowed"
-    skip_all_permissions: bool
-
-
-PERMISSION_MODE_CAPABILITIES: dict[str, ModeCapabilities] = {
-    "safe": ModeCapabilities(
-        network=False,
-        shell_expansion=False,
-        inline_script=False,
-        landlock=True,
-        secret_env_filter=True,
-        global_tmp_write="blocked",
-        skip_all_permissions=False,
-    ),
-    "trusted": ModeCapabilities(
-        network=True,
-        shell_expansion=True,
-        inline_script=True,
-        landlock=True,
-        secret_env_filter=True,
-        global_tmp_write="tmp-prefix",
-        skip_all_permissions=False,
-    ),
-    "dangerous": ModeCapabilities(
-        network=True,
-        shell_expansion=True,
-        inline_script=True,
-        landlock=False,
-        secret_env_filter=False,
-        global_tmp_write="allowed",
-        skip_all_permissions=True,
-    ),
-}
-PERMISSION_MODE_CHOICES = tuple(PERMISSION_MODE_CAPABILITIES)
+# Documented legacy ingress adapter constants — kept for --permission-mode CLI compat.
+PERMISSION_MODE_CHOICES = ("safe", "trusted", "dangerous")
 # Documented kill_session status enum; guarded by test_schema_drift.
 KILL_SESSION_STATUSES = ("terminated", "killed", "exited", "terminating", "not_found")
 POSIX_CORE_ENV_NAMES = {"PATH", "LANG", "LC_ALL", "TERM"}
@@ -365,7 +319,6 @@ class RuntimePolicy:
     shell_env_policy: ShellEnvPolicy = field(default_factory=ShellEnvPolicy)
     allow_network: bool = True
     fake_readonly_annotations: bool = False
-    policy_profile: str | None = None
     execution_mode: str = "build"
     effective_access: str = "full-access"
 
@@ -402,7 +355,6 @@ def runtime_policy_from_args(args: argparse.Namespace) -> RuntimePolicy:
         raw_perm_mode = "dangerous"
 
     exec_mode, eff_access = resolve_execution_mode(raw_exec_mode, raw_perm_mode)
-    policy_profile = policy_profile_from_args(args)
     return RuntimePolicy(
         execution_mode=exec_mode,
         effective_access=eff_access,
@@ -412,38 +364,7 @@ def runtime_policy_from_args(args: argparse.Namespace) -> RuntimePolicy:
             args, raw_perm_mode or "safe"
         ),
         permission_mode=raw_perm_mode or "safe",
-        policy_profile=policy_profile,
     )
-
-
-AUTO_ALLOW_POLICY = {
-    "read_only": [
-        "workspace inspection and search",
-        "git read-only inspection",
-        "preview_patch",
-        "safe local process inspection",
-    ],
-    "safe_mutations": [
-        "apply_patch below the destructive thresholds",
-        "registered non-network tests, lint, typecheck, and build/check tasks",
-    ],
-    "approval_required": [
-        "network capability",
-        "dependency installation or update",
-        "database migration",
-        "unknown or unregistered exec_command operations",
-        "unregistered shell expansion or inline scripts",
-        "destructive patches over configured thresholds",
-        "sensitive environment injection",
-        "privileged or unusual executables",
-    ],
-    "deny": [
-        "patch deletes and moves",
-        "paths outside the authoritative workspace",
-        "sudo, su, doas, mount, umount, docker, and podman operations",
-        "sandbox escape and policy/configuration modification",
-    ],
-}
 
 
 OAUTH_TOKEN_AUTH_METHODS = ("client_secret_basic", "client_secret_post", "none")
@@ -621,56 +542,6 @@ def shell_env_policy_from_args(args: argparse.Namespace) -> ShellEnvPolicy:
         exclude=split_env_patterns(os.environ.get(f"{ENV_PREFIX}_SHELL_ENV_EXCLUDE")),
         set=parse_shell_env_set(os.environ.get(f"{ENV_PREFIX}_SHELL_ENV_SET")),
     )
-
-
-def permission_mode_from_args(args: argparse.Namespace) -> str:
-    skip_all = bool(
-        getattr(args, "dangerously_skip_all_permissions", False)
-    ) or truthy_env(os.environ.get(f"{ENV_PREFIX}_DANGEROUSLY_SKIP_ALL_PERMISSIONS"))
-    raw_mode = (
-        getattr(args, "permission_mode", None)
-        or os.environ.get(f"{ENV_PREFIX}_PERMISSION_MODE")
-        or ("dangerous" if skip_all else "safe")
-    )
-    mode = raw_mode.strip().lower()
-    if mode not in PERMISSION_MODE_CHOICES:
-        supported = ", ".join(PERMISSION_MODE_CHOICES)
-        raise ValueError(f"permission mode must be one of: {supported}")
-    return "dangerous" if skip_all else mode
-
-
-def policy_profile_from_args(args: argparse.Namespace) -> str | None:
-    raw = getattr(args, "policy_profile", None) or os.environ.get(
-        "DEVMCP_POLICY_PROFILE"
-    )
-    if raw is None:
-        return None
-    profile = str(raw).strip().lower()
-    if profile not in PROFILE_NAMES:
-        raise ValueError(f"policy profile must be one of: {', '.join(PROFILE_NAMES)}")
-    return profile
-
-
-def policy_rules_from_config_file(
-    path: str | None, profile: str | None
-) -> dict[str, str] | None:
-    """Load only non-secret custom policy data for a configured server process."""
-
-    if profile != "custom" or not path:
-        return None
-    try:
-        with Path(path).expanduser().open("rb") as handle:
-            config = tomllib.load(handle)
-    except (OSError, tomllib.TOMLDecodeError) as exc:
-        raise ValueError(f"unable to read policy config file: {exc}") from exc
-    policy = config.get("policy", {})
-    custom = policy.get("custom", {}) if isinstance(policy, dict) else {}
-    if not isinstance(custom, dict):
-        raise ValueError("policy.custom must be a table")
-    try:
-        return validate_rules(custom)
-    except ValueError as exc:
-        raise ValueError(f"invalid custom policy: {exc}") from exc
 
 
 @dataclass(frozen=True)
@@ -1682,17 +1553,14 @@ class Runtime:
         project_context: ProjectContext | None = None,
         fake_readonly_annotations: bool = False,
         transport: str = "stdio",
-        policy_profile: str | None = None,
         sandbox_backend: str = "bwrap",
         max_removed_lines: int = 200,
         max_removed_percent: float = 30.0,
-        policy_rules: dict[str, Any] | None = None,
         project_roots: list[Path] | None = None,
         git_credentials_file: Path | None = None,
         active_project_file: Path | None = None,
         logical_context_registry: LogicalContextRegistry | None = None,
         shared_job_registry: SharedJobRegistry | None = None,
-        grantable_roots: list[Path] | None = None,
         persist_project_selection: bool = True,
     ) -> None:
         from .sandbox import ExecutionSandbox, detect_sandbox_backend
@@ -1714,19 +1582,6 @@ class Runtime:
             raise ToolFailure(
                 "INVALID_ARGUMENT",
                 "Project roots must be existing directories.",
-                category="validation",
-            )
-        configured_grantable_roots = list(grantable_roots or [])
-        self.grantable_roots: tuple[Path, ...] = tuple(
-            dict.fromkeys(
-                root.expanduser().resolve(strict=True)
-                for root in configured_grantable_roots
-            )
-        )
-        if not all(root.is_dir() for root in self.grantable_roots):
-            raise ToolFailure(
-                "INVALID_ARGUMENT",
-                "Grantable roots must be existing directories.",
                 category="validation",
             )
         self.active_project_file = (
@@ -1755,16 +1610,7 @@ class Runtime:
         self.permission_mode = permission_mode or (
             "safe" if self.execution_mode == "plan" else "trusted"
         )
-        self._explicit_policy_profile = policy_profile is not None
         self._legacy_windows_process_fallback = False
-        if policy_profile is None:
-            policy_profile = legacy_profile(permission_mode)
-        self.policy_profile = policy_profile
-        self.policy_rules = None
-        self.effective_capability_rules = {
-            capability: "auto" for capability in CAPABILITIES
-        }
-        self._profile_managed = False
         self.git_credentials_file = (
             git_credentials_file.expanduser().resolve()
             if git_credentials_file is not None and git_credentials_file.is_file()
@@ -1786,15 +1632,6 @@ class Runtime:
             )
         self.max_removed_lines = max_removed_lines
         self.max_removed_percent = max_removed_percent
-        self.capabilities = ModeCapabilities(
-            network=True,
-            shell_expansion=True,
-            inline_script=True,
-            landlock=False,
-            secret_env_filter=False,
-            global_tmp_write="allowed",
-            skip_all_permissions=True,
-        )
         self.dangerously_skip_all_permissions = True
         self.fake_readonly_annotations = fake_readonly_annotations
         self.shell_env_policy = shell_env_policy or ShellEnvPolicy()
@@ -1836,7 +1673,6 @@ class Runtime:
         self.request_context = threading.local()
         self.initialized = False
         self.telemetry = SessionTelemetry(
-            permission_mode=self.permission_mode,
             execution_mode=self.execution_mode,
             effective_access=self.effective_access,
             transport=transport,
@@ -2086,7 +1922,7 @@ class Runtime:
         return self.tmp_dir
 
     def global_tmp_write_policy(self) -> str:
-        if not self._profile_managed and self.permission_mode == "dangerous":
+        if self.execution_mode == "build":
             return "host"
         if self.sandbox_backend.name in {"bwrap", "inherited"}:
             return "sandbox-private"
@@ -2106,30 +1942,11 @@ class Runtime:
         )
 
     def landlock_enabled(self) -> bool:
-        return self._profile_managed and self.sandbox_backend.name not in {
-            "unsafe",
-            "inherited",
-        }
+        # Landlock is not applied in BUILD mode (direct host execution).
+        return False
 
     def _policy_decision_for_capabilities(self, required: set[str]) -> str:
-        """Return the strictest decision from the startup-resolved capability matrix."""
-
-        if not required:
-            return "auto"
-        try:
-            decisions = {
-                self.effective_capability_rules[capability] for capability in required
-            }
-        except KeyError as exc:
-            raise ToolFailure(
-                "INVALID_ARGUMENT",
-                f"Unknown runtime capability: {exc.args[0]}",
-                category="validation",
-            ) from exc
-        if "deny" in decisions:
-            return "deny"
-        if "ask" in decisions:
-            return "ask"
+        """Retired profile capability matrix — always returns auto in BUILD mode."""
         return "auto"
 
     def landlock_write_roots(self) -> list[Path]:
@@ -2430,8 +2247,6 @@ class Runtime:
             "effective_access": self.effective_access,
             "permission_mode": self.permission_mode,
             "project_roots": [str(root) for root in self.project_roots],
-            "policy_rules": dict(self.effective_capability_rules),
-            "grantable_roots": [str(root) for root in self.grantable_roots],
             "readable_roots": [str(root) for root in self.readable_roots()],
             "writable_roots": [str(root) for root in self.writable_roots()],
             "active_project": self.active_project,
@@ -2898,9 +2713,6 @@ class Runtime:
                 ),
                 "nested_sandbox": os.environ.get("DEVMCP_INHERITED_SANDBOX") == "1",
                 "default_execution_mode": default_execution_mode,
-                "compatibility_policy_profile": (
-                    self.policy_profile if self._profile_managed else None
-                ),
             },
         }
 
@@ -3076,17 +2888,7 @@ class Runtime:
             "approval_id": args.get("approval_id"),
             "network_required": False,
         }
-        if self._profile_managed:
-            authorized = self._profile_authorize_command(
-                argv,
-                exec_args,
-                registered_task=check,
-                task_id=f"project.check:{check_id}",
-            )
-            if isinstance(authorized, dict):
-                return authorized
-        else:
-            authorized = set()
+        authorized: set[str] = set()
         result = self._execute_task_argv(argv, exec_args, set(authorized))
         result["check_id"] = check_id
         result["execution_environment"] = execution_environment
@@ -3204,7 +3006,7 @@ class Runtime:
             ok=bool(payload.get("ok")),
             error_code=error.get("code"),
             duration_ms=duration_ms,
-            policy_profile=self.policy_profile,
+            execution_mode=self.execution_mode,
         )
         if os.environ.get(f"{ENV_PREFIX}_TRACE") != "1":
             return
@@ -3979,20 +3781,6 @@ class Runtime:
                 removed_existing_lines = 0
                 pct_rem = 0.0
                 file_risk = "ALLOW"
-                if self._profile_managed:
-                    required = {"workspace.create"}
-                    policy_capabilities.update(required)
-                    decision = self._policy_decision_for_capabilities(required)
-                    if decision == "deny":
-                        raise ToolFailure(
-                            "ACCESS_DENIED",
-                            "Create is disabled by the active policy profile.",
-                            category="security",
-                        )
-                    file_risk = "ASK" if decision == "ask" else "ALLOW"
-                elif self.permission_mode == "safe":
-                    policy_capabilities.add("workspace.create")
-                    file_risk = "ASK"
 
                 diff_lines = list(
                     difflib.unified_diff(
@@ -4073,31 +3861,11 @@ class Runtime:
                 )
 
                 file_risk = "ALLOW"
-                if self._profile_managed:
-                    required = {"workspace.patch_small"}
-                    if (
-                        removed_existing_lines > self.max_removed_lines
-                        or pct_rem > self.max_removed_percent
-                    ):
-                        required.add("workspace.patch_destructive")
-                    policy_capabilities.update(required)
-                    decision = self._policy_decision_for_capabilities(required)
-                    if decision == "deny":
-                        raise ToolFailure(
-                            "ACCESS_DENIED",
-                            "Patch is disabled by the active policy profile.",
-                            category="security",
-                        )
-                    file_risk = "ASK" if decision == "ask" else "ALLOW"
-                elif (
+                if (
                     removed_existing_lines > self.max_removed_lines
                     or pct_rem > self.max_removed_percent
                 ):
-                    policy_capabilities.add("workspace.patch_destructive")
-                    file_risk = "ASK"
-                elif self.permission_mode == "safe":
-                    policy_capabilities.add("workspace.patch_small")
-                    file_risk = "ASK"
+                    file_risk = "HIGH_RISK"
 
                 staged[source.display] = StagedFile(
                     source.display, source.path, updated_text, baseline, baseline.mode
@@ -4113,20 +3881,7 @@ class Runtime:
                         "Cannot delete a directory with Delete File.",
                         category="validation",
                     )
-                policy_capabilities.add("workspace.delete")
-                if self._profile_managed:
-                    operation_decision = self._policy_decision_for_capabilities(
-                        {"workspace.delete"}
-                    )
-                    if operation_decision == "deny":
-                        raise ToolFailure(
-                            "ACCESS_DENIED",
-                            "Delete is disabled by the active policy profile.",
-                            category="security",
-                        )
-                    file_risk = "ASK" if operation_decision == "ask" else "ALLOW"
-                else:
-                    file_risk = "ASK"
+                file_risk = "ALLOW"
                 baseline = FileBaseline.capture(source.path)
                 staged[source.display] = StagedFile(
                     source.display, source.path, None, baseline, None
@@ -4172,21 +3927,6 @@ class Runtime:
                         category="validation",
                     )
                 file_risk = "ALLOW"
-                if self._profile_managed:
-                    operation_decision = self._policy_decision_for_capabilities(
-                        {"workspace.move"}
-                    )
-                    policy_capabilities.add("workspace.move")
-                    if operation_decision == "deny":
-                        raise ToolFailure(
-                            "ACCESS_DENIED",
-                            "Move is disabled by the active policy profile.",
-                            category="security",
-                        )
-                    file_risk = "ASK" if operation_decision == "ask" else "ALLOW"
-                elif self.permission_mode == "safe":
-                    policy_capabilities.add("workspace.move")
-                    file_risk = "ASK"
                 baseline = FileBaseline.capture(source.path)
                 staged[source.display] = StagedFile(
                     source.display, source.path, None, baseline, None
@@ -5113,18 +4853,13 @@ class Runtime:
         task_args["approval_class"] = "ALLOW"
         task_args["_argv_task"] = True
         task_args["_approved_capabilities"] = sorted(capabilities)
-        if not self._profile_managed:
-            execution_mode = {
-                "safe": "read-only",
-                "trusted": "workspace-write",
-                "dangerous": "full-access",
-            }[self.permission_mode]
-            task_args["_execution_mode"] = execution_mode
-            task_args["_selected_executor"] = {
-                "read-only": "read_only_workspace",
-                "workspace-write": "workspace_host",
-                "full-access": "unsafe_host",
-            }[execution_mode]
+        execution_mode = (
+            "full-access" if self.execution_mode == "build" else "read-only"
+        )
+        task_args["_execution_mode"] = execution_mode
+        task_args["_selected_executor"] = (
+            "unsafe_host" if execution_mode == "full-access" else "read_only_workspace"
+        )
         return self._execute_command_legacy(task_args)
 
     def _execute_command_legacy(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -5195,7 +4930,7 @@ class Runtime:
         # Normal compatibility modes use the real workspace fast path. Explicit
         # policy profiles intentionally retain the legacy snapshot/Landlock
         # compatibility path until that API is retired separately.
-        direct_execution = not transaction_apply and not self._profile_managed
+        direct_execution = not transaction_apply
         if transaction_apply:
             if tty:
                 raise ToolFailure(
@@ -5411,25 +5146,16 @@ class Runtime:
             raise
 
         try:
-            network_capability = args.get("_network_capability")
             allow_network = execution_mode in {"workspace-write", "full-access"} or (
                 "network" in approved_capabilities
                 or "network.public" in approved_capabilities
                 or "network.host_local" in approved_capabilities
-                or (
-                    self._profile_managed
-                    and isinstance(network_capability, str)
-                    and self._policy_decision_for_capabilities({network_capability})
-                    == "auto"
-                )
             )
             root_mounts = [
                 (
                     sandbox.sandbox_dir,
                     self.workspace.root,
-                    self._profile_managed
-                    or transaction_apply
-                    or execution_mode != "read-only",
+                    transaction_apply or execution_mode != "read-only",
                 ),
                 *[
                     (extra_sandbox.sandbox_dir, root, writable)
@@ -8836,81 +8562,11 @@ class Runtime:
             source, expected_sha, development_mode=development_mode
         )
 
-    def activate_policy_profile(self, args: dict[str, Any]) -> dict[str, Any]:
-        profile = str(args.get("profile", "")).strip().lower()
-        if profile not in PROFILE_NAMES:
-            raise ToolFailure(
-                "INVALID_ARGUMENT",
-                f"Unknown policy profile: {profile}",
-                category="validation",
-                details={"supported": list(PROFILE_NAMES)},
-            )
-        action = f"activate DevMCP policy profile {profile} and restart services"
-        pending = self._profile_authorize_operation("policy.manage", args, action)
-        if pending is not None:
-            return pending
-
-        previous = self.policy_profile
-        if profile == previous:
-            return {
-                "profile": profile,
-                "previous_profile": previous,
-                "status": "unchanged",
-                "restart": None,
-            }
-        completed = subprocess.run(
-            [sys.executable, "-m", "apps.devmcp.cli", "policy", "profile", profile],
-            cwd=str(DEVMCP_SOURCE_ROOT),
-            env=os.environ.copy(),
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=30,
-        )
-        if completed.returncode != 0:
-            raise ToolFailure(
-                "SERVICE_COMMAND_FAILED",
-                "Failed to persist the requested DevMCP policy profile.",
-                category="internal",
-                details={
-                    "profile": profile,
-                    "exit_code": completed.returncode,
-                    "stderr": completed.stderr,
-                },
-            )
-        try:
-            restart = self._schedule_devmcp_restart()
-        except BaseException:
-            subprocess.run(
-                [
-                    sys.executable,
-                    "-m",
-                    "apps.devmcp.cli",
-                    "policy",
-                    "profile",
-                    previous,
-                ],
-                cwd=str(DEVMCP_SOURCE_ROOT),
-                env=os.environ.copy(),
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=30,
-            )
-            raise
-        return {
-            "profile": profile,
-            "previous_profile": previous,
-            "status": restart["status"],
-            "restart": restart,
-        }
-
     def workspace_info(self, args: dict[str, Any]) -> dict[str, Any]:
         return {
             "workspace": str(self.workspace.root),
             "active_project": self.active_project,
             "project_roots": [str(root) for root in self.project_roots],
-            "grantable_roots": [str(root) for root in self.grantable_roots],
             "readable_roots": [str(root) for root in self.readable_roots()],
             "writable_roots": [str(root) for root in self.writable_roots()],
         }
@@ -9085,45 +8741,7 @@ class Runtime:
             raise ToolFailure(
                 "NOT_FOUND", f"Task '{task_id}' not found.", category="validation"
             )
-        if self._profile_managed:
-            cwd = self._operation_workdir(args)
-            if (
-                template.cwd_policy == "workspace_root"
-                and cwd.path != self.workspace.root
-            ):
-                raise ToolFailure(
-                    "ACCESS_DENIED",
-                    f"Task '{task_id}' only runs at the workspace root.",
-                    category="security",
-                )
-            cmd_argv = self.task_registry.build_argv(template, args)
-            exec_args = {
-                "cwd": cwd.display,
-                "timeout_ms": args.get("timeout_ms", 30000),
-                "yield_time_ms": args.get("yield_time_ms", 10000),
-                "max_output_bytes": args.get("max_output_bytes", 65536),
-                "env": self._task_env(args.get("env", {})),
-                "approval_id": args.get("approval_id"),
-                "network_required": template.network_requirement,
-            }
-            authorized = self._profile_authorize_command(
-                cmd_argv,
-                exec_args,
-                registered_task=template,
-                task_id=task_id,
-            )
-            if isinstance(authorized, dict):
-                return authorized
-            exec_args.update(
-                {
-                    "_policy_authorized": True,
-                    "_approved_capabilities": sorted(authorized),
-                    "_network_capability": self._network_capability(
-                        " ".join(cmd_argv), exec_args
-                    ),
-                }
-            )
-            return self._execute_task_argv(cmd_argv, exec_args, authorized)
+
         if template.approval_class == "DENY":
             raise ToolFailure(
                 "ACCESS_DENIED",
@@ -12172,15 +11790,6 @@ def build_runtime(
         env_roots = os.environ.get("DEVMCP_PROJECT_ROOTS", "")
         raw_project_roots = [item for item in env_roots.split(os.pathsep) if item]
     project_roots = [Path(item) for item in raw_project_roots] or [workspace]
-    raw_grantable_roots = [
-        item
-        for item in os.environ.get("DEVMCP_GRANTABLE_ROOTS", "").split(os.pathsep)
-        if item
-    ]
-    grantable_roots = [Path(item) for item in raw_grantable_roots]
-    policy_rules = policy_rules_from_config_file(
-        os.environ.get("DEVMCP_POLICY_CONFIG_FILE"), runtime_policy.policy_profile
-    )
     runtime = Runtime(
         workspace,
         enable_view_image=args.enable_view_image,
@@ -12193,15 +11802,9 @@ def build_runtime(
         project_context=project_context,
         fake_readonly_annotations=runtime_policy.fake_readonly_annotations,
         transport=transport,
-        # Preserve legacy safe/trusted/dangerous behavior when no explicit
-        # data-driven profile was selected. Runtime maps that compatibility
-        # mode internally; passing a mapped profile here would make it look
-        # explicitly managed and change its command gates.
-        policy_profile=runtime_policy.policy_profile,
         sandbox_backend=str(getattr(args, "sandbox_backend", "bwrap")),
         max_removed_lines=int(getattr(args, "max_removed_lines", 200)),
         max_removed_percent=float(getattr(args, "max_removed_percent", 30.0)),
-        policy_rules=policy_rules,
         project_roots=project_roots,
         git_credentials_file=(
             Path(os.environ["DEVMCP_GIT_CREDENTIALS_FILE"])
@@ -12215,10 +11818,9 @@ def build_runtime(
         ),
         logical_context_registry=logical_context_registry,
         shared_job_registry=shared_job_registry,
-        grantable_roots=grantable_roots,
         persist_project_selection=persist_project_selection,
     )
-    if emit_warning and runtime.capabilities.skip_all_permissions:
+    if emit_warning and runtime.dangerously_skip_all_permissions:
         print(
             "WARNING: permission_mode=dangerous disables MCP safety gates. Use only inside an isolated container or VM.",
             file=sys.stderr,
@@ -12266,32 +11868,6 @@ def run_http(args: argparse.Namespace) -> int:
     except ValueError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
-    # Server bind capabilities belong to the explicitly selected profile. The
-    # retired safe/trusted/dangerous switches predate that profile matrix and
-    # remain compatibility presets for Runtime operations; applying their
-    # legacy profile mapping here would break authenticated legacy HTTP
-    # launches such as the Docker image's trusted + 0.0.0.0 configuration.
-    if runtime_policy.policy_profile is not None:
-        active_profile = runtime_policy.policy_profile
-        server_capability = (
-            "server.loopback"
-            if is_loopback_bind_host(str(args.host))
-            else "server.public"
-        )
-        server_decision = policy_decision(
-            active_profile,
-            server_capability,
-            policy_rules_from_config_file(
-                os.environ.get("DEVMCP_POLICY_CONFIG_FILE"), active_profile
-            ),
-        )
-        if server_decision != "auto":
-            print(
-                f"ERROR: {server_capability} is {server_decision} in the active policy profile. "
-                "Select a profile or Custom rule that auto-allows this server bind.",
-                file=sys.stderr,
-            )
-            return 2
 
     oauth_config: OAuthConfig | None = None
     oauth_mode = (
@@ -12585,28 +12161,22 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--policy-profile",
-        choices=PROFILE_NAMES,
-        default=None,
-        help="data-driven policy profile; defaults to DEVMCP_POLICY_PROFILE or safe for legacy direct launches",
-    )
-    parser.add_argument(
         "--max-removed-lines",
         type=int,
         default=200,
-        help="existing lines removed before a patch requires approval",
+        help="existing lines removed before a patch is classified as high-risk",
     )
     parser.add_argument(
         "--sandbox-backend",
         choices=("bwrap", "podman", "unsafe"),
         default="bwrap",
-        help="execution backend; bwrap is preferred, unsafe is explicit and visibly warned",
+        help="execution backend; unsafe is explicit and visibly warned",
     )
     parser.add_argument(
         "--max-removed-percent",
         type=float,
         default=30.0,
-        help="percentage of an existing file removed before a patch requires approval",
+        help="percentage of an existing file removed before a patch is classified as high-risk",
     )
     parser.add_argument(
         "--allow-network",

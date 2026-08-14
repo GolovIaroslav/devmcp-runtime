@@ -9,7 +9,6 @@ from unittest.mock import patch
 
 from coding_tools_mcp.errors import ToolFailure
 from coding_tools_mcp.executors import ExecutionRequirements, ExecutorRegistry
-from coding_tools_mcp.policy import legacy_profile
 from coding_tools_mcp.sandbox import (
     ExecutionSandbox,
     SandboxBackend,
@@ -26,16 +25,12 @@ from coding_tools_mcp.transactions import ExecutionTransaction
 
 class AutonomyArchitectureTests(unittest.TestCase):
     def _runtime(self, root: Path, **kwargs: object) -> Runtime:
-        kwargs.setdefault("grantable_roots", [root.parent])
-        return Runtime(
-            root,
-            policy_profile="autonomous",
-            sandbox_backend="unsafe",
-            project_roots=[root.parent],
-            **kwargs,
-        )
+        kwargs.setdefault("execution_mode", "build")
+        kwargs.setdefault("sandbox_backend", "unsafe")
+        kwargs.setdefault("project_roots", [root.parent])
+        return Runtime(root, **kwargs)
 
-    def test_explicit_profile_is_authoritative_over_legacy_permission_mode(
+    def test_explicit_execution_mode_build_is_authoritative(
         self,
     ) -> None:
         with TemporaryDirectory() as tmp:
@@ -43,7 +38,6 @@ class AutonomyArchitectureTests(unittest.TestCase):
             runtime = Runtime(
                 root,
                 execution_mode="build",
-                policy_profile="autonomous",
                 sandbox_backend="unsafe",
             )
             try:
@@ -57,13 +51,6 @@ class AutonomyArchitectureTests(unittest.TestCase):
                 self.assertEqual(result["stdout"], "profile-wins")
             finally:
                 runtime.close()
-
-    def test_permission_profile_matrix_and_legacy_adapter_are_deterministic(
-        self,
-    ) -> None:
-        self.assertEqual(legacy_profile("safe"), "safe")
-        self.assertEqual(legacy_profile("trusted"), "power")
-        self.assertEqual(legacy_profile("dangerous"), "autonomous")
 
     def test_legacy_dangerous_mode_is_full_access_for_shell_only(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -434,9 +421,7 @@ class AutonomyArchitectureTests(unittest.TestCase):
     def test_private_temp_is_normal_writable_temp_not_host_tmp_capability(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
-            runtime = Runtime(
-                root, policy_profile="autonomous", sandbox_backend="bwrap"
-            )
+            runtime = Runtime(root, execution_mode="build", sandbox_backend="bwrap")
             try:
                 env = runtime._exec_environment_summary()
                 self.assertIsNotNone(env.get("tmpdir"))
@@ -630,7 +615,7 @@ class AutonomyArchitectureTests(unittest.TestCase):
                 with self.assertRaises(ToolFailure) as rejected:
                     Runtime(
                         repo,
-                        policy_profile="autonomous",
+                        execution_mode="build",
                         sandbox_backend="unsafe",
                     )
             self.assertEqual(rejected.exception.code, "ACCESS_DENIED")
@@ -655,7 +640,7 @@ class AutonomyArchitectureTests(unittest.TestCase):
                 with self.assertRaises(ToolFailure) as rejected:
                     Runtime(
                         repo,
-                        policy_profile="autonomous",
+                        execution_mode="build",
                         sandbox_backend="unsafe",
                     )
             self.assertEqual(rejected.exception.code, "ACCESS_DENIED")

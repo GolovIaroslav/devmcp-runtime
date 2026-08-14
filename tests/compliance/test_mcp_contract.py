@@ -203,8 +203,6 @@ class MCPContractTests(ComplianceTestCase):
             "job_output": (True, False, True, False),
             "job_input": (False, True, False, False),
             "job_cancel": (False, True, False, False),
-            "approval_status": (True, False, True, False),
-            "list_pending_approvals": (True, False, True, False),
             "health": (True, False, True, False),
             "workspace_info": (True, False, True, False),
             "read_files": (True, False, True, False),
@@ -289,7 +287,7 @@ class MCPContractTests(ComplianceTestCase):
         old_trace = os.environ.get("CODING_TOOLS_MCP_TRACE")
         os.environ["CODING_TOOLS_MCP_TRACE"] = "1"
         try:
-            with MCPClient(self.workspace.root, policy_profile="balanced") as traced:
+            with MCPClient(self.workspace.root, execution_mode="build") as traced:
                 traced.call_tool(
                     "exec_command",
                     {
