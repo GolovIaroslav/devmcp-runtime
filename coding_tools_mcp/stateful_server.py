@@ -18,6 +18,7 @@ from .state_store import now_iso
 from .writer_lease import (
     acquire_writer_leases,
     inspect_writer_lease,
+    release_owner_leases,
 )
 
 
@@ -85,6 +86,12 @@ class StateManagedRuntime(StateMutationMixin, BuildIdentityMixin, core.Runtime):
             checkpoint_id=checkpoint_id,
         )
 
+    def _release_state_owner_leases(self) -> list[str]:
+        return release_owner_leases(
+            self.workspace.root,
+            owner=self._state_owner(),
+        )
+
     def _state_preflight(
         self, operation: str, *, extra_branches: list[str] | None = None
     ) -> tuple[str, dict[str, Any] | None, dict[str, Any]]:
@@ -115,7 +122,8 @@ class StateManagedRuntime(StateMutationMixin, BuildIdentityMixin, core.Runtime):
                         "changed_fields": drift,
                         "reconcile": (
                             "Inspect the changed fields, then explicitly reconcile with "
-                            "continuation_checkpoint(action=write) using the actual branch/head."
+                            "continuation_checkpoint(action=write, payload={branch: <actual branch>, "
+                            "head: <actual local_head>})."
                         ),
                     },
                 )
@@ -193,6 +201,65 @@ class StateManagedRuntime(StateMutationMixin, BuildIdentityMixin, core.Runtime):
             "git_commit", lambda: super(StateManagedRuntime, self).git_commit(args)
         )
         result["state_checkpoint"] = checkpoint
+        return result
+
+    def continuation_checkpoint(self, args: dict[str, Any]) -> dict[str, Any]:
+        result = super().continuation_checkpoint(args)
+        action = str(args.get("action") or "").strip().lower()
+        payload = args.get("payload")
+        if action != "write" or not isinstance(payload, dict):
+            return result
+
+        requested_branch = str(payload.get("branch") or "").strip()
+        requested_head = str(payload.get("head") or "").strip()
+        if not requested_branch or not requested_head:
+            return result
+
+        actual_branch = self._state_branch()
+        previous = read_state_checkpoint(self.workspace.root, actual_branch)
+        self._acquire_state_leases(
+            [actual_branch],
+            str((previous or {}).get("checkpoint_id") or "") or None,
+        )
+        actual = self._state_snapshot()
+        actual_head = str(actual.get("local_head") or "")
+        if requested_branch != actual_branch or requested_head != actual_head:
+            result["state_reconciliation"] = {
+                "status": "not_applied",
+                "reason": "payload_branch_head_mismatch",
+                "actual_branch": actual_branch,
+                "actual_head": actual_head,
+            }
+            return result
+
+        checkpoint = write_state_checkpoint(
+            self.workspace.root,
+            actual_branch,
+            snapshot=actual,
+            phase="after",
+            operation="continuation_checkpoint_reconcile",
+            owner=self._state_owner(),
+            logical_task=self._state_task(),
+            outcome="reconciled",
+            previous_checkpoint_id=str((previous or {}).get("checkpoint_id") or "")
+            or None,
+        )
+        result["state_reconciliation"] = {
+            "status": "reconciled",
+            "checkpoint_id": checkpoint["checkpoint_id"],
+            "branch": actual_branch,
+            "head": actual_head,
+        }
+        return result
+
+    def service_update(self, args: dict[str, Any]) -> dict[str, Any]:
+        result = super().service_update(args)
+        result["released_writer_leases"] = self._release_state_owner_leases()
+        return result
+
+    def service_restart(self, args: dict[str, Any]) -> dict[str, Any]:
+        result = super().service_restart(args)
+        result["released_writer_leases"] = self._release_state_owner_leases()
         return result
 
 
