@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import time
@@ -15,7 +16,9 @@ from tests.compliance.mcp_client import REQUIRED_TOOLS
 
 
 ROOT = Path(__file__).resolve().parents[2]
-REPORT_DIR = ROOT / "reports" / "compliance"
+REPORT_DIR = Path(
+    os.environ.get("DEVMCP_COMPLIANCE_REPORT_DIR", ROOT / "reports" / "compliance")
+)
 JSON_REPORT = REPORT_DIR / "latest.json"
 MD_REPORT = REPORT_DIR / "latest.md"
 CONTRACT = "coding-tools-mcp-v0.2"
