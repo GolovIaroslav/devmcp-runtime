@@ -59,3 +59,4 @@ strace_wrapper.sh
 runtime-*.db
 reports/**/*.tmp
 reports/**/raw/*.log
+reports/run-evidence/

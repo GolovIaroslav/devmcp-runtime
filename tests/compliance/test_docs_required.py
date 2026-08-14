@@ -155,9 +155,25 @@ class RequiredDocsTests(unittest.TestCase):
             "make benchmark-smoke",
             "make compliance",
             "actions/upload-artifact",
+            "reports/run-evidence/**",
         ):
             with self.subTest(workflow="compliance", needle=needle):
                 self.assertIn(needle, compliance)
+
+        for workflow_path in (
+            ".github/workflows/compliance.yml",
+            ".github/workflows/test.yml",
+            ".github/workflows/docker-smoke.yml",
+        ):
+            workflow = (ROOT / workflow_path).read_text(encoding="utf-8")
+            with self.subTest(workflow=workflow_path, check="concurrency"):
+                self.assertIn(
+                    "github.event.pull_request.number || github.run_id", workflow
+                )
+                self.assertIn(
+                    "cancel-in-progress: ${{ github.event_name == 'pull_request' }}",
+                    workflow,
+                )
 
         deploy = (ROOT / ".github/workflows/deploy-sandbox-control.yml").read_text(
             encoding="utf-8"
@@ -235,3 +251,17 @@ class RequiredDocsTests(unittest.TestCase):
         ):
             with self.subTest(target="Dockerfile", needle=needle):
                 self.assertIn(needle, dockerfile)
+
+    def test_makefile_normal_ci_reports_are_ephemeral(self) -> None:
+        makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+        gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
+        for needle in (
+            "RUN_EVIDENCE_DIR ?= reports/run-evidence",
+            "DEVMCP_COMPLIANCE_REPORT_DIR",
+            '--report-json "$(DOGFOOD_REPORT_DIR)/coding-tools-dogfood.json"',
+            '--report-json "$(BENCHMARK_REPORT_DIR)/mcp-latency.json"',
+            '--report-json "$(BENCHMARK_REPORT_DIR)/swebench-regression.json"',
+        ):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, makefile)
+        self.assertIn("reports/run-evidence/", gitignore)

@@ -1,10 +1,14 @@
 PYTHON ?= $(if $(wildcard .venv/bin/python),.venv/bin/python,python3)
 PROJECT_VERSION := $(shell $(PYTHON) -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
 RELEASE_TAG ?= v$(PROJECT_VERSION)
-COMPLIANCE_RUNNER := PYTHONDONTWRITEBYTECODE=1 $(PYTHON) -m tests.compliance.runner
 PYTHON_SOURCES := coding_tools_mcp apps/devmcp apps/desktop-client/mcp_desktop_client tests benchmarks
 MYPY_TARGETS := coding_tools_mcp apps/devmcp apps/desktop-client/mcp_desktop_client scripts/check_dispatch_inputs.py benchmarks/mcp_http.py benchmarks/runtime_latency.py benchmarks/swebench/run_smoke.py benchmarks/swebench/generate_reference_predictions.py benchmarks/real_workloads.py
 REPORT_FLAG ?= --report
+RUN_EVIDENCE_DIR ?= reports/run-evidence
+COMPLIANCE_REPORT_DIR ?= $(RUN_EVIDENCE_DIR)/compliance
+DOGFOOD_REPORT_DIR ?= $(RUN_EVIDENCE_DIR)/dogfood
+BENCHMARK_REPORT_DIR ?= $(RUN_EVIDENCE_DIR)/benchmark
+COMPLIANCE_RUNNER := PYTHONDONTWRITEBYTECODE=1 DEVMCP_COMPLIANCE_REPORT_DIR="$(COMPLIANCE_REPORT_DIR)" $(PYTHON) -m tests.compliance.runner
 SWE_BENCH_ARGS ?=
 DOGFOOD_PORT ?= 18772
 MCP_WORKSPACE ?= .
@@ -102,7 +106,10 @@ dogfood-mcp:
 dogfood-runner:
 	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) benchmarks/dogfood/mcp_deterministic_runner.py \
 		--endpoint http://127.0.0.1:$(DOGFOOD_PORT)/mcp \
-		--server-command "$(PYTHON) -m coding_tools_mcp --workspace {workspace} --host 127.0.0.1 --port $(DOGFOOD_PORT) --execution-mode build"
+		--server-command "$(PYTHON) -m coding_tools_mcp --workspace {workspace} --host 127.0.0.1 --port $(DOGFOOD_PORT) --execution-mode build" \
+		--report-json "$(DOGFOOD_REPORT_DIR)/coding-tools-dogfood.json" \
+		--report-md "$(DOGFOOD_REPORT_DIR)/coding-tools-dogfood.md" \
+		--transcript-json "$(DOGFOOD_REPORT_DIR)/coding-tools-dogfood-transcript.json"
 
 dogfood-smoke: dogfood-mcp dogfood-runner
 
@@ -110,7 +117,9 @@ dogfood-self:
 	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) benchmarks/dogfood/self_dogfood.py
 
 benchmark-latency:
-	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) benchmarks/runtime_latency.py
+	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) benchmarks/runtime_latency.py \
+		--report-json "$(BENCHMARK_REPORT_DIR)/mcp-latency.json" \
+		--report-md "$(BENCHMARK_REPORT_DIR)/mcp-latency.md"
 
 benchmark-smoke: swebench-preflight
 
@@ -136,7 +145,10 @@ swebench-reference-predictions:
 		--metadata-output reports/benchmark/swebench-reference-predictions/metadata.json
 
 swebench-preflight:
-	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) benchmarks/swebench/run_smoke.py $(SWE_BENCH_ARGS)
+	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) benchmarks/swebench/run_smoke.py $(SWE_BENCH_ARGS) \
+		--report-json "$(BENCHMARK_REPORT_DIR)/swebench-regression.json" \
+		--report-md "$(BENCHMARK_REPORT_DIR)/swebench-regression.md" \
+		--raw-dir "$(BENCHMARK_REPORT_DIR)/swebench-regression/raw"
 
 swebench-evaluate:
 	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) benchmarks/swebench/run_smoke.py --run-evaluation $(SWE_BENCH_ARGS)
