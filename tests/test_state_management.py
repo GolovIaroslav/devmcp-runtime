@@ -59,19 +59,14 @@ class StateManagementTests(TestCase):
             "git_pull",
             "git_merge_remote_branch",
             "git_push",
+            "service_update",
         ):
             self.assertIs(
                 getattr(StateManagedRuntime, name),
                 getattr(StateMutationMixin, name),
                 name,
             )
-        self.assertIsNot(
-            StateManagedRuntime.service_update,
-            StateMutationMixin.service_update,
-        )
-        self.assertIsNot(
-            StateManagedRuntime.service_restart, core.Runtime.service_restart
-        )
+        self.assertIs(StateManagedRuntime.service_restart, core.Runtime.service_restart)
 
     def test_push_guard_verifies_authoritative_remote_head(self) -> None:
         sha = "a" * 40
@@ -87,6 +82,7 @@ class StateManagementTests(TestCase):
         class PushHarness(StateMutationMixin, PushBase):
             def __init__(self, root: Path) -> None:
                 self.workspace = SimpleNamespace(root=root)
+                self.release_calls = 0
 
             def _git_env(self) -> dict[str, str]:
                 return {}
@@ -113,6 +109,10 @@ class StateManagementTests(TestCase):
                     "remote_head": remote_head,
                 }
 
+            def _release_state_owner_leases(self) -> list[str]:
+                self.release_calls += 1
+                return ["main"]
+
         with TemporaryDirectory() as tmp:
             runtime = PushHarness(Path(tmp))
             with patch(
@@ -122,6 +122,7 @@ class StateManagementTests(TestCase):
                 result = runtime.git_push({"remote": "origin"})
             self.assertEqual(result["remote_verification"]["remote_head"], sha)
             self.assertTrue(result["state_checkpoint"]["push_verified"])
+            self.assertEqual(runtime.release_calls, 1)
 
             with patch(
                 "coding_tools_mcp.state_mutations.verify_remote_branch_head",
@@ -135,6 +136,7 @@ class StateManagementTests(TestCase):
             self.assertFalse(
                 mismatch.exception.details["state_checkpoint"]["push_verified"]
             )
+            self.assertEqual(runtime.release_calls, 2)
 
     def test_build_identity_is_reported_by_server_info_and_service_status(self) -> None:
         sha = "a" * 40
@@ -362,10 +364,12 @@ class StateManagementTests(TestCase):
 *** End Patch
 """
                 runtime.apply_patch({"patch": patch_text})
+                self.assertIsNone(inspect_writer_lease(repo, "main"))
                 (repo / "external.txt").write_text("outside writer\n", encoding="utf-8")
                 with self.assertRaises(ToolFailure) as drift:
                     runtime.git_create_branch({"name": "should-not-create"})
                 self.assertEqual(drift.exception.code, "STATE_DRIFT")
+                self.assertIsNone(inspect_writer_lease(repo, "main"))
                 self.assertIn(
                     "untracked_paths", drift.exception.details["changed_fields"]
                 )
@@ -408,9 +412,11 @@ class StateManagementTests(TestCase):
                     self.assertEqual(
                         wrong["state_reconciliation"]["status"], "not_applied"
                     )
+                    self.assertIsNone(inspect_writer_lease(repo, "main"))
                     with self.assertRaises(ToolFailure) as still_drift:
                         runtime.git_create_branch({"name": "still-blocked"})
                     self.assertEqual(still_drift.exception.code, "STATE_DRIFT")
+                    self.assertIsNone(inspect_writer_lease(repo, "main"))
 
                     reconciled = runtime.continuation_checkpoint(
                         {
@@ -421,10 +427,38 @@ class StateManagementTests(TestCase):
                     self.assertEqual(
                         reconciled["state_reconciliation"]["status"], "reconciled"
                     )
+                    self.assertIsNone(inspect_writer_lease(repo, "main"))
                     created = runtime.git_create_branch({"name": "after-reconcile"})
                     self.assertEqual(created["branch"], "after-reconcile")
+                    self.assertIsNone(inspect_writer_lease(repo, "after-reconcile"))
                 finally:
                     runtime.close()
+
+    def test_completed_state_mutation_does_not_block_another_runtime_owner(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, _head = init_repo(root)
+            remote = root / "remote.git"
+            subprocess.run(["git", "init", "-q", "--bare", remote], check=True)
+            subprocess.run(
+                ["git", "remote", "add", "origin", str(remote)], cwd=repo, check=True
+            )
+            subprocess.run(
+                ["git", "push", "-qu", "origin", "main"], cwd=repo, check=True
+            )
+
+            first = StateManagedRuntime(workspace=repo, sandbox_backend="unsafe")
+            second = StateManagedRuntime(workspace=repo, sandbox_backend="unsafe")
+            try:
+                first.git_fetch({"remote": "origin"})
+                self.assertIsNone(inspect_writer_lease(repo, "main"))
+                second.git_fetch({"remote": "origin"})
+                self.assertIsNone(inspect_writer_lease(repo, "main"))
+            finally:
+                first.close()
+                second.close()
 
     def test_real_state_managed_runtime_mro_and_git_env(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -492,6 +526,7 @@ class StateManagementTests(TestCase):
             # 9. guarded git_push does not crash due to MRO
             res_push = runtime.git_push({"remote": "origin"})
             self.assertIn("state_checkpoint", res_push)
+            self.assertIsNone(inspect_writer_lease(repo, "main"))
 
             # 10. guarded service_update does not crash due to MRO
             with patch.object(
@@ -499,15 +534,13 @@ class StateManagementTests(TestCase):
             ):
                 res_service = runtime.service_update({})
                 self.assertIn("state_checkpoint", res_service)
-                self.assertIn("main", res_service["released_writer_leases"])
                 self.assertIsNone(inspect_writer_lease(repo, "main"))
 
-            # 11. service restart also releases the current context writer lease
-            runtime.git_fetch({"remote": "origin"})
-            self.assertIsNotNone(inspect_writer_lease(repo, "main"))
+            # 11. service restart starts with no completed-operation writer lease
+            self.assertIsNone(inspect_writer_lease(repo, "main"))
             with patch.object(
                 core.Runtime, "service_restart", return_value={"scheduled": True}
             ):
                 res_restart = runtime.service_restart({})
-                self.assertIn("main", res_restart["released_writer_leases"])
+                self.assertTrue(res_restart["scheduled"])
                 self.assertIsNone(inspect_writer_lease(repo, "main"))

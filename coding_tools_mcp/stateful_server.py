@@ -107,41 +107,45 @@ class StateManagedRuntime(StateMutationMixin, BuildIdentityMixin, core.Runtime):
             [branch, *(extra_branches or [])],
             str((expected_record or {}).get("checkpoint_id") or "") or None,
         )
-        actual = self._state_snapshot()
-        if expected_snapshot is not None:
-            drift = compare_snapshots(expected_snapshot, actual)
-            if drift:
-                raise ToolFailure(
-                    "STATE_DRIFT",
-                    "Repository state changed since the last automatic checkpoint.",
-                    category="conflict",
-                    retryable=True,
-                    details={
-                        "expected": expected_snapshot,
-                        "actual": actual,
-                        "changed_fields": drift,
-                        "reconcile": (
-                            "Inspect the changed fields, then explicitly reconcile with "
-                            "continuation_checkpoint(action=write, payload={branch: <actual branch>, "
-                            "head: <actual local_head>})."
-                        ),
-                    },
+        try:
+            actual = self._state_snapshot()
+            if expected_snapshot is not None:
+                drift = compare_snapshots(expected_snapshot, actual)
+                if drift:
+                    raise ToolFailure(
+                        "STATE_DRIFT",
+                        "Repository state changed since the last automatic checkpoint.",
+                        category="conflict",
+                        retryable=True,
+                        details={
+                            "expected": expected_snapshot,
+                            "actual": actual,
+                            "changed_fields": drift,
+                            "reconcile": (
+                                "Inspect the changed fields, then explicitly reconcile with "
+                                "continuation_checkpoint(action=write, payload={branch: <actual branch>, "
+                                "head: <actual local_head>})."
+                            ),
+                        },
+                    )
+            write_state_checkpoint(
+                self.workspace.root,
+                branch,
+                snapshot=actual,
+                phase="before",
+                operation=operation,
+                owner=self._state_owner(),
+                logical_task=self._state_task(),
+                outcome="started",
+                previous_checkpoint_id=str(
+                    (expected_record or {}).get("checkpoint_id") or ""
                 )
-        write_state_checkpoint(
-            self.workspace.root,
-            branch,
-            snapshot=actual,
-            phase="before",
-            operation=operation,
-            owner=self._state_owner(),
-            logical_task=self._state_task(),
-            outcome="started",
-            previous_checkpoint_id=str(
-                (expected_record or {}).get("checkpoint_id") or ""
+                or None,
             )
-            or None,
-        )
-        return branch, expected_record, actual
+            return branch, expected_record, actual
+        except BaseException:
+            self._release_state_owner_leases()
+            raise
 
     def _state_after(
         self,
@@ -182,12 +186,17 @@ class StateManagedRuntime(StateMutationMixin, BuildIdentityMixin, core.Runtime):
             operation, extra_branches=extra_branches
         )
         try:
-            result = callback()
-        except BaseException:
-            self._state_after(operation, branch, previous, outcome="error")
-            raise
-        checkpoint = self._state_after(operation, branch, previous, outcome="success")
-        return result, checkpoint
+            try:
+                result = callback()
+            except BaseException:
+                self._state_after(operation, branch, previous, outcome="error")
+                raise
+            checkpoint = self._state_after(
+                operation, branch, previous, outcome="success"
+            )
+            return result, checkpoint
+        finally:
+            self._release_state_owner_leases()
 
     def apply_patch(self, args: dict[str, Any]) -> dict[str, Any]:
         result, checkpoint = self._guarded(
@@ -221,46 +230,39 @@ class StateManagedRuntime(StateMutationMixin, BuildIdentityMixin, core.Runtime):
             [actual_branch],
             str((previous or {}).get("checkpoint_id") or "") or None,
         )
-        actual = self._state_snapshot()
-        actual_head = str(actual.get("local_head") or "")
-        if requested_branch != actual_branch or requested_head != actual_head:
+        try:
+            actual = self._state_snapshot()
+            actual_head = str(actual.get("local_head") or "")
+            if requested_branch != actual_branch or requested_head != actual_head:
+                result["state_reconciliation"] = {
+                    "status": "not_applied",
+                    "reason": "payload_branch_head_mismatch",
+                    "actual_branch": actual_branch,
+                    "actual_head": actual_head,
+                }
+                return result
+
+            checkpoint = write_state_checkpoint(
+                self.workspace.root,
+                actual_branch,
+                snapshot=actual,
+                phase="after",
+                operation="continuation_checkpoint_reconcile",
+                owner=self._state_owner(),
+                logical_task=self._state_task(),
+                outcome="reconciled",
+                previous_checkpoint_id=str((previous or {}).get("checkpoint_id") or "")
+                or None,
+            )
             result["state_reconciliation"] = {
-                "status": "not_applied",
-                "reason": "payload_branch_head_mismatch",
-                "actual_branch": actual_branch,
-                "actual_head": actual_head,
+                "status": "reconciled",
+                "checkpoint_id": checkpoint["checkpoint_id"],
+                "branch": actual_branch,
+                "head": actual_head,
             }
             return result
-
-        checkpoint = write_state_checkpoint(
-            self.workspace.root,
-            actual_branch,
-            snapshot=actual,
-            phase="after",
-            operation="continuation_checkpoint_reconcile",
-            owner=self._state_owner(),
-            logical_task=self._state_task(),
-            outcome="reconciled",
-            previous_checkpoint_id=str((previous or {}).get("checkpoint_id") or "")
-            or None,
-        )
-        result["state_reconciliation"] = {
-            "status": "reconciled",
-            "checkpoint_id": checkpoint["checkpoint_id"],
-            "branch": actual_branch,
-            "head": actual_head,
-        }
-        return result
-
-    def service_update(self, args: dict[str, Any]) -> dict[str, Any]:
-        result = super().service_update(args)
-        result["released_writer_leases"] = self._release_state_owner_leases()
-        return result
-
-    def service_restart(self, args: dict[str, Any]) -> dict[str, Any]:
-        result = super().service_restart(args)
-        result["released_writer_leases"] = self._release_state_owner_leases()
-        return result
+        finally:
+            self._release_state_owner_leases()
 
 
 def main(argv: list[str] | None = None) -> int:

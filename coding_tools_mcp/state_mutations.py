@@ -38,6 +38,9 @@ class StateMutationMixin:
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         raise NotImplementedError
 
+    def _release_state_owner_leases(self) -> list[str]:
+        raise NotImplementedError
+
     def git_switch_branch(self, args: dict[str, Any]) -> dict[str, Any]:
         parent = super()
         target = str(args.get("name") or "").strip()
@@ -91,56 +94,59 @@ class StateMutationMixin:
         parent = super()
         branch, previous, _before = self._state_preflight("git_push")
         try:
-            result = parent.git_push(args)  # type: ignore[attr-defined]
-        except BaseException:
-            self._state_after("git_push", branch, previous, outcome="error")
-            raise
+            try:
+                result = parent.git_push(args)  # type: ignore[attr-defined]
+            except BaseException:
+                self._state_after("git_push", branch, previous, outcome="error")
+                raise
 
-        pushed_branch = str(result.get("branch") or branch)
-        remote = str(result.get("remote") or args.get("remote") or "origin")
-        verified, local_head, remote_head = verify_remote_branch_head(
-            self.workspace.root,
-            pushed_branch,
-            remote,
-            git_env=self._git_env(),
-        )
-        if not verified:
+            pushed_branch = str(result.get("branch") or branch)
+            remote = str(result.get("remote") or args.get("remote") or "origin")
+            verified, local_head, remote_head = verify_remote_branch_head(
+                self.workspace.root,
+                pushed_branch,
+                remote,
+                git_env=self._git_env(),
+            )
+            if not verified:
+                checkpoint = self._state_after(
+                    "git_push",
+                    branch,
+                    previous,
+                    outcome="error",
+                    push_verified=False,
+                    remote_head=remote_head,
+                )
+                raise ToolFailure(
+                    "REMOTE_HEAD_MISMATCH",
+                    "Push completed but the authoritative remote branch head does not match local HEAD.",
+                    category="conflict",
+                    details={
+                        "branch": pushed_branch,
+                        "remote": remote,
+                        "local_head": local_head,
+                        "remote_head": remote_head,
+                        "state_checkpoint": checkpoint,
+                    },
+                )
+
             checkpoint = self._state_after(
                 "git_push",
                 branch,
                 previous,
-                outcome="error",
-                push_verified=False,
+                outcome="success",
+                push_verified=True,
                 remote_head=remote_head,
             )
-            raise ToolFailure(
-                "REMOTE_HEAD_MISMATCH",
-                "Push completed but the authoritative remote branch head does not match local HEAD.",
-                category="conflict",
-                details={
-                    "branch": pushed_branch,
-                    "remote": remote,
-                    "local_head": local_head,
-                    "remote_head": remote_head,
-                    "state_checkpoint": checkpoint,
-                },
-            )
-
-        checkpoint = self._state_after(
-            "git_push",
-            branch,
-            previous,
-            outcome="success",
-            push_verified=True,
-            remote_head=remote_head,
-        )
-        result["remote_verification"] = {
-            "verified": True,
-            "local_head": local_head,
-            "remote_head": remote_head,
-        }
-        result["state_checkpoint"] = checkpoint
-        return result
+            result["remote_verification"] = {
+                "verified": True,
+                "local_head": local_head,
+                "remote_head": remote_head,
+            }
+            result["state_checkpoint"] = checkpoint
+            return result
+        finally:
+            self._release_state_owner_leases()
 
     def service_update(self, args: dict[str, Any]) -> dict[str, Any]:
         parent = super()
