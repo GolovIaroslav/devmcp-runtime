@@ -113,12 +113,6 @@ merging it. The updater records the installed SHA/branch in operator config,
 performs a user-level `uv tool install --force`, refreshes the user systemd units,
 and then performs the MCP-health-before-tunnel restart sequence.
 
-`activate_policy_profile` is the first-class bootstrap path for changing the
-persistent host policy without arbitrary shell access. It is controlled by the
-separate `policy.manage` capability, which asks in Safe, Balanced, and Power and
-is automatic only in Autonomous. A successful change schedules the same safe
-restart path; a restart-scheduling failure attempts to restore the previous
-profile.
 
 ## Project selection boundary
 
@@ -148,17 +142,6 @@ escapes are rejected. Credential/runtime subtrees such as `.git`, `.ssh`,
 similar protected paths remain denied regardless of whether the input path was
 relative or absolute.
 
-`grant_root` adds an existing directory below an operator-configured
-`DEVMCP_GRANTABLE_ROOTS` ceiling as a temporary read or write root. The grant is
-an in-memory capability lease scoped to one operation, logical task, or logical
-session; it never survives a restart. Project discovery roots do not implicitly
-populate this ceiling; unset `DEVMCP_GRANTABLE_ROOTS` means no additional roots
-can be granted. Granting an ancestor of the primary
-workspace is rejected as too broad. Filesystem reads, writes, patching, command
-path checks use the same canonical root set. Normal non-transactional shell
-execution does not copy the selected repository. Additional-root leases remain
-available to high-level tools and compatibility policy paths, but they are not a
-reason to rebuild the selected workspace on every command.
 
 ## Permission and capability model
 
@@ -181,14 +164,6 @@ environment secrets, normal host network/TMP/HOME, and Docker/Podman access when
 the current user already has it. Explicit policy profiles may still apply the
 older capability/secret/network restrictions as a compatibility path.
 
-`grant_capability` creates an opaque `lease_...` record for a bounded capability
-and target. Supported targets include executable/command patterns, dependency
-installation, exact sensitive environment names, network scope, and workspace
-create/delete/move/patch operations. Leases have TTLs and `once`, `task`, or
-`session` scope. One-shot leases are consumed after the first public tool
-operation that uses them, not halfway through internal preflight. Task-scoped
-leases use an opaque `task_scope_id`; `end_task_scope` revokes all leases for
-that task immediately. The model cannot create a permanent grant.
 
 The local bwrap namespace cannot truthfully enforce `github.com`-only egress, so
 destination-scoped network leases remain meaningful only on explicit
@@ -391,8 +366,8 @@ matrix behavior instead. `dangerous`/full-access disables the shell sandbox and
 secret filtering by design but still does not grant root, sudo, or automatic
 force-push. These compatibility names do not change the tool list.
 
-`activate_policy_profile` is idempotent: requesting the already-effective
-profile returns `status: "unchanged"` and does not schedule a service restart.
+`activate_policy_profile`, `grant_root`, `grant_capability`, and `end_task_scope`
+are retired as of v0.1.0b1 and no longer advertised in `tools/list`.
 
 `--dangerously-fake-readonly-annotations` is a fenced test/debug compatibility
 switch that advertises every tool as read-only in `tools/list`. It does not stop

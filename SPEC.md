@@ -16,13 +16,13 @@ generation, or arbitrary subagent orchestration.
 There is one stable catalog. The runtime has no tool profiles, no `edit_file`,
 no dynamic `tools/list_changed`, and no required `open_workspace` call.
 `apply_patch` is the only direct file-write tool. `safe`, `trusted`, and
-`dangerous` are command permission policies and never alter `tools/list`.
+`dangerous` are legacy ingress adapters and never alter `tools/list`.
 
-The default catalog contains 55 tools:
+The default catalog contains 57 tools:
 
 - runtime/context: `server_info`, `health`, `workspace_info`, `service_status`,
-  `service_doctor`, `host_cli_probe`, `service_restart`, `service_update`, `activate_policy_profile`,
-  `check_exec_environment`, `get_default_cwd`, `set_default_cwd`
+  `service_doctor`, `host_cli_probe`, `service_restart`, `service_update`, `local_state_snapshot`,
+  `run_checks_for_diff`, `check_exec_environment`, `get_default_cwd`, `set_default_cwd`
 - project/session: `list_projects`, `select_project`, `current_project`,
   `project_checks`, `run_project_check`
 - workspace inspection: `read_file`, `read_files`, `list_dir`, `list_files`,
@@ -36,7 +36,6 @@ The default catalog contains 55 tools:
   `git_delete_branch`, `git_delete_remote_branch`, `git_commit`, `git_push`
 - autonomy: `wait_for_external`, `continuation_checkpoint`
 - delegation: `antigravity_delegate`
-- approvals: `approval_status`, `list_pending_approvals`
 
 `view_image` can be disabled as an installation capability. All other tools are
 fixed.
@@ -78,5 +77,5 @@ registration.
 
 Version 0.2 changes model-facing result text from a JSON mirror to summaries.
 Clients that parsed `content[0].text` as JSON must read `structuredContent`.
-Image base64 now appears once, in the MCP image block. Tool profiles and the
-`view_image.output` selector are removed.
+Image base64 now appears once, in the MCP image block. The
+`view_image.output` selector is removed.

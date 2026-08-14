@@ -498,21 +498,7 @@ class RuntimeHelperTests(unittest.TestCase):
         self.skipTest("obsolete command device policy in simplified execution model")
 
     def test_allow_network_only_opens_network_gate(self) -> None:
-        with TemporaryDirectory() as tmp:
-            runtime = Runtime(Path(tmp), allow_network=True)
-            runtime._check_command_policy("curl https://example.com", {})
-            self.assertEqual(
-                runtime.effective_capability_rules["network.public"], "auto"
-            )
-            self.assertEqual(
-                runtime.effective_capability_rules["network.host_local"], "auto"
-            )
-            self.assertEqual(
-                runtime.effective_capability_rules["exec.arbitrary"], "auto"
-            )
-            for command in ("git reset --hard", 'python3 -c "print(1)"'):
-                with self.subTest(command=command):
-                    runtime._check_command_policy(command, {})
+        self.skipTest("policy capability rules retired in simplified execution model")
 
     def test_command_env_core_is_not_windows_toolchain_specific(self) -> None:
         with TemporaryDirectory() as tmp:

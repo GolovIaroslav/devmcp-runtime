@@ -13,7 +13,6 @@ from tests.compliance.mcp_client import MCPClient, MCPError
 class ComplianceTestCase(unittest.TestCase):
     fixture_name = "tiny-js-project"
     permission_mode = "trusted"
-    policy_profile: str | None = None
 
     def setUp(self) -> None:
         self.workspace_cm = workspace_from_fixture(self.fixture_name)
@@ -21,7 +20,6 @@ class ComplianceTestCase(unittest.TestCase):
         self.client_cm = MCPClient(
             self.workspace.root,
             permission_mode=self.permission_mode,
-            policy_profile=self.policy_profile,
         )
         self.client = self.client_cm.__enter__()
 
@@ -39,7 +37,6 @@ class ComplianceTestCase(unittest.TestCase):
             with MCPClient(
                 workspace.root,
                 permission_mode=self.permission_mode,
-                policy_profile=self.policy_profile,
             ) as client:
                 yield workspace, client
 

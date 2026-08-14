@@ -17,7 +17,7 @@ def append_tool_event(
     ok: bool,
     error_code: Any,
     duration_ms: int,
-    policy_profile: str,
+    execution_mode: str = "build",
 ) -> None:
     selected = ensure_dirs(paths())
     event = {
@@ -28,7 +28,7 @@ def append_tool_event(
         "ok": bool(ok),
         "error_code": str(error_code) if error_code else None,
         "duration_ms": int(duration_ms),
-        "policy_profile": str(policy_profile),
+        "execution_mode": str(execution_mode),
     }
     try:
         with selected.audit_log.open("a", encoding="utf-8") as handle:

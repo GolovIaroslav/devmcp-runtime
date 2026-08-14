@@ -57,10 +57,9 @@ after canonicalization. A path is usable only when its canonical target lies in
 the operation's authorized read/write roots and does not traverse a protected
 credential/runtime path. Symlink escapes remain denied.
 
-The selected project is always the primary root. `grant_root` may add one
-existing directory under the operator-defined `DEVMCP_GRANTABLE_ROOTS` ceiling.
-The grant is an in-memory capability lease and never changes project discovery
-roots or survives restart.
+The selected project is always the primary root. `grant_root` (retired in v0.1.0b1) previously
+added one existing directory under the operator-defined `DEVMCP_GRANTABLE_ROOTS` ceiling as an
+in-memory capability lease. The grant never changed project discovery roots or survived restart.
 
 Additional execution roots are copied through the same secret-filtered snapshot
 pipeline as the primary project. The command sees those snapshots mounted at the
@@ -69,8 +68,8 @@ directly exposing the corresponding host sibling directory.
 
 ## Capability leases
 
-`grant_capability` provides bounded escalation instead of requiring a global
-profile switch. Every lease has:
+`grant_capability` (retired in v0.1.0b1) previously provided bounded escalation
+instead of requiring a global profile switch. Every lease had:
 
 - opaque ID;
 - owner logical context;
@@ -79,10 +78,10 @@ profile switch. Every lease has:
 - expiration;
 - optional opaque `task_scope_id`.
 
-One-shot leases are consumed after the public operation that used them. A task
-scope can span transport reconnects and is explicitly terminated with
-`end_task_scope`; TTL is fallback cleanup. Leases are memory-only and cannot be
-made permanent by the model.
+One-shot leases were consumed after the public operation that used them. A task
+scope could span transport reconnects and was explicitly terminated with
+`end_task_scope` (retired in v0.1.0b1); TTL was fallback cleanup. Leases were
+memory-only and could not be made permanent by the model.
 
 Ambient host secrets are always filtered. `sensitive_env_names` requests exact
 host variable names and requires exact-name `env.sensitive` leases; unrelated

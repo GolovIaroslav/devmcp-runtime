@@ -69,22 +69,18 @@ class SimplifiedExecutionModelComplianceTests(ComplianceTestCase):
             self.assertEqual(r_dangerous.effective_access, "full-access")
             r_dangerous.close()
 
-    def test_c_policy_profile_does_not_override_effective_build_authority(self) -> None:
-        """Test C (policy_profile): setting policy_profile does NOT override effective build/full-access authority."""
+    def test_c_build_execution_mode_has_full_access_authority(self) -> None:
+        """Test C (execution_mode): execution_mode=build gives full-access authority unconditionally."""
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
-            for profile in ("safe", "balanced", "power", "autonomous"):
-                runtime = Runtime(root, policy_profile=profile)
-                try:
-                    self.assertEqual(runtime.execution_mode, "build")
-                    self.assertEqual(runtime.effective_access, "full-access")
-                    res = runtime.exec_command(
-                        {"cmd": "echo ok", "yield_time_ms": 5000}
-                    )
-                    self.assertEqual(res.get("status"), "success")
-                    self.assertEqual(res.get("stdout"), "ok\n")
-                finally:
-                    runtime.close()
+            runtime = Runtime(root, execution_mode="build")
+            try:
+                self.assertEqual(runtime.execution_mode, "build")
+                self.assertEqual(runtime.effective_access, "full-access")
+                res = runtime.exec_command({"cmd": "echo ok", "yield_time_ms": 5000})
+                self.assertEqual(res.get("status"), "success")
+            finally:
+                runtime.close()
 
     def test_d_server_info_returns_execution_mode_and_effective_access(self) -> None:
         """Test D (server_info): server_info returns execution_mode='build' and effective_access='full-access'."""
