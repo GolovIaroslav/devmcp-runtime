@@ -170,7 +170,8 @@ class SessionEventTests(unittest.TestCase):
         self.assertEqual(properties["$process_person_profile"], False)
         self.assertEqual(properties["transport"], "stdio")
         self.assertEqual(properties["execution_mode"], "build")
-        self.assertEqual(properties["legacy_permission_mode_compat"], "trusted")
+        self.assertEqual(properties["effective_access"], "full-access")
+        self.assertNotIn("legacy_permission_mode_compat", properties)
         # clientInfo values are enum-like labels, truncated, and expected here.
         self.assertEqual(properties["client_name"], "clientinfo-probe")
 
@@ -218,7 +219,9 @@ class SessionEventTests(unittest.TestCase):
             scrubbed_env(CODING_TOOLS_MCP_TELEMETRY="on"),
             patch.object(telemetry, "_get_sender", lambda: sender),
         ):
-            session = SessionTelemetry(permission_mode="safe")
+            session = SessionTelemetry(
+                execution_mode="plan", effective_access="read-only"
+            )
             session.record_session_start({"name": "cap"}, "2025-11-25")
             for _ in range(ERROR_EVENTS_PER_SESSION + 5):
                 session.record_tool_call(
@@ -242,7 +245,9 @@ class SessionEventTests(unittest.TestCase):
             scrubbed_env(CODING_TOOLS_MCP_TELEMETRY="on"),
             patch.object(telemetry, "_get_sender", lambda: sender),
         ):
-            session = SessionTelemetry(permission_mode="safe")
+            session = SessionTelemetry(
+                execution_mode="plan", effective_access="read-only"
+            )
             session.record_session_start(None, "2025-11-25")
             for duration in (50, 500, 5_000, 50_000):
                 session.record_tool_call(

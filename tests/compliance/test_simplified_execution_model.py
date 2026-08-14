@@ -92,9 +92,24 @@ class SimplifiedExecutionModelComplianceTests(ComplianceTestCase):
                 self.assertEqual(info.get("execution_mode"), "build")
                 self.assertEqual(info.get("effective_access"), "full-access")
                 self.assertNotIn("permission_mode", info)
-                self.assertIn(
+                self.assertNotIn(
                     "legacy_permission_mode_compat", info["permission_policy"]
                 )
+                self.assertNotIn("readable_roots", info)
+                self.assertNotIn("writable_roots", info)
+                self.assertNotIn("sandboxed runtime", str(info).lower())
+            finally:
+                runtime.close()
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runtime = Runtime(root, execution_mode="plan")
+            try:
+                info = runtime.server_info({})
+                self.assertEqual(info.get("execution_mode"), "plan")
+                self.assertEqual(info.get("effective_access"), "read-only")
+                self.assertEqual(info.get("readable_roots"), [str(root)])
+                self.assertEqual(info.get("writable_roots"), [str(root)])
             finally:
                 runtime.close()
 
@@ -139,6 +154,7 @@ class SimplifiedExecutionModelComplianceTests(ComplianceTestCase):
                 self.assertIn("current OS user's filesystem", instructions)
                 self.assertIn("default coding context and cwd", instructions)
                 self.assertIn("High-level Git tools", instructions)
+                self.assertIn("selected repository", instructions)
                 self.assertNotIn("one writable Git repository", instructions)
                 self.assertNotIn("confined to that selected repository", instructions)
                 info = runtime.server_info({})
@@ -164,6 +180,51 @@ class SimplifiedExecutionModelComplianceTests(ComplianceTestCase):
                 )
                 self.assertEqual(res.get("status"), "success")
                 self.assertEqual(res.get("stdout"), "outside secret content")
+            finally:
+                runtime.close()
+
+    def test_e_build_structured_paths_and_cwd_are_not_selected_project_authority(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            selected = base / "selected"
+            sibling = base / "sibling"
+            selected.mkdir()
+            sibling.mkdir()
+            source = sibling / "outside.txt"
+            source.write_text("outside\n", encoding="utf-8")
+            runtime = Runtime(selected, execution_mode="build")
+            try:
+                read = runtime.read_file({"path": str(source)})
+                self.assertEqual(read.get("content"), "outside\n")
+
+                write_target = sibling / "written.txt"
+                resolved = runtime.resolve_for_write(str(write_target))
+                self.assertEqual(resolved.path, write_target)
+                write_target.write_text(
+                    "written outside selected project\n", encoding="utf-8"
+                )
+
+                cwd = runtime.exec_command(
+                    {"argv": ["pwd"], "cwd": str(sibling), "yield_time_ms": 5000}
+                )
+                self.assertEqual(cwd.get("status"), "success")
+                self.assertEqual(cwd.get("stdout", "").strip(), str(sibling))
+            finally:
+                runtime.close()
+
+    def test_e_local_state_snapshot_exposes_only_canonical_runtime_authority(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runtime = Runtime(root, execution_mode="build")
+            try:
+                snapshot = runtime.local_state_snapshot({})
+                self.assertEqual(snapshot.get("execution_mode"), "build")
+                self.assertEqual(snapshot.get("effective_access"), "full-access")
+                self.assertNotIn("permission_mode", snapshot)
             finally:
                 runtime.close()
 

@@ -635,9 +635,9 @@ class RuntimeHelperTests(unittest.TestCase):
             runtime = Runtime(workspace)
             info = runtime.server_info_payload()
             self.assertNotIn("permission_mode", info)
-            self.assertEqual(
-                info["permission_policy"]["legacy_permission_mode_compat"], "trusted"
-            )
+            self.assertNotIn("legacy_permission_mode_compat", info["permission_policy"])
+            self.assertNotIn("readable_roots", info)
+            self.assertNotIn("writable_roots", info)
             self.assertEqual(info.get("execution_mode"), "build")
             self.assertEqual(info.get("effective_access"), "full-access")
             self.assertEqual(info.get("runtime_dir"), str(runtime.runtime_dir))

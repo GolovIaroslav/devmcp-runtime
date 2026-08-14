@@ -934,7 +934,7 @@ def _ui(_: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="devmcp",
-        description="DevMCP Runtime: local sandboxed coding runtime for MCP clients.",
+        description="DevMCP Runtime: local coding runtime for MCP clients.",
     )
     parser.add_argument(
         "--version", action="version", version=f"DevMCP Runtime {__version__}"
