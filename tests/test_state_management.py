@@ -297,7 +297,8 @@ class StateManagementTests(TestCase):
                 check=True,
             )
             subprocess.run(
-                ["git", "clone", "-q", str(remote), str(external)], check=True
+                ["git", "clone", "-q", "-b", "main", str(remote), str(external)],
+                check=True,
             )
             subprocess.run(
                 ["git", "config", "user.email", "external@example.com"],
@@ -468,7 +469,8 @@ class StateManagementTests(TestCase):
                 ["git", "push", "-qu", "origin", "main"], cwd=repo, check=True
             )
             subprocess.run(
-                ["git", "clone", "-q", str(remote), str(external)], check=True
+                ["git", "clone", "-q", "-b", "main", str(remote), str(external)],
+                check=True,
             )
             subprocess.run(
                 ["git", "config", "user.email", "external@example.com"],
