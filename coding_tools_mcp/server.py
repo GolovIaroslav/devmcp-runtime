@@ -1596,6 +1596,7 @@ class Runtime:
         persisted_project = self._load_persisted_project_path()
         if persisted_project is not None:
             self.workspace = Workspace(persisted_project)
+        self.canonical_project_root = self.workspace.root
         self.enable_view_image = enable_view_image
         self._exposed_tool_names = [
             name
@@ -1666,7 +1667,7 @@ class Runtime:
             and self.workspace.root == initial_workspace_root
             else load_project_context(self.workspace.root)
         )
-        self.active_project = self._project_record_for_path(self.workspace.root)
+        self.active_project = self._project_record_for_path(self.canonical_project_root)
         self.request_sessions: dict[str | int, str] = {}
         self.request_cancel_events: dict[str | int, threading.Event] = {}
         self.request_sessions_lock = threading.Lock()
@@ -1918,6 +1919,10 @@ class Runtime:
     def command_home_dir(self) -> Path:
         return self.home_dir
 
+    @property
+    def effective_workspace_root(self) -> Path:
+        return self.workspace.root
+
     def command_tmp_dir(self) -> Path:
         return self.tmp_dir
 
@@ -1966,7 +1971,11 @@ class Runtime:
             return None
         if self.logical_context_id is None:
             try:
-                state = registry.create(self.workspace.root, self.default_cwd)
+                state = registry.create(
+                    self.canonical_project_root,
+                    self.effective_workspace_root,
+                    self.default_cwd,
+                )
             except RuntimeError as exc:
                 raise ToolFailure(
                     "SERVICE_UNAVAILABLE",
@@ -1978,21 +1987,35 @@ class Runtime:
         return self.logical_context_id
 
     def _apply_logical_context_state(self, state: LogicalContextState) -> None:
-        workspace_root = state.workspace.resolve(strict=True)
+        canonical_project_root = state.canonical_project_root.resolve(strict=True)
+        effective_workspace_root = state.effective_workspace_root.resolve(strict=True)
         default_cwd = state.default_cwd.resolve(strict=True)
-        if not any(is_relative_to(workspace_root, root) for root in self.project_roots):
+        if not any(
+            is_relative_to(canonical_project_root, root) for root in self.project_roots
+        ):
             raise ToolFailure(
                 "CONTEXT_INVALID",
-                "Logical context workspace is outside configured project roots.",
+                "Logical context canonical project is outside configured project roots.",
                 category="security",
             )
-        if not default_cwd.is_dir() or not is_relative_to(default_cwd, workspace_root):
+        if not effective_workspace_root.is_dir():
+            raise ToolFailure(
+                "CONTEXT_INVALID",
+                "Logical context effective workspace is no longer valid.",
+                category="runtime",
+            )
+        if not default_cwd.is_dir() or not is_relative_to(
+            default_cwd, effective_workspace_root
+        ):
             raise ToolFailure(
                 "CONTEXT_INVALID",
                 "Logical context default_cwd is no longer valid.",
                 category="runtime",
             )
-        if self.workspace.root != workspace_root:
+        if (
+            self.canonical_project_root != canonical_project_root
+            or self.effective_workspace_root != effective_workspace_root
+        ):
             with self.sessions_lock:
                 starting_processes = self.starting_sessions
                 active_processes = [
@@ -2009,11 +2032,13 @@ class Runtime:
                     category="runtime",
                 )
             self._discard_execution_sandbox()
-            self.workspace = Workspace(workspace_root)
-            self.patch_baselines.clear()
-            self.patch_baseline_bytes = 0
-            self.project_context = load_project_context(workspace_root)
-            self.active_project = self._project_record_for_path(workspace_root)
+            if self.effective_workspace_root != effective_workspace_root:
+                self.workspace = Workspace(effective_workspace_root)
+                self.patch_baselines.clear()
+                self.patch_baseline_bytes = 0
+                self.project_context = load_project_context(effective_workspace_root)
+            self.canonical_project_root = canonical_project_root
+            self.active_project = self._project_record_for_path(canonical_project_root)
         self.default_cwd = default_cwd
 
     def _save_logical_context_state(self, state: LogicalContextState) -> None:
@@ -2022,7 +2047,8 @@ class Runtime:
             return
         registry.update(
             state,
-            workspace=self.workspace.root,
+            canonical_project_root=self.canonical_project_root,
+            effective_workspace_root=self.effective_workspace_root,
             default_cwd=self.default_cwd,
         )
 
@@ -2326,7 +2352,9 @@ class Runtime:
                     if context_state is None:
                         try:
                             context_state = registry.create(
-                                self.workspace.root, self.default_cwd
+                                self.canonical_project_root,
+                                self.effective_workspace_root,
+                                self.default_cwd,
                             )
                         except RuntimeError as exc:
                             raise ToolFailure(
@@ -2731,6 +2759,7 @@ class Runtime:
             )
         self._discard_execution_sandbox()
         self.workspace = Workspace(selected_path)
+        self.canonical_project_root = self.workspace.root
         self.default_cwd = self.workspace.root
         self.patch_baselines.clear()
         self.patch_baseline_bytes = 0
@@ -6759,13 +6788,13 @@ class Runtime:
             return {
                 "action": action,
                 "scope": scope,
-                "checkpoint": read_checkpoint(self.workspace.root, scope),
+                "checkpoint": read_checkpoint(self.canonical_project_root, scope),
             }
         if action == "clear":
             return {
                 "action": action,
                 "scope": scope,
-                "cleared": clear_checkpoint(self.workspace.root, scope),
+                "cleared": clear_checkpoint(self.canonical_project_root, scope),
             }
         if "payload" not in args:
             raise ToolFailure(
@@ -6776,7 +6805,9 @@ class Runtime:
         return {
             "action": action,
             "scope": scope,
-            "checkpoint": write_checkpoint(self.workspace.root, scope, args["payload"]),
+            "checkpoint": write_checkpoint(
+                self.canonical_project_root, scope, args["payload"]
+            ),
         }
 
     def _antigravity_binary(self) -> str:

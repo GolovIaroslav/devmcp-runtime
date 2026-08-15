@@ -2100,6 +2100,9 @@ Maven home: /usr/share/maven
                 selected = runtime.select_project({"project": "first"})
                 self.assertEqual(selected["relative_path"], "first")
                 self.assertEqual(runtime.current_project({})["relative_path"], "first")
+                self.assertEqual(runtime.canonical_project_root, first.resolve())
+                self.assertEqual(runtime.effective_workspace_root, first.resolve())
+                self.assertEqual(runtime.default_cwd, first.resolve())
                 self.assertEqual(
                     runtime.read_file({"path": "tracked.txt"})["content"], "first\n"
                 )

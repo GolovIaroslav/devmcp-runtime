@@ -8,7 +8,11 @@ from unittest import TestCase
 from unittest.mock import patch
 
 from coding_tools_mcp import server as core
+from coding_tools_mcp.continuation import (
+    checkpoint_path as continuation_checkpoint_path,
+)
 from coding_tools_mcp.errors import ToolFailure
+from coding_tools_mcp.state_checkpoint import read_authoritative_state_checkpoint
 from coding_tools_mcp.state_identity import BuildIdentityMixin
 from coding_tools_mcp.state_mutations import StateMutationMixin
 from coding_tools_mcp.state_snapshot import (
@@ -49,6 +53,99 @@ def init_repo(root: Path) -> tuple[Path, str]:
 
 
 class StateManagementTests(TestCase):
+    def test_canonical_namespace_with_effective_linked_worktree_snapshot(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            canonical, canonical_head = init_repo(root)
+            effective = root / "effective"
+            subprocess.run(
+                ["git", "worktree", "add", "-q", "-b", "effective", str(effective)],
+                cwd=canonical,
+                check=True,
+            )
+            (effective / "tracked.txt").write_text("effective\n", encoding="utf-8")
+            subprocess.run(["git", "add", "tracked.txt"], cwd=effective, check=True)
+            subprocess.run(
+                ["git", "commit", "-qm", "effective change"], cwd=effective, check=True
+            )
+            effective_head = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=effective,
+                check=True,
+                text=True,
+                stdout=subprocess.PIPE,
+            ).stdout.strip()
+            self.assertNotEqual(effective_head, canonical_head)
+
+            restored = core.Runtime(
+                canonical,
+                project_roots=[root],
+                sandbox_backend="unsafe",
+            )
+            try:
+                restored._apply_logical_context_state(
+                    SimpleNamespace(
+                        canonical_project_root=canonical.resolve(),
+                        effective_workspace_root=effective.resolve(),
+                        default_cwd=effective.resolve(),
+                    )
+                )
+                self.assertEqual(restored.canonical_project_root, canonical.resolve())
+                self.assertEqual(restored.effective_workspace_root, effective.resolve())
+                self.assertEqual(restored.default_cwd, effective.resolve())
+                self.assertEqual(
+                    Path(restored.current_project({})["path"]), canonical.resolve()
+                )
+            finally:
+                restored.close()
+
+            config = root / "config"
+            with patch.dict("os.environ", {"DEVMCP_CONFIG_DIR": str(config)}):
+                runtime = StateManagedRuntime(
+                    workspace=effective,
+                    project_roots=[root],
+                    sandbox_backend="unsafe",
+                )
+                try:
+                    runtime.canonical_project_root = canonical.resolve()
+                    runtime.active_project = runtime._project_record_for_path(canonical)
+
+                    snapshot = runtime._state_snapshot()
+                    self.assertEqual(snapshot["branch"], "effective")
+                    self.assertEqual(snapshot["local_head"], effective_head)
+
+                    owner = runtime._state_owner()
+                    baseline = runtime._ensure_state_baseline(owner=owner)
+                    self.assertIsNotNone(baseline)
+                    self.assertIsNotNone(
+                        read_authoritative_state_checkpoint(canonical, owner)
+                    )
+                    self.assertIsNone(
+                        read_authoritative_state_checkpoint(effective, owner)
+                    )
+
+                    runtime._acquire_state_leases(["effective"], None)
+                    self.assertIsNotNone(inspect_writer_lease(canonical, "effective"))
+                    self.assertIsNone(inspect_writer_lease(effective, "effective"))
+                    runtime._release_state_owner_leases()
+
+                    runtime.continuation_checkpoint(
+                        {
+                            "action": "write",
+                            "logical_task": "worktree-foundation",
+                            "payload": {"head": effective_head},
+                        }
+                    )
+                    scope = "task:worktree-foundation"
+                    self.assertTrue(
+                        continuation_checkpoint_path(canonical, scope).is_file()
+                    )
+                    self.assertFalse(
+                        continuation_checkpoint_path(effective, scope).is_file()
+                    )
+                finally:
+                    runtime.close()
+
     def test_state_managed_runtime_wires_all_required_mutation_guards(self) -> None:
         self.assertTrue(issubclass(StateManagedRuntime, StateMutationMixin))
         self.assertIsNot(StateManagedRuntime.apply_patch, core.Runtime.apply_patch)

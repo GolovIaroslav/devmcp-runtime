@@ -12,11 +12,25 @@ from coding_tools_mcp.session_state import LogicalContextRegistry, SharedJobRegi
 
 
 class SessionStateRegistryTests(unittest.TestCase):
+    def test_context_tracks_canonical_effective_and_default_cwd(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            canonical = root / "canonical"
+            effective = root / "effective"
+            nested = effective / "nested"
+            canonical.mkdir()
+            nested.mkdir(parents=True)
+            registry = LogicalContextRegistry()
+            state = registry.create(canonical, effective, nested)
+            self.assertEqual(state.canonical_project_root, canonical.resolve())
+            self.assertEqual(state.effective_workspace_root, effective.resolve())
+            self.assertEqual(state.default_cwd, nested.resolve())
+
     def test_context_lease_prevents_ttl_expiration(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             registry = LogicalContextRegistry(ttl_seconds=1)
-            state = registry.create(root, root)
+            state = registry.create(root, root, root)
             retained = registry.retain(state.context_id)
             self.assertIs(retained, state)
             state.last_seen -= 10
@@ -31,8 +45,8 @@ class SessionStateRegistryTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             contexts = LogicalContextRegistry(ttl_seconds=1)
-            owner = contexts.create(root, root)
-            other = contexts.create(root, root)
+            owner = contexts.create(root, root, root)
+            other = contexts.create(root, root, root)
             jobs = SharedJobRegistry(
                 completed_ttl_seconds=30, context_registry=contexts
             )
@@ -77,7 +91,7 @@ class SessionStateRegistryTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             contexts = LogicalContextRegistry(ttl_seconds=1)
-            owner = contexts.create(root, root)
+            owner = contexts.create(root, root, root)
             jobs = SharedJobRegistry(completed_ttl_seconds=1, context_registry=contexts)
             process = subprocess.Popen(
                 [sys.executable, "-c", "pass"],
