@@ -110,6 +110,7 @@ class StateManagedRuntime(StateMutationMixin, BuildIdentityMixin, core.Runtime):
         managed_args = dict(args)
         timeout_ms = int(managed_args.get("timeout_ms", 30000))
         managed_args["yield_time_ms"] = timeout_ms
+        managed_args["_force_foreground_wait"] = True
 
         branch, previous, _before = self._state_preflight("exec_command")
         try:
