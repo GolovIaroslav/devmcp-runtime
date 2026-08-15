@@ -18,7 +18,6 @@ DRIFT_FIELDS = (
     "branch",
     "local_head",
     "upstream",
-    "remote_tracking_head",
     "dirty_paths",
     "staged_paths",
     "untracked_paths",
@@ -173,11 +172,19 @@ def collect_state_snapshot(
     project = project.resolve()
     branch = git_text(project, ["branch", "--show-current"], env=git_env) or None
     local_head = git_text(project, ["rev-parse", "HEAD"], env=git_env)
-    upstream = git_text(
-        project,
-        ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
-        env=git_env,
-    )
+    upstream = (
+        git_text(
+            project,
+            [
+                "for-each-ref",
+                "--format=%(upstream:short)",
+                f"refs/heads/{branch}",
+            ],
+            env=git_env,
+        )
+        if branch
+        else None
+    ) or None
     remote_tracking_head = (
         git_text(project, ["rev-parse", upstream], env=git_env) if upstream else None
     )

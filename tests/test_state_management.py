@@ -237,6 +237,12 @@ class StateManagementTests(TestCase):
         }
         self.assertNotEqual(state_fingerprint(base), state_fingerprint(changed_content))
 
+        changed_remote_cache = {**base, "remote_tracking_head": "d" * 40}
+        self.assertEqual(compare_snapshots(base, changed_remote_cache), {})
+        self.assertEqual(
+            state_fingerprint(base), state_fingerprint(changed_remote_cache)
+        )
+
     def test_remote_tracking_head_is_not_reported_as_authoritative_remote_head(
         self,
     ) -> None:
@@ -270,6 +276,244 @@ class StateManagementTests(TestCase):
             )
             self.assertEqual(verified["remote_head"], head)
             self.assertTrue(verified["push_verified"])
+
+    def test_linked_worktree_fetch_cache_movement_is_informational(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, head = init_repo(root)
+            remote = root / "remote.git"
+            worktree_b = root / "worktree-b"
+            external = root / "external"
+            subprocess.run(["git", "init", "-q", "--bare", remote], check=True)
+            subprocess.run(
+                ["git", "remote", "add", "origin", str(remote)], cwd=repo, check=True
+            )
+            subprocess.run(
+                ["git", "push", "-qu", "origin", "main"], cwd=repo, check=True
+            )
+            subprocess.run(
+                ["git", "worktree", "add", "-q", "-b", "worker", worktree_b, "main"],
+                cwd=repo,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "clone", "-q", "-b", "main", str(remote), str(external)],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "config", "user.email", "external@example.com"],
+                cwd=external,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "config", "user.name", "External"], cwd=external, check=True
+            )
+
+            kwargs = dict(
+                project_id="fixture",
+                installed_service_version="1",
+                installed_service_git_sha=head,
+                protocol_version="test",
+                writer_owner=None,
+                logical_task=None,
+            )
+            before = collect_state_snapshot(repo, **kwargs)
+            self.assertEqual(before["upstream"], "origin/main")
+            self.assertEqual(before["remote_tracking_head"], head)
+
+            (external / "remote.txt").write_text("remote\n", encoding="utf-8")
+            subprocess.run(["git", "add", "remote.txt"], cwd=external, check=True)
+            subprocess.run(
+                ["git", "commit", "-qm", "remote advance"], cwd=external, check=True
+            )
+            subprocess.run(
+                ["git", "push", "-q", "origin", "main"], cwd=external, check=True
+            )
+            subprocess.run(["git", "fetch", "-q", "origin"], cwd=worktree_b, check=True)
+
+            after = collect_state_snapshot(repo, **kwargs)
+            self.assertNotEqual(after["remote_tracking_head"], head)
+            self.assertEqual(after["upstream"], "origin/main")
+            self.assertEqual(compare_snapshots(before, after), {})
+            self.assertEqual(state_fingerprint(before), state_fingerprint(after))
+
+            with patch.dict("os.environ", {"DEVMCP_CONFIG_DIR": str(root / "config")}):
+                runtime = StateManagedRuntime(workspace=repo, sandbox_backend="unsafe")
+                try:
+                    runtime.local_state_snapshot({})
+                    (external / "remote-2.txt").write_text(
+                        "remote 2\n", encoding="utf-8"
+                    )
+                    subprocess.run(
+                        ["git", "add", "remote-2.txt"], cwd=external, check=True
+                    )
+                    subprocess.run(
+                        ["git", "commit", "-qm", "remote advance again"],
+                        cwd=external,
+                        check=True,
+                    )
+                    subprocess.run(
+                        ["git", "push", "-q", "origin", "main"],
+                        cwd=external,
+                        check=True,
+                    )
+                    subprocess.run(
+                        ["git", "fetch", "-q", "origin"], cwd=worktree_b, check=True
+                    )
+                    result = runtime.exec_argv(
+                        {
+                            "argv": [
+                                "python3",
+                                "-c",
+                                "from pathlib import Path; Path('managed.txt').write_text('ok\\n')",
+                            ],
+                            "state_effect": "selected_repo",
+                        }
+                    )
+                    self.assertTrue(result["command_success"])
+                    self.assertIsNone(inspect_writer_lease(repo, "main"))
+                finally:
+                    runtime.close()
+
+    def test_fetch_prune_preserves_configured_upstream_identity(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, head = init_repo(root)
+            remote = root / "remote.git"
+            worktree_b = root / "worktree-b"
+            subprocess.run(["git", "init", "-q", "--bare", remote], check=True)
+            subprocess.run(
+                ["git", "remote", "add", "origin", str(remote)], cwd=repo, check=True
+            )
+            subprocess.run(
+                ["git", "push", "-qu", "origin", "main"], cwd=repo, check=True
+            )
+            subprocess.run(
+                ["git", "worktree", "add", "-q", "-b", "worker", worktree_b, "main"],
+                cwd=repo,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "config", "receive.denyDeleteCurrent", "ignore"],
+                cwd=remote,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "push", "-q", "origin", ":main"], cwd=repo, check=True
+            )
+            subprocess.run(
+                ["git", "fetch", "-q", "--prune", "origin"], cwd=worktree_b, check=True
+            )
+
+            snapshot = collect_state_snapshot(
+                repo,
+                project_id="fixture",
+                installed_service_version="1",
+                installed_service_git_sha=head,
+                protocol_version="test",
+                writer_owner=None,
+                logical_task=None,
+            )
+            self.assertEqual(snapshot["upstream"], "origin/main")
+            self.assertIsNone(snapshot["remote_tracking_head"])
+
+    def test_actual_configured_upstream_mutation_causes_state_drift(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, _head = init_repo(root)
+            remote = root / "remote.git"
+            subprocess.run(["git", "init", "-q", "--bare", remote], check=True)
+            subprocess.run(
+                ["git", "remote", "add", "origin", str(remote)], cwd=repo, check=True
+            )
+            subprocess.run(
+                ["git", "push", "-qu", "origin", "main"], cwd=repo, check=True
+            )
+            subprocess.run(["git", "branch", "other"], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "push", "-q", "origin", "other"], cwd=repo, check=True
+            )
+            with patch.dict("os.environ", {"DEVMCP_CONFIG_DIR": str(root / "config")}):
+                runtime = StateManagedRuntime(workspace=repo, sandbox_backend="unsafe")
+                try:
+                    runtime.local_state_snapshot({})
+                    subprocess.run(
+                        ["git", "branch", "--set-upstream-to=origin/other", "main"],
+                        cwd=repo,
+                        check=True,
+                    )
+                    with self.assertRaises(ToolFailure) as drift:
+                        runtime.exec_argv(
+                            {
+                                "argv": ["python3", "-c", "print('blocked')"],
+                                "state_effect": "selected_repo",
+                            }
+                        )
+                    self.assertEqual(drift.exception.code, "STATE_DRIFT")
+                    self.assertIn("upstream", drift.exception.details["changed_fields"])
+                    self.assertIsNone(inspect_writer_lease(repo, "main"))
+                finally:
+                    runtime.close()
+
+    def test_reconcile_ignores_fetch_only_remote_cache_movement(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, _head = init_repo(root)
+            remote = root / "remote.git"
+            external = root / "external"
+            subprocess.run(["git", "init", "-q", "--bare", remote], check=True)
+            subprocess.run(
+                ["git", "remote", "add", "origin", str(remote)], cwd=repo, check=True
+            )
+            subprocess.run(
+                ["git", "push", "-qu", "origin", "main"], cwd=repo, check=True
+            )
+            subprocess.run(
+                ["git", "clone", "-q", "-b", "main", str(remote), str(external)],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "config", "user.email", "external@example.com"],
+                cwd=external,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "config", "user.name", "External"], cwd=external, check=True
+            )
+            with patch.dict("os.environ", {"DEVMCP_CONFIG_DIR": str(root / "config")}):
+                runtime = StateManagedRuntime(workspace=repo, sandbox_backend="unsafe")
+                try:
+                    runtime.local_state_snapshot({})
+                    (repo / "reviewed.txt").write_text("reviewed\n", encoding="utf-8")
+                    with self.assertRaises(ToolFailure) as drift:
+                        runtime.git_create_branch({"name": "blocked"})
+                    evidence = drift.exception.details["reconciliation_evidence"]
+
+                    (external / "remote.txt").write_text("remote\n", encoding="utf-8")
+                    subprocess.run(
+                        ["git", "add", "remote.txt"], cwd=external, check=True
+                    )
+                    subprocess.run(
+                        ["git", "commit", "-qm", "advance"], cwd=external, check=True
+                    )
+                    subprocess.run(
+                        ["git", "push", "-q", "origin", "main"],
+                        cwd=external,
+                        check=True,
+                    )
+                    subprocess.run(
+                        ["git", "fetch", "-q", "origin"], cwd=repo, check=True
+                    )
+
+                    reconciled = runtime.continuation_checkpoint(
+                        {"action": "write", "payload": evidence}
+                    )
+                    self.assertEqual(
+                        reconciled["state_reconciliation"]["status"], "reconciled"
+                    )
+                    self.assertIsNone(inspect_writer_lease(repo, "main"))
+                finally:
+                    runtime.close()
 
     def test_sensitive_untracked_name_is_not_persisted(self) -> None:
         with TemporaryDirectory() as tmp:
