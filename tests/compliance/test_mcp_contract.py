@@ -63,6 +63,28 @@ class MCPContractTests(ComplianceTestCase):
         self.assertEqual(result.get("status"), "success", result)
         self.assertTrue(command_succeeded(result), result)
 
+    def test_missing_executable_returns_normal_http_mcp_tool_error(self) -> None:
+        missing_executable = str(self.workspace.root / "missing-devmcp-executable")
+        cases = (
+            (
+                "exec_argv",
+                {
+                    "argv": [missing_executable],
+                    "transaction_mode": "discard",
+                },
+            ),
+            ("exec_command", {"argv": [missing_executable]}),
+        )
+        for tool_name, arguments in cases:
+            with self.subTest(tool=tool_name):
+                result = self.client.call_tool(tool_name, arguments)
+                self.assertIs(result.get("isError"), True, result)
+                payload = result.get("structuredContent")
+                self.assertIsInstance(payload, dict)
+                self.assertEqual(payload.get("exit_code"), 127)
+                self.assertIsInstance(payload.get("executor_backend"), str)
+                self.assertEqual(payload.get("executor_backend"), "unsafe_host")
+
     def test_initialize_succeeds_and_tools_list_is_available(self) -> None:
         tools = self.client.list_tools()
         self.assertIsInstance(tools, list)
