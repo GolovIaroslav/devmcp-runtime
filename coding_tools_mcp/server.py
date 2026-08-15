@@ -169,6 +169,10 @@ DESTRUCTIVE_RE = re.compile(
 )
 MAX_HTTP_REQUEST_BYTES = 1_048_576
 EXEC_PREVIEW_BYTES = 4096
+HTTP_INITIAL_EXEC_MAX_WAIT_MS = 10_000
+HTTP_WRITE_STDIN_MAX_WAIT_MS = 60_000
+JOB_STATUS_MAX_WAIT_MS = 60_000
+JOB_STATUS_NEXT_WAIT_MS = 60_000
 MAX_ACTIVE_EXEC_SESSIONS = 16
 MAX_RETAINED_OUTPUT_SESSIONS = 32
 COMPLETED_SESSION_TTL_SECONDS = 300
@@ -821,14 +825,17 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         error_status="failed",
     ),
     "job_status": ToolSpec(
-        title="Job status", description="Job status.", read_only=True, idempotent=True
+        title="Job status",
+        description="Check a job without consuming output; wait_ms may wait for process completion and ignores intermediate stdout/stderr.",
+        read_only=True,
+        idempotent=True,
     ),
     "read_output": ToolSpec(
         title="Read output", description="Read output.", read_only=True, idempotent=True
     ),
     "write_stdin": ToolSpec(
         title="Write stdin",
-        description="Write input to a running process.",
+        description="Write input to an interactive/running process and optionally wait briefly for output or exit; use job_status for non-interactive polling.",
         destructive=True,
     ),
     "kill_session": ToolSpec(
@@ -1592,6 +1599,7 @@ class Runtime:
         self.logical_context_registry = logical_context_registry
         self.shared_job_registry = shared_job_registry
         self.persist_project_selection = persist_project_selection
+        self.transport = transport
         self.logical_context_id: str | None = None
         persisted_project = self._load_persisted_project_path()
         if persisted_project is not None:
@@ -4729,7 +4737,14 @@ class Runtime:
         finally:
             if not tty:
                 session.close_stdin()
-        initial_wait = max(0, min(yield_ms, 300000)) / 1000.0
+        initial_wait_ms = max(0, min(yield_ms, 300000))
+        if (
+            self.transport == "http"
+            and not transaction_apply
+            and not bool(args.get("_force_foreground_wait", False))
+        ):
+            initial_wait_ms = min(initial_wait_ms, HTTP_INITIAL_EXEC_MAX_WAIT_MS)
+        initial_wait = initial_wait_ms / 1000.0
 
         def finish() -> dict[str, Any]:
             # snapshot_since_cursor owns the status mapping (running/exited/
@@ -5448,16 +5463,24 @@ class Runtime:
         if terminal:
             self._complete_session(session)
         if payload.get("status") == "running":
-            next_arguments: dict[str, Any] = {
-                "session_id": session.session_id,
-                "chars": "",
-                "yield_time_ms": 10000,
-            }
+            if session.pty_master_fd is None:
+                next_arguments: dict[str, Any] = {
+                    "session_id": session.session_id,
+                    "wait_ms": JOB_STATUS_NEXT_WAIT_MS,
+                }
+                next_tool = "job_status"
+            else:
+                next_arguments = {
+                    "session_id": session.session_id,
+                    "chars": "",
+                    "yield_time_ms": 10000,
+                }
+                next_tool = "write_stdin"
             context_id = self._active_context_id()
             if context_id is not None:
                 next_arguments["context_id"] = context_id
             payload["next_action"] = {
-                "tool": "write_stdin",
+                "tool": next_tool,
                 "arguments": next_arguments,
             }
         output_refs = {
@@ -5705,7 +5728,10 @@ class Runtime:
             return self._format_session_output(session, payload, args)
         if chars:
             session.write_input(chars.encode("utf-8"))
-        wait_until = time.time() + (int(args.get("yield_time_ms", 10000)) / 1000.0)
+        yield_time_ms = int(args.get("yield_time_ms", 10000))
+        if self.transport == "http":
+            yield_time_ms = min(yield_time_ms, HTTP_WRITE_STDIN_MAX_WAIT_MS)
+        wait_until = time.time() + (yield_time_ms / 1000.0)
         first_output_at: float | None = None
         while time.time() < wait_until and session.process.poll() is None:
             time.sleep(0.02)
@@ -8155,35 +8181,43 @@ class Runtime:
     def job_status(self, args: dict[str, Any]) -> dict[str, Any]:
         session_id = args.get("session_id", "")
         shared = self._shared_job_session(str(session_id))
-        if shared is not None:
-            shared.refresh_status()
-            poll = shared.process.poll()
-            status_str = (
-                "running" if poll is None else ("success" if poll == 0 else "failed")
-            )
-            return {
-                "status": status_str,
-                "session_id": session_id,
-                "exit_code": poll,
-                "command_success": None if poll is None else poll == 0,
-            }
-        with self.sessions_lock:
-            session = self.sessions.get(session_id) or self.output_sessions.get(
-                session_id
-            )
+        session = shared
+        if session is None:
+            with self.sessions_lock:
+                session = self.sessions.get(session_id) or self.output_sessions.get(
+                    session_id
+                )
             if session is None:
                 return {"status": "not_found", "session_id": session_id}
-            session.refresh_status()
-            poll = session.process.poll()
-            status_str = (
-                "running" if poll is None else ("success" if poll == 0 else "failed")
-            )
-            return {
-                "status": status_str,
+        wait_ms = max(0, min(int(args.get("wait_ms", 0)), JOB_STATUS_MAX_WAIT_MS))
+        if wait_ms > 0 and session.process.poll() is None:
+            try:
+                session.process.wait(timeout=wait_ms / 1000.0)
+            except subprocess.TimeoutExpired:
+                pass
+        session.refresh_status()
+        poll = session.process.poll()
+        status_str = (
+            "running" if poll is None else ("success" if poll == 0 else "failed")
+        )
+        result: dict[str, Any] = {
+            "status": status_str,
+            "session_id": session_id,
+            "exit_code": poll,
+            "command_success": None if poll is None else poll == 0,
+        }
+        if poll is None:
+            next_arguments: dict[str, Any] = {
                 "session_id": session_id,
-                "exit_code": poll,
-                "command_success": None if poll is None else poll == 0,
+                "wait_ms": JOB_STATUS_NEXT_WAIT_MS,
             }
+            if context_id := self._active_context_id():
+                next_arguments["context_id"] = context_id
+            result["next_action"] = {
+                "tool": "job_status",
+                "arguments": next_arguments,
+            }
+        return result
 
     def job_output(self, args: dict[str, Any]) -> dict[str, Any]:
         args["output_ref"] = "session:" + args.get("session_id", "") + ":stdout"
@@ -10010,6 +10044,12 @@ def input_schemas() -> dict[str, dict[str, Any]]:
         "job_status": object_schema(
             {
                 "session_id": {**string, "minLength": 1},
+                "wait_ms": {
+                    **integer,
+                    "minimum": 0,
+                    "maximum": JOB_STATUS_MAX_WAIT_MS,
+                    "default": 0,
+                },
             },
             ["session_id"],
         ),

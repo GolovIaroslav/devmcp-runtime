@@ -1818,7 +1818,11 @@ Maven home: /usr/share/maven
                 }
             )
             self.assertEqual(running.get("status"), "running")
-            self.assertEqual(running.get("next_action", {}).get("tool"), "write_stdin")
+            self.assertEqual(running.get("next_action", {}).get("tool"), "job_status")
+            self.assertEqual(
+                running.get("next_action", {}).get("arguments", {}).get("wait_ms"),
+                server_module.JOB_STATUS_NEXT_WAIT_MS,
+            )
             runtime.kill_session(
                 {"session_id": running["session_id"], "signal": "KILL"}
             )
@@ -1836,6 +1840,148 @@ Maven home: /usr/share/maven
                 truncated.get("next_action", {}).get("tool"), "read_output"
             )
             self.assertIn("output_ref", truncated)
+
+    def test_http_exec_caps_large_initial_wait_and_preserves_zero_yield(self) -> None:
+        with TemporaryDirectory() as tmp:
+            runtime = Runtime(Path(tmp), permission_mode="trusted", transport="http")
+            try:
+                with patch.object(server_module, "HTTP_INITIAL_EXEC_MAX_WAIT_MS", 40):
+                    started_at = time.monotonic()
+                    running = runtime.exec_command(
+                        {
+                            "cmd": "sleep 0.3",
+                            "timeout_ms": 2000,
+                            "yield_time_ms": 300000,
+                        }
+                    )
+                    elapsed = time.monotonic() - started_at
+                self.assertEqual(running["status"], "running", running)
+                self.assertLess(elapsed, 0.2)
+                runtime.kill_session(
+                    {"session_id": running["session_id"], "signal": "KILL"}
+                )
+
+                started_at = time.monotonic()
+                immediate = runtime.exec_command(
+                    {
+                        "cmd": "sleep 0.3",
+                        "timeout_ms": 2000,
+                        "yield_time_ms": 0,
+                    }
+                )
+                self.assertEqual(immediate["status"], "running", immediate)
+                self.assertLess(time.monotonic() - started_at, 0.15)
+                runtime.kill_session(
+                    {"session_id": immediate["session_id"], "signal": "KILL"}
+                )
+            finally:
+                runtime.close()
+
+    def test_job_status_waits_for_completion_or_expiry_without_output_wakeup(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as tmp:
+            runtime = Runtime(Path(tmp), permission_mode="trusted")
+            try:
+                immediate_job = runtime.exec_command(
+                    {"cmd": "sleep 0.3", "timeout_ms": 2000, "yield_time_ms": 0}
+                )
+                started_at = time.monotonic()
+                immediate = runtime.job_status(
+                    {"session_id": immediate_job["session_id"], "wait_ms": 0}
+                )
+                self.assertEqual(immediate["status"], "running", immediate)
+                self.assertLess(time.monotonic() - started_at, 0.05)
+                runtime.kill_session(
+                    {"session_id": immediate_job["session_id"], "signal": "KILL"}
+                )
+
+                completes = runtime.exec_command(
+                    {"cmd": "sleep 0.08", "timeout_ms": 2000, "yield_time_ms": 0}
+                )
+                completed = runtime.job_status(
+                    {"session_id": completes["session_id"], "wait_ms": 1000}
+                )
+                self.assertEqual(completed["status"], "success", completed)
+                self.assertTrue(completed["command_success"])
+
+                expires = runtime.exec_command(
+                    {"cmd": "sleep 0.3", "timeout_ms": 2000, "yield_time_ms": 0}
+                )
+                started_at = time.monotonic()
+                running = runtime.job_status(
+                    {"session_id": expires["session_id"], "wait_ms": 50}
+                )
+                elapsed = time.monotonic() - started_at
+                self.assertEqual(running["status"], "running", running)
+                self.assertGreaterEqual(elapsed, 0.04)
+                self.assertLess(elapsed, 0.2)
+                runtime.kill_session(
+                    {"session_id": expires["session_id"], "signal": "KILL"}
+                )
+
+                chatty = runtime.exec_command(
+                    {
+                        "cmd": (
+                            f'{sys.executable} -c "import sys,time; '
+                            "[(print(i, flush=True), time.sleep(0.02)) for i in range(5)]; "
+                            'time.sleep(0.3)"'
+                        ),
+                        "timeout_ms": 2000,
+                        "yield_time_ms": 0,
+                    }
+                )
+                started_at = time.monotonic()
+                still_running = runtime.job_status(
+                    {"session_id": chatty["session_id"], "wait_ms": 120}
+                )
+                elapsed = time.monotonic() - started_at
+                self.assertEqual(still_running["status"], "running", still_running)
+                self.assertGreaterEqual(elapsed, 0.1)
+                runtime.kill_session(
+                    {"session_id": chatty["session_id"], "signal": "KILL"}
+                )
+            finally:
+                runtime.close()
+
+    def test_http_write_stdin_caps_wait_without_breaking_input(self) -> None:
+        with TemporaryDirectory() as tmp:
+            runtime = Runtime(Path(tmp), permission_mode="trusted", transport="http")
+            try:
+                running = runtime.exec_command(
+                    {
+                        "cmd": "cat >/dev/null; sleep 0.3",
+                        "tty": True,
+                        "timeout_ms": 2000,
+                        "yield_time_ms": 0,
+                    }
+                )
+                self.assertEqual(running["next_action"]["tool"], "write_stdin")
+                with patch.object(server_module, "HTTP_WRITE_STDIN_MAX_WAIT_MS", 40):
+                    started_at = time.monotonic()
+                    polled = runtime.write_stdin(
+                        {
+                            "session_id": running["session_id"],
+                            "chars": "x\n",
+                            "yield_time_ms": 300000,
+                        }
+                    )
+                    elapsed = time.monotonic() - started_at
+                self.assertLess(elapsed, 0.2)
+                self.assertIn(polled["status"], {"running", "success"})
+                runtime.kill_session(
+                    {"session_id": running["session_id"], "signal": "KILL"}
+                )
+            finally:
+                runtime.close()
+
+    def test_job_status_schema_bounds_wait(self) -> None:
+        wait_schema = server_module.input_schemas()["job_status"]["properties"][
+            "wait_ms"
+        ]
+        self.assertEqual(wait_schema["minimum"], 0)
+        self.assertEqual(wait_schema["maximum"], 60000)
+        self.assertEqual(wait_schema["default"], 0)
 
     def test_read_output_pages_streams_independently(self) -> None:
         with TemporaryDirectory() as tmp:
