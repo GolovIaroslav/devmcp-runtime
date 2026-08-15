@@ -4678,7 +4678,9 @@ class Runtime:
                 "stderr_truncated": False,
                 "ok": False,
                 "elapsed_ms": int((time.monotonic() - start_time) * 1000),
-                "executor_backend": self.sandbox_backend,
+                "executor_backend": str(
+                    args.get("_selected_executor", self.sandbox_backend.name)
+                ),
                 "execution_mode": self.effective_access,
                 "transaction": {"mode": "direct", "status": "not_transactional"},
                 "command_success": False,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import builtins
+import json
 import os
 import signal
 import shutil
@@ -18,6 +19,7 @@ from unittest.mock import patch
 from coding_tools_mcp import server as server_module
 from coding_tools_mcp import processes as processes_module
 from coding_tools_mcp.patching import AtomicPatchCommitter, FileBaseline, StagedFile
+from coding_tools_mcp.protocol import dispatch_rpc
 from coding_tools_mcp.sandbox import ExecutionSandbox, SandboxBackend
 from coding_tools_mcp.server import (
     LANDLOCK_ACCESS_FS_IOCTL_DEV,
@@ -31,6 +33,7 @@ from coding_tools_mcp.server import (
     exec_output_diagnostics,
     guard_allow_roots,
     identify_image,
+    json_response_payload,
     permission_failure_diagnostics,
     runtime_parent_root,
 )
@@ -1597,6 +1600,51 @@ Maven home: /usr/share/maven
             self.assertEqual(
                 result.get("structuredContent", {}).get("status"), "failed"
             )
+
+    def test_missing_executable_exec_results_cross_strict_json_boundary(self) -> None:
+        with TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            missing_executable = str(workspace / "missing-devmcp-executable")
+            runtime = Runtime(
+                workspace, permission_mode="trusted", sandbox_backend="unsafe"
+            )
+            runtime.initialized = True
+            try:
+                cases = (
+                    (
+                        "exec_argv",
+                        {
+                            "argv": [missing_executable],
+                            "transaction_mode": "discard",
+                        },
+                    ),
+                    ("exec_command", {"argv": [missing_executable]}),
+                )
+                for tool_name, arguments in cases:
+                    with self.subTest(tool=tool_name):
+                        response = dispatch_rpc(
+                            runtime,
+                            {
+                                "jsonrpc": "2.0",
+                                "id": 1,
+                                "method": "tools/call",
+                                "params": {
+                                    "name": tool_name,
+                                    "arguments": arguments,
+                                },
+                            },
+                        )
+                        self.assertIsInstance(response, dict)
+                        encoded = json_response_payload(response)
+                        decoded = json.loads(encoded)
+                        result = decoded["result"]
+                        self.assertIs(result.get("isError"), True)
+                        payload = result["structuredContent"]
+                        self.assertEqual(payload.get("exit_code"), 127)
+                        self.assertIsInstance(payload.get("executor_backend"), str)
+                        self.assertEqual(payload.get("executor_backend"), "unsafe_host")
+            finally:
+                runtime.close()
 
     def test_workspace_write_exec_uses_authoritative_tree_without_snapshot(
         self,
