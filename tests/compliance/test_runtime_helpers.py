@@ -1460,7 +1460,8 @@ Maven home: /usr/share/maven
             )
             model_text = self.agent_text(result)
             self.assertIn("Status: running", model_text)
-            self.assertIn('write_stdin(session_id="', model_text)
+            self.assertIn('job_status(session_id="', model_text)
+            self.assertIn("wait_ms=60000", model_text)
 
     def test_read_file_truncation_is_visible_with_continuation(self) -> None:
         with TemporaryDirectory() as tmp:
