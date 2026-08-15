@@ -43,7 +43,7 @@ class StateManagedRuntime(StateMutationMixin, BuildIdentityMixin, core.Runtime):
     ) -> dict[str, Any] | None:
         authority_owner = owner or self._state_owner()
         existing = read_authoritative_state_checkpoint(
-            self.workspace.root, authority_owner
+            self.canonical_project_root, authority_owner
         )
         if existing is not None:
             return existing
@@ -52,7 +52,7 @@ class StateManagedRuntime(StateMutationMixin, BuildIdentityMixin, core.Runtime):
         if not branch:
             return None
         return write_state_checkpoint(
-            self.workspace.root,
+            self.canonical_project_root,
             branch,
             snapshot=actual,
             phase="baseline",
@@ -160,7 +160,9 @@ class StateManagedRuntime(StateMutationMixin, BuildIdentityMixin, core.Runtime):
 
     def _state_branch(self) -> str:
         branch = git_text(
-            self.workspace.root, ["branch", "--show-current"], env=self._git_env()
+            self.effective_workspace_root,
+            ["branch", "--show-current"],
+            env=self._git_env(),
         )
         if not branch:
             raise ToolFailure(
@@ -185,11 +187,17 @@ class StateManagedRuntime(StateMutationMixin, BuildIdentityMixin, core.Runtime):
         remote_head: str | None = None,
     ) -> dict[str, Any]:
         branch = git_text(
-            self.workspace.root, ["branch", "--show-current"], env=self._git_env()
+            self.effective_workspace_root,
+            ["branch", "--show-current"],
+            env=self._git_env(),
         )
-        lease = inspect_writer_lease(self.workspace.root, branch) if branch else None
+        lease = (
+            inspect_writer_lease(self.canonical_project_root, branch)
+            if branch
+            else None
+        )
         return collect_state_snapshot(
-            self.workspace.root,
+            self.effective_workspace_root,
             project_id=str(self.active_project.get("id") or "") or None,
             installed_service_version=core.__version__,
             installed_service_git_sha=self._installed_runtime_sha(),
@@ -206,7 +214,7 @@ class StateManagedRuntime(StateMutationMixin, BuildIdentityMixin, core.Runtime):
         self, branches: list[str], checkpoint_id: str | None
     ) -> None:
         acquire_writer_leases(
-            self.workspace.root,
+            self.canonical_project_root,
             branches,
             owner=self._state_owner(),
             logical_task=self._state_task(),
@@ -215,7 +223,7 @@ class StateManagedRuntime(StateMutationMixin, BuildIdentityMixin, core.Runtime):
 
     def _release_state_owner_leases(self) -> list[str]:
         return release_owner_leases(
-            self.workspace.root,
+            self.canonical_project_root,
             owner=self._state_owner(),
         )
 
@@ -225,7 +233,7 @@ class StateManagedRuntime(StateMutationMixin, BuildIdentityMixin, core.Runtime):
         branch = self._state_branch()
         authority_owner = self._state_owner()
         expected_record = read_authoritative_state_checkpoint(
-            self.workspace.root, authority_owner
+            self.canonical_project_root, authority_owner
         )
         if expected_record is None:
             expected_record = self._ensure_state_baseline(owner=authority_owner)
@@ -270,7 +278,7 @@ class StateManagedRuntime(StateMutationMixin, BuildIdentityMixin, core.Runtime):
                         },
                     )
             write_state_checkpoint(
-                self.workspace.root,
+                self.canonical_project_root,
                 branch,
                 snapshot=actual,
                 phase="before",
@@ -304,7 +312,7 @@ class StateManagedRuntime(StateMutationMixin, BuildIdentityMixin, core.Runtime):
         )
         current_branch = str(actual.get("branch") or branch)
         return write_state_checkpoint(
-            self.workspace.root,
+            self.canonical_project_root,
             current_branch,
             snapshot=actual,
             phase="after",
@@ -369,7 +377,7 @@ class StateManagedRuntime(StateMutationMixin, BuildIdentityMixin, core.Runtime):
         actual_branch = self._state_branch()
         authority_owner = self._state_owner()
         previous = read_authoritative_state_checkpoint(
-            self.workspace.root, authority_owner
+            self.canonical_project_root, authority_owner
         )
         self._acquire_state_leases(
             [actual_branch],
@@ -417,7 +425,7 @@ class StateManagedRuntime(StateMutationMixin, BuildIdentityMixin, core.Runtime):
                 return result
 
             checkpoint = write_state_checkpoint(
-                self.workspace.root,
+                self.canonical_project_root,
                 actual_branch,
                 snapshot=actual,
                 phase="after",

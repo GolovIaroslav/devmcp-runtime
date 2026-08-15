@@ -21,7 +21,8 @@ DEFAULT_CAPABILITY_LEASE_TTL_SECONDS = 15 * 60
 @dataclass
 class LogicalContextState:
     context_id: str
-    workspace: Path
+    canonical_project_root: Path
+    effective_workspace_root: Path
     default_cwd: Path
     created_at: float = field(default_factory=time.monotonic)
     last_seen: float = field(default_factory=time.monotonic)
@@ -37,7 +38,12 @@ class LogicalContextRegistry:
         self._contexts: dict[str, LogicalContextState] = {}
         self._lock = threading.Lock()
 
-    def create(self, workspace: Path, default_cwd: Path) -> LogicalContextState:
+    def create(
+        self,
+        canonical_project_root: Path,
+        effective_workspace_root: Path,
+        default_cwd: Path,
+    ) -> LogicalContextState:
         self.prune()
         with self._lock:
             if len(self._contexts) >= MAX_LOGICAL_CONTEXTS:
@@ -56,7 +62,8 @@ class LogicalContextRegistry:
             context_id = "ctx_" + secrets.token_urlsafe(24)
             state = LogicalContextState(
                 context_id=context_id,
-                workspace=workspace.resolve(strict=True),
+                canonical_project_root=canonical_project_root.resolve(strict=True),
+                effective_workspace_root=effective_workspace_root.resolve(strict=True),
                 default_cwd=default_cwd.resolve(strict=True),
             )
             self._contexts[context_id] = state
@@ -72,15 +79,22 @@ class LogicalContextRegistry:
             return state
 
     def update(
-        self, state: LogicalContextState, *, workspace: Path, default_cwd: Path
+        self,
+        state: LogicalContextState,
+        *,
+        canonical_project_root: Path,
+        effective_workspace_root: Path,
+        default_cwd: Path,
     ) -> None:
-        workspace = workspace.resolve(strict=True)
+        canonical_project_root = canonical_project_root.resolve(strict=True)
+        effective_workspace_root = effective_workspace_root.resolve(strict=True)
         default_cwd = default_cwd.resolve(strict=True)
         with self._lock:
             current = self._contexts.get(state.context_id)
             if current is not state:
                 return
-            state.workspace = workspace
+            state.canonical_project_root = canonical_project_root
+            state.effective_workspace_root = effective_workspace_root
             state.default_cwd = default_cwd
             state.last_seen = time.monotonic()
 
