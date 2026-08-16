@@ -82,7 +82,11 @@ from .protocol import (
     response_id,
     validate_rpc_envelope,
 )
-from .managed_worktree import create_managed_worktree
+from .managed_worktree import (
+    cleanup_managed_worktree,
+    create_managed_worktree,
+    recover_managed_worktrees,
+)
 from .project_context import ProjectContext, load_project_context
 from .session_state import (
     LogicalContextRegistry,
@@ -11164,6 +11168,7 @@ class RuntimeHTTPServer(http.server.ThreadingHTTPServer):
     def server_close(self) -> None:
         self.sessions.close()
         self.shared_job_registry.close()
+        self.logical_context_registry.close()
         self.control_runtime.close()
         super().server_close()
 
@@ -11426,6 +11431,36 @@ def run_http(args: argparse.Namespace) -> int:
     except (ToolFailure, ValueError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
+
+    def cleanup_context_worktree(state: LogicalContextState) -> None:
+        if state.effective_workspace_root == state.canonical_project_root:
+            return
+        cleanup_managed_worktree(
+            state.canonical_project_root, state.effective_workspace_root
+        )
+
+    logical_context_registry.set_expire_callback(cleanup_context_worktree)
+    recovery_totals = {
+        "found": 0,
+        "removed_clean": 0,
+        "preserved_dirty": 0,
+        "preserved_error": 0,
+    }
+    discover_projects = getattr(runtime, "_discover_projects", None)
+    discovered_projects = discover_projects() if callable(discover_projects) else []
+    for project in discovered_projects:
+        project_path = Path(str(project.get("path", "")))
+        if not project_path.is_dir():
+            continue
+        recovered = recover_managed_worktrees(project_path)
+        for key in recovery_totals:
+            recovery_totals[key] += int(recovered.get(key, 0))
+    if recovery_totals["found"]:
+        print(
+            "Managed worktree recovery: "
+            + ", ".join(f"{key}={value}" for key, value in recovery_totals.items()),
+            file=sys.stderr,
+        )
 
     def runtime_factory() -> Runtime:
         return build_runtime(

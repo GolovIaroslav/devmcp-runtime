@@ -5,7 +5,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .processes import HARD_KILL_SIGNAL, ExecSession, terminate_process_group
 
@@ -34,10 +34,31 @@ class LogicalContextState:
 class LogicalContextRegistry:
     """Server-owned logical contexts that survive individual MCP HTTP sessions."""
 
-    def __init__(self, *, ttl_seconds: int = LOGICAL_CONTEXT_TTL_SECONDS) -> None:
+    def __init__(
+        self,
+        *,
+        ttl_seconds: int = LOGICAL_CONTEXT_TTL_SECONDS,
+        on_expire: Callable[[LogicalContextState], None] | None = None,
+    ) -> None:
         self.ttl_seconds = ttl_seconds
+        self._on_expire = on_expire
         self._contexts: dict[str, LogicalContextState] = {}
         self._lock = threading.Lock()
+
+    def set_expire_callback(
+        self, callback: Callable[[LogicalContextState], None] | None
+    ) -> None:
+        self._on_expire = callback
+
+    def _notify_expired(self, states: list[LogicalContextState]) -> None:
+        callback = self._on_expire
+        if callback is None:
+            return
+        for state in states:
+            try:
+                callback(state)
+            except Exception:
+                pass
 
     def create(
         self,
@@ -46,6 +67,7 @@ class LogicalContextRegistry:
         default_cwd: Path,
     ) -> LogicalContextState:
         self.prune()
+        evicted: LogicalContextState | None = None
         with self._lock:
             if len(self._contexts) >= MAX_LOGICAL_CONTEXTS:
                 evictable = [
@@ -59,7 +81,7 @@ class LogicalContextRegistry:
                     evictable,
                     key=lambda item: self._contexts[item].last_seen,
                 )
-                self._contexts.pop(oldest_id, None)
+                evicted = self._contexts.pop(oldest_id, None)
             context_id = "ctx_" + secrets.token_urlsafe(24)
             state = LogicalContextState(
                 context_id=context_id,
@@ -68,7 +90,9 @@ class LogicalContextRegistry:
                 default_cwd=default_cwd.resolve(strict=True),
             )
             self._contexts[context_id] = state
-            return state
+        if evicted is not None:
+            self._notify_expired([evicted])
+        return state
 
     def get(self, context_id: str) -> LogicalContextState | None:
         self.prune()
@@ -90,16 +114,27 @@ class LogicalContextRegistry:
         canonical_project_root = canonical_project_root.resolve(strict=True)
         effective_workspace_root = effective_workspace_root.resolve(strict=True)
         default_cwd = default_cwd.resolve(strict=True)
+        abandoned: LogicalContextState | None = None
         with self._lock:
             current = self._contexts.get(state.context_id)
             if current is not state:
                 return
             if state.canonical_project_root != canonical_project_root:
+                if state.effective_workspace_root != state.canonical_project_root:
+                    abandoned = LogicalContextState(
+                        context_id=state.context_id,
+                        canonical_project_root=state.canonical_project_root,
+                        effective_workspace_root=state.effective_workspace_root,
+                        default_cwd=state.default_cwd,
+                        mutation_workspace_claimed=True,
+                    )
                 state.mutation_workspace_claimed = False
             state.canonical_project_root = canonical_project_root
             state.effective_workspace_root = effective_workspace_root
             state.default_cwd = default_cwd
             state.last_seen = time.monotonic()
+        if abandoned is not None:
+            self._notify_expired([abandoned])
 
     def claim_mutation_workspace(self, state: LogicalContextState) -> bool:
         """Claim mutation ownership and report whether this context must isolate."""
@@ -156,14 +191,30 @@ class LogicalContextRegistry:
                 for context_id, state in self._contexts.items()
                 if state.leases == 0 and state.last_seen < cutoff
             ]
-            for context_id in expired:
-                self._contexts.pop(context_id, None)
+            states = [self._contexts.pop(context_id) for context_id in expired]
+        self._notify_expired(states)
+
+    def close(self) -> None:
+        with self._lock:
+            states = list(self._contexts.values())
+            self._contexts.clear()
+        self._notify_expired(states)
 
     def stats(self) -> dict[str, int]:
         self.prune()
         with self._lock:
             return {
                 "total": len(self._contexts),
+                "claimed": sum(
+                    1
+                    for state in self._contexts.values()
+                    if state.mutation_workspace_claimed
+                ),
+                "isolated": sum(
+                    1
+                    for state in self._contexts.values()
+                    if state.effective_workspace_root != state.canonical_project_root
+                ),
                 "capacity": MAX_LOGICAL_CONTEXTS,
                 "ttl_seconds": self.ttl_seconds,
             }

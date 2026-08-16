@@ -8,7 +8,11 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from coding_tools_mcp.managed_worktree import create_managed_worktree
+from coding_tools_mcp.managed_worktree import (
+    cleanup_managed_worktree,
+    create_managed_worktree,
+    recover_managed_worktrees,
+)
 from coding_tools_mcp.processes import ExecSession
 from coding_tools_mcp.session_state import LogicalContextRegistry, SharedJobRegistry
 
@@ -90,6 +94,27 @@ class SessionStateRegistryTests(unittest.TestCase):
             )
             self.assertFalse(state.mutation_workspace_claimed)
 
+    def test_project_switch_reports_abandoned_isolated_workspace(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            isolated = root / "isolated"
+            other = root / "other"
+            isolated.mkdir()
+            other.mkdir()
+            expired: list[Path] = []
+            registry = LogicalContextRegistry(
+                on_expire=lambda state: expired.append(state.effective_workspace_root)
+            )
+            state = registry.create(root, isolated, isolated)
+            state.mutation_workspace_claimed = True
+            registry.update(
+                state,
+                canonical_project_root=other,
+                effective_workspace_root=other,
+                default_cwd=other,
+            )
+            self.assertEqual(expired, [isolated.resolve()])
+
     def test_managed_worktree_is_linked_and_uses_private_generated_branch(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -141,6 +166,132 @@ class SessionStateRegistryTests(unittest.TestCase):
             ).stdout.strip()
             self.assertEqual(current_branch, branch)
             self.assertTrue(branch.startswith("devmcp/context-"))
+
+    def test_clean_managed_worktree_is_removed_but_branch_is_preserved(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            canonical = root / "repo"
+            storage = root / "state"
+            canonical.mkdir()
+            subprocess.run(
+                ["git", "init", "-b", "main", str(canonical)],
+                check=True,
+                stdout=subprocess.DEVNULL,
+            )
+            subprocess.run(
+                ["git", "-C", str(canonical), "config", "user.name", "DevMCP Test"],
+                check=True,
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(canonical),
+                    "config",
+                    "user.email",
+                    "devmcp@example.invalid",
+                ],
+                check=True,
+            )
+            (canonical / "tracked.txt").write_text("base\n")
+            subprocess.run(["git", "-C", str(canonical), "add", "."], check=True)
+            subprocess.run(
+                ["git", "-C", str(canonical), "commit", "-m", "base"],
+                check=True,
+                stdout=subprocess.DEVNULL,
+            )
+            with patch(
+                "coding_tools_mcp.managed_worktree.state_root", return_value=storage
+            ):
+                worktree, branch = create_managed_worktree(
+                    canonical, "ctx_clean_123456789"
+                )
+                (worktree / "tracked.txt").write_text("committed\n")
+                subprocess.run(["git", "-C", str(worktree), "add", "."], check=True)
+                subprocess.run(
+                    ["git", "-C", str(worktree), "commit", "-m", "saved"],
+                    check=True,
+                    stdout=subprocess.DEVNULL,
+                )
+                outcome = cleanup_managed_worktree(canonical, worktree)
+            self.assertEqual(outcome, "removed_clean")
+            self.assertFalse(worktree.exists())
+            branch_check = subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(canonical),
+                    "show-ref",
+                    "--verify",
+                    f"refs/heads/{branch}",
+                ],
+                check=False,
+            )
+            self.assertEqual(branch_check.returncode, 0)
+
+    def test_dirty_managed_worktree_is_preserved_during_recovery(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            canonical = root / "repo"
+            storage = root / "state"
+            canonical.mkdir()
+            subprocess.run(
+                ["git", "init", "-b", "main", str(canonical)],
+                check=True,
+                stdout=subprocess.DEVNULL,
+            )
+            subprocess.run(
+                ["git", "-C", str(canonical), "config", "user.name", "DevMCP Test"],
+                check=True,
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(canonical),
+                    "config",
+                    "user.email",
+                    "devmcp@example.invalid",
+                ],
+                check=True,
+            )
+            (canonical / "tracked.txt").write_text("base\n")
+            subprocess.run(["git", "-C", str(canonical), "add", "."], check=True)
+            subprocess.run(
+                ["git", "-C", str(canonical), "commit", "-m", "base"],
+                check=True,
+                stdout=subprocess.DEVNULL,
+            )
+            with patch(
+                "coding_tools_mcp.managed_worktree.state_root", return_value=storage
+            ):
+                worktree, _branch = create_managed_worktree(
+                    canonical, "ctx_dirty_123456789"
+                )
+                (worktree / "tracked.txt").write_text("unsaved\n")
+                recovered = recover_managed_worktrees(canonical)
+            self.assertEqual(recovered["found"], 1)
+            self.assertEqual(recovered["preserved_dirty"], 1)
+            self.assertTrue(worktree.is_dir())
+            self.assertEqual((worktree / "tracked.txt").read_text(), "unsaved\n")
+
+    def test_context_expiration_and_close_invoke_cleanup_callback(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            isolated = root / "isolated"
+            isolated.mkdir()
+            expired: list[Path] = []
+            registry = LogicalContextRegistry(
+                ttl_seconds=1,
+                on_expire=lambda state: expired.append(state.effective_workspace_root),
+            )
+            state = registry.create(root, isolated, isolated)
+            state.last_seen -= 10
+            registry.prune()
+            self.assertEqual(expired, [isolated.resolve()])
+            second = registry.create(root, isolated, isolated)
+            registry.close()
+            self.assertEqual(expired[-1], second.effective_workspace_root)
 
     def test_shared_job_pins_context_and_checks_owner(self) -> None:
         with TemporaryDirectory() as tmp:
