@@ -3260,6 +3260,34 @@ class Runtime:
             }
         return result
 
+    def _is_listing_ignored_path(
+        self,
+        path: Path,
+        *,
+        listing_root: Path,
+        include_hidden: bool,
+        include_ignored: bool,
+        git_ignored: set[str] | None = None,
+    ) -> bool:
+        if is_relative_to(listing_root, self.workspace.root):
+            return self.workspace.is_ignored_path(
+                path,
+                include_hidden=include_hidden,
+                include_ignored=include_ignored,
+                git_ignored=git_ignored,
+            )
+        rel = path.relative_to(listing_root)
+        parts = rel.parts
+        if not include_hidden and any(
+            part.startswith(".") for part in parts if part not in {".", ""}
+        ):
+            return True
+        if not include_ignored and any(
+            part in DEFAULT_EXCLUDED_NAMES for part in parts
+        ):
+            return True
+        return False
+
     def list_dir(self, args: dict[str, Any]) -> dict[str, Any]:
         resolved = self.resolve_existing(str(args.get("path", ".")))
         if not resolved.path.is_dir():
@@ -3272,6 +3300,7 @@ class Runtime:
         include_hidden = bool(args.get("include_hidden", False))
         include_ignored = bool(args.get("include_ignored", False))
         sort_key = args.get("sort", "name")
+        workspace_scoped = is_relative_to(resolved.path, self.workspace.root)
         entries: list[dict[str, Any]] = []
         truncated = False
 
@@ -3283,17 +3312,20 @@ class Runtime:
                 children = list(directory.iterdir())
             except OSError:
                 return
-            child_rel_paths = [
-                normalize_rel_display(child, self.workspace.root) for child in children
-            ]
             ignored = (
                 set()
-                if include_ignored
-                else self.workspace.git_ignored_paths(child_rel_paths)
+                if include_ignored or not workspace_scoped
+                else self.workspace.git_ignored_paths(
+                    [
+                        normalize_rel_display(child, self.workspace.root)
+                        for child in children
+                    ]
+                )
             )
             for child in children:
-                if self.workspace.is_ignored_path(
+                if self._is_listing_ignored_path(
                     child,
+                    listing_root=resolved.path,
                     include_hidden=include_hidden,
                     include_ignored=include_ignored,
                     git_ignored=ignored,
@@ -3338,6 +3370,8 @@ class Runtime:
         include_hidden = bool(args.get("include_hidden", False))
         include_ignored = bool(args.get("include_ignored", False))
         max_results = int(args.get("max_results", 5000))
+        workspace_scoped = is_relative_to(resolved.path, self.workspace.root)
+        filter_root = self.workspace.root if workspace_scoped else resolved.path
         fast_result = self._list_files_with_fd(
             resolved,
             patterns,
@@ -3353,25 +3387,26 @@ class Runtime:
         truncated = False
         for batch in path_batches(walk_files(resolved.path), 256):
             # Filter by glob first so git check-ignore only sees candidates.
-            candidates = [
-                (path, rel)
-                for path, rel in (
-                    (path, normalize_rel_display(path, self.workspace.root))
-                    for path in batch
-                )
-                if matches_any_glob(rel, patterns)
-                and not matches_any_glob(rel, exclude_patterns)
-            ]
+            candidates = []
+            for path in batch:
+                display_rel = normalize_rel_display(path, self.workspace.root)
+                filter_rel = normalize_rel_display(path, filter_root)
+                if not matches_any_glob(filter_rel, patterns):
+                    continue
+                if matches_any_glob(filter_rel, exclude_patterns):
+                    continue
+                candidates.append((path, display_rel))
             ignored = (
                 set()
-                if include_ignored
+                if include_ignored or not workspace_scoped
                 else self.workspace.git_ignored_paths([rel for _, rel in candidates])
             )
             for path, rel in candidates:
                 if path.is_symlink() and not self.workspace.is_safe_existing_path(path):
                     continue
-                if self.workspace.is_ignored_path(
+                if self._is_listing_ignored_path(
                     path,
+                    listing_root=resolved.path,
                     include_hidden=include_hidden,
                     include_ignored=include_ignored,
                     git_ignored=ignored,
@@ -3409,6 +3444,8 @@ class Runtime:
         fd = cached_which("fd", "fdfind")
         if not fd or not resolved.path.is_dir():
             return None
+        workspace_scoped = is_relative_to(resolved.path, self.workspace.root)
+        filter_root = self.workspace.root if workspace_scoped else resolved.path
         args_base = [
             fd,
             "--glob",
@@ -3423,9 +3460,9 @@ class Runtime:
         ]
         if include_hidden:
             args_base.append("--hidden")
-        if include_ignored:
+        if include_ignored or not workspace_scoped:
             args_base.append("--no-ignore")
-        else:
+        if not include_ignored:
             for name in sorted(DEFAULT_EXCLUDED_NAMES):
                 args_base.extend(["--exclude", name])
         for pattern in exclude_patterns:
@@ -3464,21 +3501,25 @@ class Runtime:
                 path = resolved.path / rel_to_search
                 if path.is_symlink() and not self.workspace.is_safe_existing_path(path):
                     continue
-                rel = normalize_rel_display(path, self.workspace.root)
-                if matches_any_glob(rel, exclude_patterns):
+                display_rel = normalize_rel_display(path, self.workspace.root)
+                filter_rel = normalize_rel_display(path, filter_root)
+                if matches_any_glob(filter_rel, exclude_patterns):
                     continue
-                paths[rel] = path
+                paths[display_rel] = path
                 if len(paths) >= max_results:
                     break
             if len(paths) >= max_results:
                 break
         ignored = (
-            set() if include_ignored else self.workspace.git_ignored_paths(list(paths))
+            set()
+            if include_ignored or not workspace_scoped
+            else self.workspace.git_ignored_paths(list(paths))
         )
         files: list[dict[str, Any]] = []
         for rel, path in paths.items():
-            if self.workspace.is_ignored_path(
+            if self._is_listing_ignored_path(
                 path,
+                listing_root=resolved.path,
                 include_hidden=include_hidden,
                 include_ignored=include_ignored,
                 git_ignored=ignored,

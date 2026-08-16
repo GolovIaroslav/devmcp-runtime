@@ -92,6 +92,72 @@ class ListAndSearchGoldenTests(ComplianceTestCase):
             plan_res = plan_client.call_tool("list_dir", {"path": ".."})
             self.assertTrue(plan_res.get("isError"))
 
+    def test_build_external_listings_use_target_relative_filters(self) -> None:
+        external = self.workspace.root.parent / "external-project"
+        external.mkdir()
+        (external / "visible.txt").write_text("visible\n", encoding="utf-8")
+        (external / "skip.txt").write_text("skip\n", encoding="utf-8")
+        (external / "ignored.log").write_text("external\n", encoding="utf-8")
+        (external / ".hidden.txt").write_text("hidden\n", encoding="utf-8")
+        (external / "nested").mkdir()
+        (external / "nested" / "child.py").write_text("child\n", encoding="utf-8")
+        (external / "node_modules").mkdir()
+        (external / "node_modules" / "dep.js").write_text("dep\n", encoding="utf-8")
+
+        listed_dir = self.client.call_tool("list_dir", {"path": str(external)})
+        self.assert_tool_success(listed_dir)
+        dir_text = self.tool_text(listed_dir)
+        self.assertIn("visible.txt", dir_text)
+        self.assertIn("ignored.log", dir_text)
+        self.assertNotIn(".hidden.txt", dir_text)
+        self.assertNotIn("node_modules", dir_text)
+
+        listed_dir_hidden = self.client.call_tool(
+            "list_dir", {"path": str(external), "include_hidden": True}
+        )
+        self.assertIn(".hidden.txt", self.tool_text(listed_dir_hidden))
+
+        listed_files = self.client.call_tool(
+            "list_files", {"path": str(external), "glob": "**/*"}
+        )
+        self.assert_tool_success(listed_files)
+        files_text = self.tool_text(listed_files)
+        self.assertIn("visible.txt", files_text)
+        self.assertIn("ignored.log", files_text)
+        self.assertIn("nested/child.py", files_text)
+        self.assertNotIn(".hidden.txt", files_text)
+        self.assertNotIn("node_modules", files_text)
+
+        listed_files_hidden = self.client.call_tool(
+            "list_files",
+            {"path": str(external), "glob": "**/*", "include_hidden": True},
+        )
+        self.assertIn(".hidden.txt", self.tool_text(listed_files_hidden))
+
+        filtered = self.client.call_tool(
+            "list_files",
+            {
+                "path": str(external),
+                "patterns": ["**/*.txt"],
+                "exclude_patterns": ["skip.txt"],
+                "include_hidden": True,
+            },
+        )
+        filtered_text = self.tool_text(filtered)
+        self.assertIn("visible.txt", filtered_text)
+        self.assertIn(".hidden.txt", filtered_text)
+        self.assertNotIn("skip.txt", filtered_text)
+        self.assertNotIn("child.py", filtered_text)
+
+        project_files = self.client.call_tool("list_files", {"glob": "**/*"})
+        self.assertNotIn("ignored.log", self.tool_text(project_files))
+
+        with self.client_with_permission("safe") as plan_client:
+            plan_dir = plan_client.call_tool("list_dir", {"path": str(external)})
+            plan_files = plan_client.call_tool("list_files", {"path": str(external)})
+            self.assertTrue(plan_dir.get("isError"))
+            self.assertTrue(plan_files.get("isError"))
+
     def test_search_text_query_glob_context_and_max_results(self) -> None:
         result = self.client.call_tool(
             "search_text",
