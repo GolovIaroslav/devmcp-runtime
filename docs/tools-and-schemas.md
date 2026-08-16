@@ -105,7 +105,11 @@ path must be on `main`, have no tracked or staged changes, and exactly match
 `origin/main`; untracked files do not block it. Explicit `development_mode=true`
 keeps the clean-tree and exact pinned-HEAD checks but permits a named non-main
 branch so DevMCP can install and test its own feature branch without first
-merging it. The updater records the installed SHA/branch in operator config,
+merging it. If the installed runtime already matches the validated source HEAD,
+the tool returns `already_current` without scheduling a restart. Otherwise the
+transient systemd unit name is deterministic for the mode and desired SHA, so a
+concurrent request for the same update returns `already_scheduled` instead of
+starting a second installer. The updater records the installed SHA/branch in operator config,
 performs a user-level `uv tool install --force`, refreshes the user systemd units,
 and then performs the MCP-health-before-tunnel restart sequence.
 

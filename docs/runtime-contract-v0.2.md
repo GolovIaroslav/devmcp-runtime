@@ -290,6 +290,12 @@ The normal source must be on `main`, have no tracked or staged changes, and
 satisfy `HEAD == origin/main`; untracked files do not block the update. Explicit
 `development_mode=true` still requires a clean named branch and pins the exact
 40-character source HEAD, but permits a non-main branch for self-host testing.
+If the installed runtime already matches that HEAD, the result status is
+`already_current` and no transient unit is created. Update units are named
+deterministically from development mode plus desired SHA; if systemd rejects a
+duplicate creation while the matching timer/service is still loaded, the result
+status is `already_scheduled`. Otherwise a new operation returns `scheduled`.
+Collected finished/failed transient units do not leave DevMCP-side pending state.
 The trusted CLI revalidates source path, branch, cleanliness, and expected SHA,
 records the installed SHA/branch in operator config, runs a user-level
 `uv tool install --force`, reinstalls the user systemd units using the newly

@@ -7817,7 +7817,9 @@ class Runtime:
                 "systemd-run is required for a reliable self-update.",
                 category="environment",
             )
-        unit = f"devmcp-self-update-{os.getpid()}-{secrets.token_hex(4)}"
+        unit = self._devmcp_update_unit_name(
+            expected_sha, development_mode=development_mode
+        )
         command = [
             systemd_run,
             "--user",
@@ -7846,6 +7848,15 @@ class Runtime:
             timeout=10,
         )
         if result.returncode != 0:
+            if self._devmcp_update_unit_loaded(unit):
+                return {
+                    "status": "already_scheduled",
+                    "unit": unit,
+                    "delay_seconds": 1,
+                    "source": str(source),
+                    "expected_sha": expected_sha,
+                    "development_mode": development_mode,
+                }
             raise ToolFailure(
                 "SERVICE_COMMAND_FAILED",
                 "Failed to schedule DevMCP service update.",
@@ -7865,6 +7876,40 @@ class Runtime:
             "development_mode": development_mode,
         }
 
+    @staticmethod
+    def _devmcp_update_unit_name(
+        expected_sha: str, *, development_mode: bool = False
+    ) -> str:
+        mode = "dev" if development_mode else "prod"
+        return f"devmcp-self-update-{mode}-{expected_sha}"
+
+    @staticmethod
+    def _devmcp_update_unit_loaded(unit: str) -> bool:
+        systemctl = shutil.which("systemctl")
+        if systemctl is None:
+            return False
+        for suffix in (".timer", ".service"):
+            try:
+                result = subprocess.run(
+                    [
+                        systemctl,
+                        "--user",
+                        "show",
+                        "--property=LoadState",
+                        "--value",
+                        f"{unit}{suffix}",
+                    ],
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=10,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                return False
+            if result.returncode == 0 and result.stdout.strip() == "loaded":
+                return True
+        return False
+
     def service_update(self, args: dict[str, Any]) -> dict[str, Any]:
         source_project_raw = args.get("source_project")
         source_project = (
@@ -7876,6 +7921,13 @@ class Runtime:
         source, expected_sha = self._validated_devmcp_update_source(
             source_project, development_mode=development_mode
         )
+        if self._installed_runtime_sha() == expected_sha:
+            return {
+                "status": "already_current",
+                "source": str(source),
+                "expected_sha": expected_sha,
+                "development_mode": development_mode,
+            }
         return self._schedule_devmcp_update(
             source, expected_sha, development_mode=development_mode
         )

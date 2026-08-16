@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import subprocess
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,7 +19,7 @@ from coding_tools_mcp.config import (
     write_secret,
 )
 from coding_tools_mcp.errors import ToolFailure
-from coding_tools_mcp.server import Runtime, run_http
+from coding_tools_mcp.server import Runtime, input_schemas, run_http
 
 
 class ReleaseConfigTests(unittest.TestCase):
@@ -112,6 +113,224 @@ class ReleaseConfigTests(unittest.TestCase):
 
 
 class ReleaseLifecycleTests(unittest.TestCase):
+    def test_service_update_returns_already_current_without_scheduling(self) -> None:
+        expected_sha = "a" * 40
+        source = Path("/tmp/devmcp-runtime-source")
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = Runtime(Path(tmp), execution_mode="build")
+            try:
+                with (
+                    patch.object(
+                        runtime,
+                        "_validated_devmcp_update_source",
+                        return_value=(source, expected_sha),
+                    ),
+                    patch.object(
+                        runtime, "_installed_runtime_sha", return_value=expected_sha
+                    ),
+                    patch.object(runtime, "_schedule_devmcp_update") as schedule,
+                ):
+                    result = runtime.service_update({})
+                self.assertEqual(
+                    result,
+                    {
+                        "status": "already_current",
+                        "source": str(source),
+                        "expected_sha": expected_sha,
+                        "development_mode": False,
+                    },
+                )
+                schedule.assert_not_called()
+            finally:
+                runtime.close()
+
+    def test_service_update_unit_identity_is_sha_and_mode_only(self) -> None:
+        expected_sha = "b" * 40
+        prod = Runtime._devmcp_update_unit_name(expected_sha)
+        prod_again = Runtime._devmcp_update_unit_name(expected_sha)
+        dev = Runtime._devmcp_update_unit_name(expected_sha, development_mode=True)
+        self.assertEqual(prod, prod_again)
+        self.assertEqual(prod, f"devmcp-self-update-prod-{expected_sha}")
+        self.assertEqual(dev, f"devmcp-self-update-dev-{expected_sha}")
+        self.assertNotEqual(prod, dev)
+
+    def test_service_update_source_path_does_not_affect_unit_identity(self) -> None:
+        expected_sha = "c" * 40
+        completed = subprocess.CompletedProcess([], 0, "", "")
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = Runtime(Path(tmp), execution_mode="build")
+            try:
+                with (
+                    patch(
+                        "coding_tools_mcp.server.shutil.which",
+                        return_value="/usr/bin/systemd-run",
+                    ),
+                    patch(
+                        "coding_tools_mcp.server.subprocess.run",
+                        return_value=completed,
+                    ),
+                ):
+                    first = runtime._schedule_devmcp_update(
+                        Path("/tmp/source-one"), expected_sha
+                    )
+                    second = runtime._schedule_devmcp_update(
+                        Path("/tmp/source-two"), expected_sha
+                    )
+                self.assertEqual(first["status"], "scheduled")
+                self.assertEqual(second["status"], "scheduled")
+                self.assertEqual(first["unit"], second["unit"])
+            finally:
+                runtime.close()
+
+    def test_service_update_duplicate_unit_returns_already_scheduled(self) -> None:
+        expected_sha = "d" * 40
+        failed = subprocess.CompletedProcess([], 1, "", "scheduler failure")
+        loaded = subprocess.CompletedProcess([], 0, "loaded\n", "")
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = Runtime(Path(tmp), execution_mode="build")
+            try:
+                with (
+                    patch(
+                        "coding_tools_mcp.server.shutil.which",
+                        side_effect=lambda name: f"/usr/bin/{name}",
+                    ),
+                    patch(
+                        "coding_tools_mcp.server.subprocess.run",
+                        side_effect=[failed, loaded],
+                    ) as run,
+                ):
+                    result = runtime._schedule_devmcp_update(
+                        Path("/tmp/source"), expected_sha
+                    )
+                self.assertEqual(result["status"], "already_scheduled")
+                self.assertEqual(
+                    result["unit"], f"devmcp-self-update-prod-{expected_sha}"
+                )
+                self.assertEqual(
+                    run.call_args_list[1].args[0][-1], result["unit"] + ".timer"
+                )
+            finally:
+                runtime.close()
+
+    def test_service_update_unrelated_systemd_failure_is_preserved(self) -> None:
+        expected_sha = "e" * 40
+        failed = subprocess.CompletedProcess([], 7, "out", "err")
+        missing = subprocess.CompletedProcess([], 1, "not-found\n", "")
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = Runtime(Path(tmp), execution_mode="build")
+            try:
+                with (
+                    patch(
+                        "coding_tools_mcp.server.shutil.which",
+                        side_effect=lambda name: f"/usr/bin/{name}",
+                    ),
+                    patch(
+                        "coding_tools_mcp.server.subprocess.run",
+                        side_effect=[failed, missing, missing],
+                    ),
+                    self.assertRaises(ToolFailure) as denied,
+                ):
+                    runtime._schedule_devmcp_update(Path("/tmp/source"), expected_sha)
+                self.assertEqual(denied.exception.code, "SERVICE_COMMAND_FAILED")
+                self.assertEqual(denied.exception.details["exit_code"], 7)
+                self.assertEqual(denied.exception.details["stdout"], "out")
+                self.assertEqual(denied.exception.details["stderr"], "err")
+            finally:
+                runtime.close()
+
+    def test_service_update_modeled_concurrency_coalesces_duplicate(self) -> None:
+        expected_sha = "f" * 40
+        barrier = threading.Barrier(2)
+        lock = threading.Lock()
+        created = False
+
+        def fake_run(
+            argv: list[str], **_kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
+            nonlocal created
+            if argv[0].endswith("systemd-run"):
+                barrier.wait(timeout=5)
+                with lock:
+                    if not created:
+                        created = True
+                        return subprocess.CompletedProcess(argv, 0, "", "")
+                return subprocess.CompletedProcess(argv, 1, "", "duplicate")
+            return subprocess.CompletedProcess(argv, 0, "loaded\n", "")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = Runtime(Path(tmp), execution_mode="build")
+            results: list[dict[str, object]] = []
+
+            def schedule() -> None:
+                results.append(
+                    runtime._schedule_devmcp_update(Path("/tmp/source"), expected_sha)
+                )
+
+            try:
+                with (
+                    patch(
+                        "coding_tools_mcp.server.shutil.which",
+                        side_effect=lambda name: f"/usr/bin/{name}",
+                    ),
+                    patch(
+                        "coding_tools_mcp.server.subprocess.run", side_effect=fake_run
+                    ),
+                ):
+                    threads = [threading.Thread(target=schedule) for _ in range(2)]
+                    for thread in threads:
+                        thread.start()
+                    for thread in threads:
+                        thread.join(timeout=5)
+                self.assertFalse(any(thread.is_alive() for thread in threads))
+                self.assertEqual(
+                    sorted(str(result["status"]) for result in results),
+                    ["already_scheduled", "scheduled"],
+                )
+            finally:
+                runtime.close()
+
+    def test_service_update_failed_scheduler_can_retry_after_unit_is_absent(
+        self,
+    ) -> None:
+        expected_sha = "1" * 40
+        failed = subprocess.CompletedProcess([], 5, "", "failed")
+        missing = subprocess.CompletedProcess([], 1, "not-found\n", "")
+        scheduled = subprocess.CompletedProcess([], 0, "", "")
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = Runtime(Path(tmp), execution_mode="build")
+            try:
+                with (
+                    patch(
+                        "coding_tools_mcp.server.shutil.which",
+                        side_effect=lambda name: f"/usr/bin/{name}",
+                    ),
+                    patch(
+                        "coding_tools_mcp.server.subprocess.run",
+                        side_effect=[failed, missing, missing, scheduled],
+                    ) as run,
+                ):
+                    with self.assertRaises(ToolFailure) as denied:
+                        runtime._schedule_devmcp_update(
+                            Path("/tmp/source"), expected_sha
+                        )
+                    retry = runtime._schedule_devmcp_update(
+                        Path("/tmp/source"), expected_sha
+                    )
+                self.assertEqual(denied.exception.code, "SERVICE_COMMAND_FAILED")
+                self.assertEqual(retry["status"], "scheduled")
+                systemd_run_calls = [
+                    call
+                    for call in run.call_args_list
+                    if call.args[0][0].endswith("systemd-run")
+                ]
+                self.assertEqual(len(systemd_run_calls), 2)
+            finally:
+                runtime.close()
+
+    def test_service_update_public_schema_does_not_accept_expected_sha(self) -> None:
+        properties = input_schemas()["service_update"]["properties"]
+        self.assertEqual(set(properties), {"source_project", "development_mode"})
+
     def test_list_files_dot_returns_tracked_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
