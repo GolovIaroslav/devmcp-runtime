@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
 from typing import Any, Callable
 
 from . import server as core
@@ -576,15 +575,7 @@ class StateManagedRuntime(StateMutationMixin, BuildIdentityMixin, core.Runtime):
                 context_id=context_id,
             )
             self._validate_resume_snapshot(payload, target)
-            try:
-                relative_cwd = state.default_cwd.relative_to(
-                    state.effective_workspace_root
-                )
-            except ValueError:
-                relative_cwd = Path()
-            mapped_cwd = target / relative_cwd
-            if not mapped_cwd.is_dir():
-                mapped_cwd = target
+            mapped_cwd = self._map_logical_context_default_cwd(state, target)
             try:
                 previous = registry.claim_existing_workspace(
                     state,

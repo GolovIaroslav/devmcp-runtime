@@ -2161,6 +2161,18 @@ Maven home: /usr/share/maven
             with self.assertRaises(ToolFailure):
                 runtime.set_default_cwd({"path": "../outside"})
 
+    def test_plan_default_cwd_remains_workspace_constrained(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = root / "workspace"
+            outside = root / "outside"
+            workspace.mkdir()
+            outside.mkdir()
+            runtime = Runtime(workspace, execution_mode="plan")
+            with self.assertRaises(ToolFailure) as denied:
+                runtime.set_default_cwd({"path": str(outside)})
+            self.assertEqual(denied.exception.code, "PATH_OUTSIDE_WORKSPACE")
+
     def test_boundary_regressions_for_aliases_and_command_scanning(self) -> None:
         with TemporaryDirectory() as tmp:
             workspace = Path(tmp)

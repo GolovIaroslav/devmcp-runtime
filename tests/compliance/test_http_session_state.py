@@ -106,6 +106,163 @@ class HTTPSessionStateTests(unittest.TestCase):
                     self.assertEqual(resumed_cwd["default_cwd"], "nested")
                     self.assertEqual(resumed_cwd["workspace"], str(repo_a.resolve()))
 
+    def test_build_external_default_cwd_survives_same_context_and_exec(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            projects = root / "projects"
+            repo = self._repo(projects, "a")
+            outside = root / "outside"
+            outside.mkdir()
+            with self._server(repo, projects, execution_mode="build") as client:
+                current = structured(client.call_tool("current_project", {}))
+                context_id = current["context_id"]
+                changed = structured(
+                    client.call_tool(
+                        "set_default_cwd",
+                        {"path": str(outside), "context_id": context_id},
+                    )
+                )
+                self.assertEqual(changed["default_cwd"], str(outside.resolve()))
+
+                with MCPClient(repo, url=client.url) as reconnect:
+                    resumed = structured(
+                        reconnect.call_tool(
+                            "get_default_cwd", {"context_id": context_id}
+                        )
+                    )
+                    self.assertEqual(resumed["default_cwd"], str(outside.resolve()))
+                    executed = structured(
+                        reconnect.call_tool(
+                            "exec_argv",
+                            {
+                                "argv": [
+                                    sys.executable,
+                                    "-c",
+                                    "import os; print(os.getcwd())",
+                                ],
+                                "context_id": context_id,
+                            },
+                        )
+                    )
+                    self.assertEqual(executed["status"], "success", executed)
+                    self.assertEqual(executed["stdout"].strip(), str(outside.resolve()))
+
+    def test_external_default_cwd_survives_worktree_contention(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            projects = root / "projects"
+            repo = self._repo(projects, "a")
+            outside = root / "outside"
+            outside.mkdir()
+            config_root = root / "config"
+            with patch.dict(
+                os.environ, {"DEVMCP_CONFIG_DIR": str(config_root)}, clear=False
+            ):
+                with self._server(repo, projects) as client_a:
+                    with MCPClient(repo, url=client_a.url) as client_b:
+                        context_a = structured(
+                            client_a.call_tool("current_project", {})
+                        )["context_id"]
+                        context_b = structured(
+                            client_b.call_tool("current_project", {})
+                        )["context_id"]
+                        client_b.call_tool(
+                            "set_default_cwd",
+                            {"path": str(outside), "context_id": context_b},
+                        )
+                        client_a.call_tool(
+                            "git_create_branch",
+                            {"name": "external-cwd-owner", "context_id": context_a},
+                        )
+                        isolated = structured(
+                            client_b.call_tool(
+                                "git_create_branch",
+                                {
+                                    "name": "external-cwd-isolated",
+                                    "context_id": context_b,
+                                },
+                            )
+                        )
+                        self.assertNotEqual(Path(isolated["workspace"]), repo.resolve())
+                        current_cwd = structured(
+                            client_b.call_tool(
+                                "get_default_cwd", {"context_id": context_b}
+                            )
+                        )
+                        self.assertEqual(
+                            current_cwd["default_cwd"], str(outside.resolve())
+                        )
+
+    def test_internal_default_cwd_remaps_into_contended_worktree(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            projects = root / "projects"
+            repo = self._repo(projects, "a")
+            nested = repo / "nested"
+            nested.mkdir()
+            (nested / "tracked.txt").write_text("tracked\n", encoding="utf-8")
+            subprocess.run(
+                ["git", "-C", str(repo), "add", "nested/tracked.txt"], check=True
+            )
+            subprocess.run(
+                ["git", "-C", str(repo), "commit", "-q", "-m", "add nested cwd"],
+                check=True,
+            )
+            config_root = root / "config"
+            with patch.dict(
+                os.environ, {"DEVMCP_CONFIG_DIR": str(config_root)}, clear=False
+            ):
+                with self._server(repo, projects) as client_a:
+                    with MCPClient(repo, url=client_a.url) as client_b:
+                        context_a = structured(
+                            client_a.call_tool("current_project", {})
+                        )["context_id"]
+                        context_b = structured(
+                            client_b.call_tool("current_project", {})
+                        )["context_id"]
+                        client_b.call_tool(
+                            "set_default_cwd",
+                            {"path": "nested", "context_id": context_b},
+                        )
+                        client_a.call_tool(
+                            "git_create_branch",
+                            {"name": "internal-cwd-owner", "context_id": context_a},
+                        )
+                        isolated = structured(
+                            client_b.call_tool(
+                                "git_create_branch",
+                                {
+                                    "name": "internal-cwd-isolated",
+                                    "context_id": context_b,
+                                },
+                            )
+                        )
+                        worktree = Path(isolated["workspace"])
+                        self.assertNotEqual(worktree, repo.resolve())
+                        current_cwd = structured(
+                            client_b.call_tool(
+                                "get_default_cwd", {"context_id": context_b}
+                            )
+                        )
+                        self.assertEqual(current_cwd["default_cwd"], "nested")
+                        executed = structured(
+                            client_b.call_tool(
+                                "exec_argv",
+                                {
+                                    "argv": [
+                                        sys.executable,
+                                        "-c",
+                                        "import os; print(os.getcwd())",
+                                    ],
+                                    "context_id": context_b,
+                                },
+                            )
+                        )
+                        self.assertEqual(
+                            executed["stdout"].strip(),
+                            str((worktree / "nested").resolve()),
+                        )
+
     def test_parallel_http_clients_are_workspace_isolated_and_do_not_persist_selection(
         self,
     ) -> None:
