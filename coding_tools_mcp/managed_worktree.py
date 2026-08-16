@@ -20,7 +20,7 @@ def create_managed_worktree(
     git = shutil.which("git")
     if git is None:
         raise ToolFailure(
-            "EXECUTABLE_NOT_FOUND",
+            "GIT_ERROR",
             "git is required to create a managed linked worktree.",
             category="environment",
         )
@@ -49,7 +49,7 @@ def create_managed_worktree(
     )
     if result.returncode != 0:
         raise ToolFailure(
-            "GIT_COMMAND_FAILED",
+            "GIT_ERROR",
             "Failed to create a managed linked worktree for the logical context.",
             category="runtime",
             details={
