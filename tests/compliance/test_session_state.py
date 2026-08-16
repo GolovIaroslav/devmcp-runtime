@@ -9,8 +9,10 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from coding_tools_mcp.managed_worktree import (
+    attach_existing_branch_worktree,
     cleanup_managed_worktree,
     create_managed_worktree,
+    registered_worktrees,
     recover_managed_worktrees,
 )
 from coding_tools_mcp.processes import ExecSession
@@ -114,6 +116,28 @@ class SessionStateRegistryTests(unittest.TestCase):
                 default_cwd=other,
             )
             self.assertEqual(expired, [isolated.resolve()])
+
+    def test_existing_workspace_claim_is_atomic_and_rejects_live_owner(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            isolated = root / "isolated"
+            isolated.mkdir()
+            registry = LogicalContextRegistry()
+            first = registry.create(root, root, root)
+            second = registry.create(root, root, root)
+            previous = registry.claim_existing_workspace(
+                first, target_workspace=isolated, default_cwd=isolated
+            )
+            self.assertEqual(previous, (root.resolve(), root.resolve(), False))
+            with self.assertRaises(FileExistsError):
+                registry.claim_existing_workspace(
+                    second, target_workspace=isolated, default_cwd=isolated
+                )
+            registry.rollback_existing_workspace_claim(
+                first, expected_workspace=isolated, previous=previous
+            )
+            self.assertFalse(first.mutation_workspace_claimed)
+            self.assertEqual(first.effective_workspace_root, root.resolve())
 
     def test_managed_worktree_is_linked_and_uses_private_generated_branch(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -228,6 +252,89 @@ class SessionStateRegistryTests(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(branch_check.returncode, 0)
+
+    def test_existing_branch_is_reattached_without_creating_second_branch(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            canonical = root / "repo"
+            storage = root / "state"
+            canonical.mkdir()
+            subprocess.run(
+                ["git", "init", "-b", "main", str(canonical)],
+                check=True,
+                stdout=subprocess.DEVNULL,
+            )
+            subprocess.run(
+                ["git", "-C", str(canonical), "config", "user.name", "DevMCP Test"],
+                check=True,
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(canonical),
+                    "config",
+                    "user.email",
+                    "devmcp@example.invalid",
+                ],
+                check=True,
+            )
+            (canonical / "tracked.txt").write_text("base\n")
+            subprocess.run(["git", "-C", str(canonical), "add", "."], check=True)
+            subprocess.run(
+                ["git", "-C", str(canonical), "commit", "-m", "base"],
+                check=True,
+                stdout=subprocess.DEVNULL,
+            )
+            subprocess.run(["git", "-C", str(canonical), "branch", "saved"], check=True)
+            before = subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(canonical),
+                    "for-each-ref",
+                    "--format=%(refname:short)",
+                    "refs/heads",
+                ],
+                check=True,
+                text=True,
+                stdout=subprocess.PIPE,
+            ).stdout.splitlines()
+            with patch(
+                "coding_tools_mcp.managed_worktree.state_root", return_value=storage
+            ):
+                attached = attach_existing_branch_worktree(
+                    canonical, "ctx_resume_existing_123456", "saved"
+                )
+            after = subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(canonical),
+                    "for-each-ref",
+                    "--format=%(refname:short)",
+                    "refs/heads",
+                ],
+                check=True,
+                text=True,
+                stdout=subprocess.PIPE,
+            ).stdout.splitlines()
+            self.assertEqual(before, after)
+            self.assertEqual(
+                subprocess.run(
+                    ["git", "-C", str(attached), "branch", "--show-current"],
+                    check=True,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                ).stdout.strip(),
+                "saved",
+            )
+            saved = [
+                item
+                for item in registered_worktrees(canonical)
+                if item.branch == "saved"
+            ]
+            self.assertEqual([item.path for item in saved], [attached])
 
     def test_dirty_managed_worktree_is_preserved_during_recovery(self) -> None:
         with TemporaryDirectory() as tmp:

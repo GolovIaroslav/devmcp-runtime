@@ -1,11 +1,22 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Any, Callable
 
 from . import server as core
-from .continuation import normalize_checkpoint_payload, write_checkpoint
+from .continuation import (
+    normalize_checkpoint_payload,
+    read_checkpoint,
+    write_checkpoint,
+)
 from .errors import ToolFailure
+from .managed_worktree import (
+    attach_existing_branch_worktree,
+    cleanup_managed_worktree,
+    registered_managed_worktrees,
+    registered_worktrees,
+)
 from .state_checkpoint import (
     read_authoritative_state_checkpoint,
     write_state_checkpoint,
@@ -277,6 +288,395 @@ class StateManagedRuntime(StateMutationMixin, BuildIdentityMixin, core.Runtime):
             timestamp=now_iso(),
         )
 
+    def _state_snapshot_for_workspace(self, workspace: Any) -> dict[str, Any]:
+        return collect_state_snapshot(
+            workspace,
+            project_id=str(self.active_project.get("id") or "") or None,
+            installed_service_version=core.__version__,
+            installed_service_git_sha=self._installed_runtime_sha(),
+            protocol_version=self.protocol_version,
+            writer_owner=None,
+            logical_task=None,
+            git_env=self._git_env(),
+            timestamp=now_iso(),
+        )
+
+    @staticmethod
+    def _resume_failure(
+        code: str,
+        message: str,
+        reason: str,
+        *,
+        retryable: bool = False,
+        details: dict[str, Any] | None = None,
+    ) -> ToolFailure:
+        return ToolFailure(
+            code,
+            message,
+            category="conflict"
+            if code in {"STATE_DRIFT", "INVALID_STATE"}
+            else "not_found",
+            retryable=retryable,
+            details={"reason": reason, **(details or {})},
+        )
+
+    def _validate_resume_snapshot(
+        self,
+        payload: dict[str, Any],
+        workspace: Any,
+    ) -> dict[str, Any]:
+        actual = self._state_snapshot_for_workspace(workspace)
+        expected_branch = str(payload.get("branch") or "")
+        expected_head = str(payload.get("head") or "")
+        expected_fingerprint = str(payload.get("state_fingerprint") or "")
+        actual_fingerprint = state_fingerprint(actual)
+        if (
+            actual.get("branch") != expected_branch
+            or actual.get("local_head") != expected_head
+            or actual_fingerprint != expected_fingerprint
+            or not state_fingerprint_complete(actual)
+        ):
+            raise self._resume_failure(
+                "STATE_DRIFT",
+                "Saved continuation state no longer exactly matches the resume target.",
+                "resume_state_drift",
+                retryable=True,
+                details={
+                    "expected_branch": expected_branch,
+                    "expected_head": expected_head,
+                    "expected_state_fingerprint": expected_fingerprint,
+                    "actual_branch": actual.get("branch"),
+                    "actual_head": actual.get("local_head"),
+                    "actual_state_fingerprint": actual_fingerprint,
+                },
+            )
+        expected_dirty = bool(payload.get("workspace_dirty"))
+        actual_dirty = bool(
+            actual.get("dirty_paths")
+            or actual.get("staged_paths")
+            or actual.get("untracked_paths")
+        )
+        if expected_dirty != actual_dirty:
+            raise self._resume_failure(
+                "STATE_DRIFT",
+                "Saved continuation dirty-state classification changed.",
+                "resume_state_drift",
+                retryable=True,
+                details={
+                    "expected_dirty": expected_dirty,
+                    "actual_dirty": actual_dirty,
+                },
+            )
+        return actual
+
+    def _resume_active_resources(self, context_id: str) -> bool:
+        with self.sessions_lock:
+            active_commands = self.starting_sessions or any(
+                session.process.poll() is None for session in self.sessions.values()
+            )
+        with self.sandbox_lock:
+            active_sandbox = self.sandbox_users > 0
+        active_job = bool(
+            self.shared_job_registry is not None
+            and self.shared_job_registry.has_running_jobs(context_id)
+        )
+        return bool(active_commands or active_sandbox or active_job)
+
+    def _resume_target(
+        self,
+        *,
+        payload: dict[str, Any],
+        context_id: str,
+    ) -> tuple[Any, bool]:
+        canonical = self.canonical_project_root.resolve(strict=True)
+        branch = str(payload["branch"])
+        head = str(payload["head"])
+        workspace_kind = str(payload["workspace_kind"])
+        dirty = bool(payload["workspace_dirty"])
+        all_worktrees = registered_worktrees(canonical)
+        managed = [
+            item
+            for item in registered_managed_worktrees(canonical)
+            if item.branch == branch
+        ]
+
+        if workspace_kind == "managed" and dirty:
+            if len(managed) != 1:
+                reason = (
+                    "ambiguous_target" if len(managed) > 1 else "resume_target_missing"
+                )
+                code = "INVALID_STATE" if len(managed) > 1 else "NOT_FOUND"
+                raise self._resume_failure(
+                    code,
+                    "Dirty managed continuation does not have one exact preserved worktree.",
+                    reason,
+                    details={"candidate_count": len(managed), "branch": branch},
+                )
+            if managed[0].head != head:
+                raise self._resume_failure(
+                    "STATE_DRIFT",
+                    "Preserved managed worktree HEAD changed after checkpoint.",
+                    "resume_state_drift",
+                    retryable=True,
+                )
+            return managed[0].path, False
+
+        if workspace_kind == "canonical":
+            try:
+                canonical_actual = self._validate_resume_snapshot(payload, canonical)
+            except ToolFailure as exact_error:
+                if dirty:
+                    raise exact_error
+            else:
+                del canonical_actual
+                return canonical, False
+
+        exact_managed = [
+            item for item in managed if item.head == head and item.path.is_dir()
+        ]
+        if len(exact_managed) == 1:
+            return exact_managed[0].path, False
+        if len(exact_managed) > 1:
+            raise self._resume_failure(
+                "INVALID_STATE",
+                "Multiple managed worktrees match the saved continuation branch.",
+                "ambiguous_target",
+            )
+
+        branch_ref = git_text(
+            canonical, ["rev-parse", f"refs/heads/{branch}"], env=self._git_env()
+        )
+        if branch_ref != head:
+            raise self._resume_failure(
+                "INVALID_STATE",
+                "Saved continuation branch is missing or no longer points at saved HEAD.",
+                "resume_target_missing",
+                details={
+                    "branch": branch,
+                    "saved_head": head,
+                    "current_ref": branch_ref,
+                },
+            )
+        occupied = [item for item in all_worktrees if item.branch == branch]
+        if occupied:
+            raise self._resume_failure(
+                "INVALID_STATE",
+                "Saved clean continuation branch is already checked out in another worktree.",
+                "workspace_already_owned",
+                details={"paths": [str(item.path) for item in occupied]},
+            )
+        return attach_existing_branch_worktree(canonical, context_id, branch), True
+
+    def _resume_continuation(self, args: dict[str, Any]) -> dict[str, Any]:
+        logical_task = str(args.get("logical_task") or "").strip()
+        branch_scope = str(args.get("branch") or "").strip()
+        if not logical_task and not branch_scope:
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                "action=resume requires explicit logical_task or branch scope.",
+                category="validation",
+                details={"reason": "resume_scope_required"},
+            )
+        scope = self._continuation_scope(args)
+        record = read_checkpoint(self.canonical_project_root, scope)
+        if record is None:
+            raise self._resume_failure(
+                "NOT_FOUND",
+                "Continuation checkpoint was not found.",
+                "continuation_not_found",
+            )
+        raw_payload = record.get("payload")
+        payload = raw_payload if isinstance(raw_payload, dict) else {}
+        required_strings = ("branch", "head", "checkpoint_id", "state_fingerprint")
+        if (
+            record.get("version") != 2
+            or any(
+                not isinstance(payload.get(key), str) or not payload.get(key)
+                for key in required_strings
+            )
+            or payload.get("workspace_kind") not in {"canonical", "managed"}
+            or not isinstance(payload.get("workspace_dirty"), bool)
+        ):
+            raise self._resume_failure(
+                "INVALID_STATE",
+                "Continuation checkpoint lacks trusted v2 resume metadata.",
+                "resume_metadata_insufficient",
+            )
+        if payload.get("state_fingerprint_complete") is not True:
+            raise self._resume_failure(
+                "INVALID_STATE",
+                "Continuation checkpoint does not contain a complete state fingerprint.",
+                "fingerprint_incomplete",
+            )
+        registry = self.logical_context_registry
+        if registry is None:
+            raise ToolFailure(
+                "CONTEXT_NOT_FOUND",
+                "Resume requires logical-context support.",
+                category="not_found",
+                retryable=True,
+            )
+        context_id = self._ensure_logical_context()
+        if context_id is None:
+            raise ToolFailure(
+                "CONTEXT_NOT_FOUND",
+                "Resume requires a live logical context.",
+                category="not_found",
+                retryable=True,
+            )
+        state = registry.get(context_id)
+        if state is None:
+            raise ToolFailure(
+                "CONTEXT_NOT_FOUND",
+                "Resume requires a live logical context.",
+                category="not_found",
+                retryable=True,
+            )
+        if state.canonical_project_root.resolve(
+            strict=True
+        ) != self.canonical_project_root.resolve(strict=True):
+            raise self._resume_failure(
+                "INVALID_STATE",
+                "Current logical context is bound to a different canonical project.",
+                "context_workspace_conflict",
+            )
+        if self._resume_active_resources(context_id):
+            raise self._resume_failure(
+                "INVALID_STATE",
+                "Cannot change continuation routing while command or job resources are active.",
+                "active_command_resources",
+            )
+
+        try:
+            if state.mutation_workspace_claimed:
+                self._validate_resume_snapshot(payload, state.effective_workspace_root)
+                return {
+                    "action": "resume",
+                    "scope": scope,
+                    "status": "already_resumed",
+                    "checkpoint": record,
+                }
+        except ToolFailure:
+            if state.effective_workspace_root != state.canonical_project_root:
+                raise self._resume_failure(
+                    "INVALID_STATE",
+                    "Current context already owns a conflicting mutation workspace.",
+                    "context_workspace_conflict",
+                )
+
+        saved_branch = str(payload["branch"])
+        self._acquire_state_leases([saved_branch], str(payload["checkpoint_id"]))
+        created_target = False
+        claimed = False
+        target: Any = None
+        previous: tuple[Any, Any, bool] | None = None
+        try:
+            target, created_target = self._resume_target(
+                payload=payload,
+                context_id=context_id,
+            )
+            self._validate_resume_snapshot(payload, target)
+            try:
+                relative_cwd = state.default_cwd.relative_to(
+                    state.effective_workspace_root
+                )
+            except ValueError:
+                relative_cwd = Path()
+            mapped_cwd = target / relative_cwd
+            if not mapped_cwd.is_dir():
+                mapped_cwd = target
+            try:
+                previous = registry.claim_existing_workspace(
+                    state,
+                    target_workspace=target,
+                    default_cwd=mapped_cwd,
+                )
+            except RuntimeError as exc:
+                raise ToolFailure(
+                    "CONTEXT_NOT_FOUND",
+                    "Logical context disappeared during continuation resume.",
+                    category="not_found",
+                    retryable=True,
+                ) from exc
+            except ValueError as exc:
+                raise self._resume_failure(
+                    "INVALID_STATE",
+                    "Current context already owns another mutation workspace.",
+                    "context_workspace_conflict",
+                ) from exc
+            except FileExistsError as exc:
+                raise self._resume_failure(
+                    "INVALID_STATE",
+                    "Resume target is owned by another live logical context.",
+                    "workspace_already_owned",
+                ) from exc
+            claimed = True
+            core.Runtime._apply_logical_context_state(self, state)
+            actual = self._validate_resume_snapshot(
+                payload, self.effective_workspace_root
+            )
+            new_state_checkpoint = write_state_checkpoint(
+                self.canonical_project_root,
+                saved_branch,
+                snapshot=actual,
+                phase="baseline",
+                operation="continuation_resume",
+                owner=context_id,
+                logical_task=self._state_task(),
+                outcome="baseline",
+                previous_checkpoint_id=str(payload["checkpoint_id"]),
+                authority_owner=context_id,
+            )
+            refreshed_payload = dict(payload)
+            refreshed_payload.update(
+                {
+                    "branch": actual.get("branch"),
+                    "head": actual.get("local_head"),
+                    "checkpoint_id": new_state_checkpoint["checkpoint_id"],
+                    "state_fingerprint": state_fingerprint(actual),
+                    "state_fingerprint_complete": state_fingerprint_complete(actual),
+                    "workspace_kind": (
+                        "canonical"
+                        if self.effective_workspace_root == self.canonical_project_root
+                        else "managed"
+                    ),
+                    "workspace_dirty": bool(
+                        actual.get("dirty_paths")
+                        or actual.get("staged_paths")
+                        or actual.get("untracked_paths")
+                    ),
+                }
+            )
+            refreshed = write_checkpoint(
+                self.canonical_project_root,
+                scope,
+                refreshed_payload,
+            )
+            return {
+                "action": "resume",
+                "scope": scope,
+                "status": "resumed",
+                "checkpoint": refreshed,
+                "state_checkpoint": new_state_checkpoint,
+                "workspace": str(self.effective_workspace_root),
+            }
+        except BaseException:
+            if claimed and previous is not None and target is not None:
+                registry.rollback_existing_workspace_claim(
+                    state,
+                    expected_workspace=target,
+                    previous=previous,
+                )
+                try:
+                    core.Runtime._apply_logical_context_state(self, state)
+                except BaseException:
+                    pass
+            if created_target and target is not None:
+                cleanup_managed_worktree(self.canonical_project_root, target)
+            raise
+        finally:
+            self._release_state_owner_leases()
+
     def _acquire_state_leases(
         self, branches: list[str], checkpoint_id: str | None
     ) -> None:
@@ -431,6 +831,8 @@ class StateManagedRuntime(StateMutationMixin, BuildIdentityMixin, core.Runtime):
 
     def continuation_checkpoint(self, args: dict[str, Any]) -> dict[str, Any]:
         action = str(args.get("action") or "").strip().lower()
+        if action == "resume":
+            return self._resume_continuation(args)
         if action != "write":
             result = super().continuation_checkpoint(args)
             if action not in {"read", "list"}:

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
+import time
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -13,7 +15,17 @@ from coding_tools_mcp.continuation import (
     checkpoint_path as continuation_checkpoint_path,
 )
 from coding_tools_mcp.errors import ToolFailure
-from coding_tools_mcp.state_checkpoint import read_authoritative_state_checkpoint
+from coding_tools_mcp.managed_worktree import (
+    cleanup_managed_worktree,
+    create_managed_worktree,
+    registered_worktrees,
+)
+from coding_tools_mcp.processes import ExecSession
+from coding_tools_mcp.session_state import LogicalContextRegistry, SharedJobRegistry
+from coding_tools_mcp.state_checkpoint import (
+    read_authoritative_state_checkpoint,
+    write_state_checkpoint,
+)
 from coding_tools_mcp.state_identity import BuildIdentityMixin
 from coding_tools_mcp.state_mutations import StateMutationMixin
 from coding_tools_mcp.state_snapshot import (
@@ -53,6 +65,74 @@ def init_repo(root: Path) -> tuple[Path, str]:
         stdout=subprocess.PIPE,
     ).stdout.strip()
     return repo, head
+
+
+def bind_test_managed_workspace(
+    runtime: StateManagedRuntime,
+    registry: LogicalContextRegistry,
+) -> tuple[Path, str]:
+    context_id = runtime._ensure_logical_context()
+    assert context_id is not None
+    state = registry.get(context_id)
+    assert state is not None
+    worktree, branch = create_managed_worktree(
+        runtime.canonical_project_root, context_id, base_revision="HEAD"
+    )
+    registry.claim_existing_workspace(
+        state, target_workspace=worktree, default_cwd=worktree
+    )
+    core.Runtime._apply_logical_context_state(runtime, state)
+    runtime._on_context_mutation_workspace_bound(state)
+    return worktree, branch
+
+
+def write_test_continuation(
+    runtime: StateManagedRuntime,
+    logical_task: str,
+) -> dict[str, object]:
+    actual = runtime._state_snapshot()
+    branch = str(actual["branch"])
+    owner = runtime._state_owner()
+    previous = read_authoritative_state_checkpoint(
+        runtime.canonical_project_root, owner
+    )
+    write_state_checkpoint(
+        runtime.canonical_project_root,
+        branch,
+        snapshot=actual,
+        phase="after",
+        operation="test_resume_setup",
+        owner=owner,
+        logical_task=logical_task,
+        outcome="success",
+        previous_checkpoint_id=str((previous or {}).get("checkpoint_id") or "") or None,
+        authority_owner=owner,
+    )
+    return runtime.continuation_checkpoint(
+        {
+            "action": "write",
+            "logical_task": logical_task,
+            "payload": {"objective": "resume exact saved state"},
+        }
+    )
+
+
+def new_context_runtime(
+    repo: Path,
+    registry: LogicalContextRegistry,
+    *,
+    shared_jobs: SharedJobRegistry | None = None,
+) -> tuple[StateManagedRuntime, str]:
+    runtime = StateManagedRuntime(
+        workspace=repo,
+        sandbox_backend="unsafe",
+        logical_context_registry=registry,
+        shared_job_registry=shared_jobs,
+        persist_project_selection=False,
+    )
+    context_id = runtime._ensure_logical_context()
+    assert context_id is not None
+    return runtime, context_id
 
 
 class StateManagementTests(TestCase):
@@ -1011,6 +1091,348 @@ class StateManagementTests(TestCase):
                     self.assertTrue(payload["checkpoint_id"])
                 finally:
                     runtime.close()
+
+    def test_continuation_resume_rebinds_dirty_managed_workspace(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, head = init_repo(root)
+            with patch.dict("os.environ", {"DEVMCP_CONFIG_DIR": str(root / "config")}):
+                setup_registry = LogicalContextRegistry()
+                setup, _setup_context = new_context_runtime(repo, setup_registry)
+                try:
+                    worktree, branch = bind_test_managed_workspace(
+                        setup, setup_registry
+                    )
+                    (worktree / "tracked.txt").write_text(
+                        "dirty continuation\n", encoding="utf-8"
+                    )
+                    written = write_test_continuation(setup, "dirty-managed-resume")
+                    payload = written["checkpoint"]["payload"]
+                    self.assertEqual(payload["workspace_kind"], "managed")
+                    self.assertTrue(payload["workspace_dirty"])
+                    self.assertEqual(payload["branch"], branch)
+                    self.assertEqual(payload["head"], head)
+                finally:
+                    setup.close()
+                    setup_registry.close()
+
+                resume_registry = LogicalContextRegistry()
+                resumed, _resume_context = new_context_runtime(repo, resume_registry)
+                try:
+                    result = resumed.continuation_checkpoint(
+                        {"action": "resume", "logical_task": "dirty-managed-resume"}
+                    )
+                    self.assertEqual(result["status"], "resumed")
+                    self.assertEqual(resumed.effective_workspace_root, worktree)
+                    self.assertEqual(resumed.default_cwd, worktree)
+                    self.assertEqual(
+                        (worktree / "tracked.txt").read_text(encoding="utf-8"),
+                        "dirty continuation\n",
+                    )
+                    self.assertEqual(resumed._state_branch(), branch)
+                finally:
+                    resumed.close()
+                    resume_registry.close()
+
+    def test_continuation_resume_recreates_clean_managed_workspace(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, _head = init_repo(root)
+            with patch.dict("os.environ", {"DEVMCP_CONFIG_DIR": str(root / "config")}):
+                setup_registry = LogicalContextRegistry()
+                setup, _setup_context = new_context_runtime(repo, setup_registry)
+                try:
+                    original_worktree, branch = bind_test_managed_workspace(
+                        setup, setup_registry
+                    )
+                    written = write_test_continuation(setup, "clean-managed-resume")
+                    self.assertFalse(
+                        written["checkpoint"]["payload"]["workspace_dirty"]
+                    )
+                finally:
+                    setup.close()
+                    setup_registry.close()
+
+                self.assertEqual(
+                    cleanup_managed_worktree(repo, original_worktree), "removed_clean"
+                )
+                self.assertEqual(
+                    subprocess.run(
+                        ["git", "show-ref", "--verify", f"refs/heads/{branch}"],
+                        cwd=repo,
+                        check=False,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    ).returncode,
+                    0,
+                )
+
+                resume_registry = LogicalContextRegistry()
+                resumed, _resume_context = new_context_runtime(repo, resume_registry)
+                try:
+                    result = resumed.continuation_checkpoint(
+                        {"action": "resume", "logical_task": "clean-managed-resume"}
+                    )
+                    recreated = resumed.effective_workspace_root
+                    self.assertEqual(result["status"], "resumed")
+                    self.assertNotEqual(recreated, original_worktree)
+                    self.assertTrue(recreated.is_dir())
+                    self.assertEqual(resumed._state_branch(), branch)
+                    self.assertEqual(
+                        [
+                            record.path
+                            for record in registered_worktrees(repo)
+                            if record.branch == branch
+                        ],
+                        [recreated],
+                    )
+                    again = resumed.continuation_checkpoint(
+                        {"action": "resume", "logical_task": "clean-managed-resume"}
+                    )
+                    self.assertEqual(again["status"], "already_resumed")
+                    self.assertEqual(resumed.effective_workspace_root, recreated)
+                finally:
+                    resumed.close()
+                    resume_registry.close()
+
+    def test_continuation_resume_claims_canonical_and_preserves_state_drift_guard(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, _head = init_repo(root)
+            with patch.dict("os.environ", {"DEVMCP_CONFIG_DIR": str(root / "config")}):
+                setup_registry = LogicalContextRegistry()
+                setup, _setup_context = new_context_runtime(repo, setup_registry)
+                try:
+                    written = write_test_continuation(setup, "canonical-resume")
+                    self.assertEqual(
+                        written["checkpoint"]["payload"]["workspace_kind"], "canonical"
+                    )
+                finally:
+                    setup.close()
+                    setup_registry.close()
+
+                resume_registry = LogicalContextRegistry()
+                resumed, _resume_context = new_context_runtime(repo, resume_registry)
+                try:
+                    result = resumed.continuation_checkpoint(
+                        {"action": "resume", "logical_task": "canonical-resume"}
+                    )
+                    self.assertEqual(result["status"], "resumed")
+                    self.assertEqual(resumed.effective_workspace_root, repo.resolve())
+                    self.assertEqual(
+                        resumed.continuation_checkpoint(
+                            {"action": "resume", "logical_task": "canonical-resume"}
+                        )["status"],
+                        "already_resumed",
+                    )
+                    (repo / "tracked.txt").write_text(
+                        "drift after resume\n", encoding="utf-8"
+                    )
+                    with self.assertRaises(ToolFailure) as drift:
+                        resumed.git_create_branch({"name": "must-still-drift"})
+                    self.assertEqual(drift.exception.code, "STATE_DRIFT")
+                finally:
+                    resumed.close()
+                    resume_registry.close()
+
+    def test_continuation_resume_requires_explicit_scope(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, _head = init_repo(root)
+            with patch.dict("os.environ", {"DEVMCP_CONFIG_DIR": str(root / "config")}):
+                registry = LogicalContextRegistry()
+                runtime, _context_id = new_context_runtime(repo, registry)
+                try:
+                    with self.assertRaises(ToolFailure) as missing_scope:
+                        runtime.continuation_checkpoint({"action": "resume"})
+                    self.assertEqual(missing_scope.exception.code, "INVALID_ARGUMENT")
+                    self.assertEqual(
+                        missing_scope.exception.details["reason"],
+                        "resume_scope_required",
+                    )
+                finally:
+                    runtime.close()
+                    registry.close()
+
+    def test_continuation_resume_rejects_live_owner_collision(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, _head = init_repo(root)
+            with patch.dict("os.environ", {"DEVMCP_CONFIG_DIR": str(root / "config")}):
+                setup_registry = LogicalContextRegistry()
+                setup, _setup_context = new_context_runtime(repo, setup_registry)
+                try:
+                    write_test_continuation(setup, "live-owner-resume")
+                finally:
+                    setup.close()
+                    setup_registry.close()
+
+                registry = LogicalContextRegistry()
+                owner, owner_context = new_context_runtime(repo, registry)
+                resumed, _resume_context = new_context_runtime(repo, registry)
+                try:
+                    owner_state = registry.get(owner_context)
+                    assert owner_state is not None
+                    registry.claim_existing_workspace(
+                        owner_state, target_workspace=repo, default_cwd=repo
+                    )
+                    with self.assertRaises(ToolFailure) as collision:
+                        resumed.continuation_checkpoint(
+                            {"action": "resume", "logical_task": "live-owner-resume"}
+                        )
+                    self.assertEqual(collision.exception.code, "INVALID_STATE")
+                    self.assertEqual(
+                        collision.exception.details["reason"], "workspace_already_owned"
+                    )
+                finally:
+                    resumed.close()
+                    owner.close()
+                    registry.close()
+
+    def test_continuation_resume_rejects_active_job_resource(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, _head = init_repo(root)
+            with patch.dict("os.environ", {"DEVMCP_CONFIG_DIR": str(root / "config")}):
+                setup_registry = LogicalContextRegistry()
+                setup, _setup_context = new_context_runtime(repo, setup_registry)
+                try:
+                    write_test_continuation(setup, "active-job-resume")
+                finally:
+                    setup.close()
+                    setup_registry.close()
+
+                registry = LogicalContextRegistry()
+                jobs = SharedJobRegistry(context_registry=registry)
+                resumed, context_id = new_context_runtime(
+                    repo, registry, shared_jobs=jobs
+                )
+                process = subprocess.Popen(
+                    [sys.executable, "-c", "import time; time.sleep(30)"],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    start_new_session=True,
+                )
+                session = ExecSession(
+                    session_id=jobs.new_handle(),
+                    process=process,
+                    timeout_at=time.time() + 60,
+                )
+                jobs.register(
+                    session,
+                    owner_context_id=context_id,
+                    owner_runtime=resumed,
+                )
+                try:
+                    with self.assertRaises(ToolFailure) as active:
+                        resumed.continuation_checkpoint(
+                            {"action": "resume", "logical_task": "active-job-resume"}
+                        )
+                    self.assertEqual(active.exception.code, "INVALID_STATE")
+                    self.assertEqual(
+                        active.exception.details["reason"], "active_command_resources"
+                    )
+                finally:
+                    jobs.close()
+                    resumed.close()
+                    registry.close()
+
+    def test_continuation_resume_fails_closed_for_legacy_v1(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, _head = init_repo(root)
+            scope = "task:legacy-resume"
+            with patch.dict("os.environ", {"DEVMCP_CONFIG_DIR": str(root / "config")}):
+                setup_registry = LogicalContextRegistry()
+                setup, _setup_context = new_context_runtime(repo, setup_registry)
+                try:
+                    write_test_continuation(setup, "legacy-resume")
+                finally:
+                    setup.close()
+                    setup_registry.close()
+                path = continuation_checkpoint_path(repo, scope)
+                record = json.loads(path.read_text(encoding="utf-8"))
+                record["version"] = 1
+                path.write_text(json.dumps(record), encoding="utf-8")
+
+                registry = LogicalContextRegistry()
+                resumed, _context_id = new_context_runtime(repo, registry)
+                try:
+                    with self.assertRaises(ToolFailure) as legacy:
+                        resumed.continuation_checkpoint(
+                            {"action": "resume", "logical_task": "legacy-resume"}
+                        )
+                    self.assertEqual(legacy.exception.code, "INVALID_STATE")
+                    self.assertEqual(
+                        legacy.exception.details["reason"],
+                        "resume_metadata_insufficient",
+                    )
+                finally:
+                    resumed.close()
+                    registry.close()
+
+    def test_continuation_resume_revalidates_after_claim_before_baseline(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, _head = init_repo(root)
+            scope = "task:resume-double-validation"
+            with patch.dict("os.environ", {"DEVMCP_CONFIG_DIR": str(root / "config")}):
+                setup_registry = LogicalContextRegistry()
+                setup, _setup_context = new_context_runtime(repo, setup_registry)
+                try:
+                    worktree, _branch = bind_test_managed_workspace(
+                        setup, setup_registry
+                    )
+                    (worktree / "tracked.txt").write_text(
+                        "saved dirty state\n", encoding="utf-8"
+                    )
+                    write_test_continuation(setup, "resume-double-validation")
+                finally:
+                    setup.close()
+                    setup_registry.close()
+                before = continuation_checkpoint_path(repo, scope).read_bytes()
+
+                registry = LogicalContextRegistry()
+                resumed, context_id = new_context_runtime(repo, registry)
+                original_claim = registry.claim_existing_workspace
+
+                def claim_then_tamper(*args: object, **kwargs: object) -> object:
+                    previous = original_claim(*args, **kwargs)
+                    (worktree / "tracked.txt").write_text(
+                        "tampered after first validation\n", encoding="utf-8"
+                    )
+                    return previous
+
+                try:
+                    with patch.object(
+                        registry,
+                        "claim_existing_workspace",
+                        side_effect=claim_then_tamper,
+                    ):
+                        with self.assertRaises(ToolFailure) as drift:
+                            resumed.continuation_checkpoint(
+                                {
+                                    "action": "resume",
+                                    "logical_task": "resume-double-validation",
+                                }
+                            )
+                    self.assertEqual(drift.exception.code, "STATE_DRIFT")
+                    self.assertEqual(
+                        drift.exception.details["reason"], "resume_state_drift"
+                    )
+                    self.assertIsNone(
+                        read_authoritative_state_checkpoint(repo, context_id)
+                    )
+                    self.assertEqual(
+                        continuation_checkpoint_path(repo, scope).read_bytes(), before
+                    )
+                    self.assertEqual(resumed.effective_workspace_root, repo.resolve())
+                finally:
+                    resumed.close()
+                    registry.close()
 
     def test_continuation_validation_happens_before_persistence(self) -> None:
         with TemporaryDirectory() as tmp:

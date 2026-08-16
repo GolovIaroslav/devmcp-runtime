@@ -3,10 +3,18 @@ from __future__ import annotations
 import hashlib
 import shutil
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 
 from .errors import ToolFailure
 from .state_store import state_root
+
+
+@dataclass(frozen=True)
+class RegisteredWorktree:
+    path: Path
+    head: str | None
+    branch: str | None
 
 
 def managed_worktree_branch(context_id: str) -> str:
@@ -68,11 +76,10 @@ def managed_worktree_root(canonical_project: Path) -> Path:
     return state_root(canonical_project) / "worktrees"
 
 
-def _registered_managed_worktrees(canonical_project: Path) -> list[Path]:
+def registered_worktrees(canonical_project: Path) -> list[RegisteredWorktree]:
     git = shutil.which("git")
     if git is None:
         return []
-    root = managed_worktree_root(canonical_project).resolve()
     result = subprocess.run(
         [git, "-C", str(canonical_project), "worktree", "list", "--porcelain"],
         text=True,
@@ -83,17 +90,79 @@ def _registered_managed_worktrees(canonical_project: Path) -> list[Path]:
     )
     if result.returncode != 0:
         return []
-    paths: list[Path] = []
-    for line in result.stdout.splitlines():
-        if not line.startswith("worktree "):
+    records: list[RegisteredWorktree] = []
+    current: dict[str, str] = {}
+    for line in [*result.stdout.splitlines(), ""]:
+        if not line:
+            raw_path = current.get("worktree")
+            if raw_path:
+                raw_branch = current.get("branch")
+                records.append(
+                    RegisteredWorktree(
+                        path=Path(raw_path).resolve(),
+                        head=current.get("HEAD"),
+                        branch=(
+                            raw_branch.removeprefix("refs/heads/")
+                            if raw_branch
+                            else None
+                        ),
+                    )
+                )
+            current = {}
             continue
-        path = Path(line.removeprefix("worktree ")).resolve()
+        key, _, value = line.partition(" ")
+        current[key] = value
+    return records
+
+
+def registered_managed_worktrees(
+    canonical_project: Path,
+) -> list[RegisteredWorktree]:
+    root = managed_worktree_root(canonical_project).resolve()
+    records: list[RegisteredWorktree] = []
+    for record in registered_worktrees(canonical_project):
         try:
-            path.relative_to(root)
+            record.path.relative_to(root)
         except ValueError:
             continue
-        paths.append(path)
-    return paths
+        records.append(record)
+    return records
+
+
+def attach_existing_branch_worktree(
+    canonical_project: Path, context_id: str, branch: str
+) -> Path:
+    """Attach one existing local branch at a new DevMCP-managed path."""
+
+    git = shutil.which("git")
+    if git is None:
+        raise ToolFailure("GIT_ERROR", "git is required.", category="environment")
+    digest = hashlib.sha256(context_id.encode()).hexdigest()[:24]
+    root = managed_worktree_root(canonical_project)
+    root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path = root / digest
+    result = subprocess.run(
+        [git, "-C", str(canonical_project), "worktree", "add", str(path), branch],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=30,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise ToolFailure(
+            "GIT_ERROR",
+            "Failed to attach the saved continuation branch in a managed worktree.",
+            category="runtime",
+            details={
+                "exit_code": result.returncode,
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+                "branch": branch,
+                "path": str(path),
+            },
+        )
+    return path.resolve(strict=True)
 
 
 def cleanup_managed_worktree(canonical_project: Path, worktree: Path) -> str:
@@ -106,7 +175,7 @@ def cleanup_managed_worktree(canonical_project: Path, worktree: Path) -> str:
         path.relative_to(root)
     except ValueError:
         return "ignored_unmanaged"
-    if path not in _registered_managed_worktrees(canonical):
+    if path not in {record.path for record in registered_managed_worktrees(canonical)}:
         return "ignored_unregistered"
     git = shutil.which("git")
     if git is None or not path.is_dir():
@@ -141,9 +210,9 @@ def recover_managed_worktrees(canonical_project: Path) -> dict[str, int]:
         "preserved_dirty": 0,
         "preserved_error": 0,
     }
-    for worktree in _registered_managed_worktrees(canonical_project):
+    for record in registered_managed_worktrees(canonical_project):
         counts["found"] += 1
-        outcome = cleanup_managed_worktree(canonical_project, worktree)
+        outcome = cleanup_managed_worktree(canonical_project, record.path)
         if outcome in counts:
             counts[outcome] += 1
     return counts
