@@ -88,13 +88,17 @@ cancellation, and leaves the service responsive to other requests.
 `continuation_checkpoint` persists one small JSON record below DevMCP's private
 user configuration directory, never inside the selected repository. Records
 are isolated by canonical project path plus a hashed logical-task or branch
-scope. Writes are atomic and mode 0600 where supported. The payload is a closed,
-bounded set of continuation fields: task/slice, branch, HEAD, PR/run identifiers,
-dirty-state summary, completed acceptance items, exact next action, and blocker
-type. Unknown fields and oversized payloads are rejected, so callers cannot turn
-the checkpoint store into an arbitrary secret or blob store. Common credential
-and private-key value forms are rejected as well. `clear` removes the record
-after terminal completion.
+scope. Writes are atomic and mode 0600 where supported. New writes use record
+version 2; version 1 remains readable and discoverable but is not resumable.
+`action=list` discovers only the selected canonical project's task/branch
+records, newest first, with `limit` defaulting to 20 and bounded to 1-64;
+malformed records are skipped and counted. The payload remains a closed,
+16 KiB-bounded set. Descriptive fields include objective, remaining items, and
+verification status. Branch, HEAD, state checkpoint/fingerprint/completeness,
+workspace kind, and dirty state are derived by the state-managed server after
+any required reconciliation rather than trusted from caller input. Unknown
+fields, oversized payloads, and common credential/private-key value forms are
+rejected. `clear` removes the record after terminal completion.
 
 `service_status` and `service_doctor` execute only fixed DevMCP operator commands on the host; they do not accept arbitrary command text. `service_restart` uses a delayed user-systemd transient unit so the current MCP response can complete before the running service is replaced.
 

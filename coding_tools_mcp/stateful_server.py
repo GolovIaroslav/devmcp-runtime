@@ -4,6 +4,7 @@ import os
 from typing import Any, Callable
 
 from . import server as core
+from .continuation import normalize_checkpoint_payload, write_checkpoint
 from .errors import ToolFailure
 from .state_checkpoint import (
     read_authoritative_state_checkpoint,
@@ -17,6 +18,7 @@ from .state_snapshot import (
     git_text,
     read_build_identity,
     state_fingerprint,
+    state_fingerprint_complete,
 )
 from .state_store import now_iso
 from .writer_lease import (
@@ -428,17 +430,47 @@ class StateManagedRuntime(StateMutationMixin, BuildIdentityMixin, core.Runtime):
         return result
 
     def continuation_checkpoint(self, args: dict[str, Any]) -> dict[str, Any]:
-        result = super().continuation_checkpoint(args)
         action = str(args.get("action") or "").strip().lower()
-        payload = args.get("payload")
-        if action != "write" or not isinstance(payload, dict):
-            return result
+        if action != "write":
+            result = super().continuation_checkpoint(args)
+            if action not in {"read", "list"}:
+                return result
+            actual = self._state_snapshot()
+            actual_head = str(actual.get("local_head") or "")
+            actual_fingerprint = state_fingerprint(actual)
 
+            def downgrade_verification(payload: dict[str, Any]) -> None:
+                if payload.get("verification_status") != "passed":
+                    return
+                if (
+                    payload.get("verified_head") != actual_head
+                    or payload.get("verified_state_fingerprint") != actual_fingerprint
+                ):
+                    payload["verification_status"] = "stale"
+
+            if action == "read":
+                checkpoint = result.get("checkpoint")
+                if isinstance(checkpoint, dict):
+                    raw_payload = checkpoint.get("payload")
+                    if isinstance(raw_payload, dict):
+                        checkpoint["payload"] = dict(raw_payload)
+                        downgrade_verification(checkpoint["payload"])
+                return result
+            checkpoints = result.get("checkpoints")
+            if isinstance(checkpoints, list):
+                for item in checkpoints:
+                    if isinstance(item, dict):
+                        downgrade_verification(item)
+            return result
+        if "payload" not in args:
+            return super().continuation_checkpoint(args)
+        payload = normalize_checkpoint_payload(args.get("payload"))
         requested_checkpoint_id = str(payload.get("checkpoint_id") or "").strip()
         requested_branch = str(payload.get("branch") or "").strip()
         requested_head = str(payload.get("head") or "").strip()
         requested_fingerprint = str(payload.get("state_fingerprint") or "").strip()
 
+        self._ensure_state_baseline()
         actual_branch = self._state_branch()
         authority_owner = self._state_owner()
         previous = read_authoritative_state_checkpoint(
@@ -453,63 +485,156 @@ class StateManagedRuntime(StateMutationMixin, BuildIdentityMixin, core.Runtime):
             actual_head = str(actual.get("local_head") or "")
             actual_fingerprint = state_fingerprint(actual)
             current_checkpoint_id = str((previous or {}).get("checkpoint_id") or "")
-            if (
-                not requested_checkpoint_id
-                or not requested_branch
-                or not requested_head
-                or not requested_fingerprint
-            ):
-                result["state_reconciliation"] = {
-                    "status": "not_applied",
-                    "reason": "missing_reconciliation_evidence",
-                }
-                return result
-            if requested_checkpoint_id != current_checkpoint_id:
-                result["state_reconciliation"] = {
-                    "status": "not_applied",
-                    "reason": "checkpoint_identity_mismatch",
-                    "requested_checkpoint_id": requested_checkpoint_id,
-                    "actual_checkpoint_id": current_checkpoint_id or None,
-                }
-                return result
-            if requested_branch != actual_branch or requested_head != actual_head:
-                result["state_reconciliation"] = {
-                    "status": "not_applied",
-                    "reason": "payload_branch_head_mismatch",
-                    "actual_branch": actual_branch,
-                    "actual_head": actual_head,
-                }
-                return result
-            if requested_fingerprint != actual_fingerprint:
-                result["state_reconciliation"] = {
-                    "status": "not_applied",
-                    "reason": "state_fingerprint_mismatch",
-                    "requested_fingerprint": requested_fingerprint,
-                    "actual_fingerprint": actual_fingerprint,
-                }
-                return result
-
-            checkpoint = write_state_checkpoint(
-                self.canonical_project_root,
-                actual_branch,
-                snapshot=actual,
-                phase="after",
-                operation="continuation_checkpoint_reconcile",
-                owner=self._state_owner(),
-                logical_task=self._state_task(),
-                outcome="reconciled",
-                previous_checkpoint_id=str((previous or {}).get("checkpoint_id") or "")
-                or None,
-                authority_owner=authority_owner,
+            expected_snapshot = (
+                previous.get("snapshot")
+                if isinstance(previous, dict)
+                and isinstance(previous.get("snapshot"), dict)
+                else None
             )
-            result["state_reconciliation"] = {
-                "status": "reconciled",
-                "checkpoint_id": checkpoint["checkpoint_id"],
-                "branch": actual_branch,
-                "head": actual_head,
-                "state_fingerprint": actual_fingerprint,
+            drift = (
+                compare_snapshots(expected_snapshot, actual)
+                if expected_snapshot is not None
+                else {}
+            )
+            reconciliation: dict[str, Any] = {"status": "not_needed"}
+            requested_evidence = (
+                requested_checkpoint_id,
+                requested_branch,
+                requested_head,
+                requested_fingerprint,
+            )
+            has_complete_requested_evidence = all(requested_evidence)
+            if has_complete_requested_evidence:
+                if requested_checkpoint_id != current_checkpoint_id:
+                    return {
+                        "action": action,
+                        "scope": self._continuation_scope(args),
+                        "checkpoint": None,
+                        "state_reconciliation": {
+                            "status": "not_applied",
+                            "reason": "checkpoint_identity_mismatch",
+                            "requested_checkpoint_id": requested_checkpoint_id,
+                            "actual_checkpoint_id": current_checkpoint_id or None,
+                        },
+                    }
+                if requested_branch != actual_branch or requested_head != actual_head:
+                    return {
+                        "action": action,
+                        "scope": self._continuation_scope(args),
+                        "checkpoint": None,
+                        "state_reconciliation": {
+                            "status": "not_applied",
+                            "reason": "payload_branch_head_mismatch",
+                            "actual_branch": actual_branch,
+                            "actual_head": actual_head,
+                        },
+                    }
+                if requested_fingerprint != actual_fingerprint:
+                    return {
+                        "action": action,
+                        "scope": self._continuation_scope(args),
+                        "checkpoint": None,
+                        "state_reconciliation": {
+                            "status": "not_applied",
+                            "reason": "state_fingerprint_mismatch",
+                            "requested_fingerprint": requested_fingerprint,
+                            "actual_fingerprint": actual_fingerprint,
+                        },
+                    }
+            if drift:
+                if not has_complete_requested_evidence:
+                    return {
+                        "action": action,
+                        "scope": self._continuation_scope(args),
+                        "checkpoint": None,
+                        "state_reconciliation": {
+                            "status": "not_applied",
+                            "reason": "missing_reconciliation_evidence",
+                        },
+                    }
+                previous = write_state_checkpoint(
+                    self.canonical_project_root,
+                    actual_branch,
+                    snapshot=actual,
+                    phase="after",
+                    operation="continuation_checkpoint_reconcile",
+                    owner=self._state_owner(),
+                    logical_task=self._state_task(),
+                    outcome="reconciled",
+                    previous_checkpoint_id=current_checkpoint_id or None,
+                    authority_owner=authority_owner,
+                )
+                current_checkpoint_id = str(previous["checkpoint_id"])
+                reconciliation = {
+                    "status": "reconciled",
+                    "checkpoint_id": current_checkpoint_id,
+                }
+
+            verified_status = str(payload.get("verification_status") or "not_run")
+            verified_head = str(payload.get("verified_head") or "").strip()
+            verified_fingerprint = str(
+                payload.get("verified_state_fingerprint") or ""
+            ).strip()
+            if verified_status == "passed":
+                if not verified_head or not verified_fingerprint:
+                    raise ToolFailure(
+                        "INVALID_ARGUMENT",
+                        "passed verification requires verified_head and verified_state_fingerprint.",
+                        category="validation",
+                    )
+                if (
+                    verified_head != actual_head
+                    or verified_fingerprint != actual_fingerprint
+                ):
+                    verified_status = "stale"
+
+            trusted_payload = {
+                key: value
+                for key, value in payload.items()
+                if key
+                not in {
+                    "branch",
+                    "head",
+                    "checkpoint_id",
+                    "state_fingerprint",
+                    "state_fingerprint_complete",
+                    "workspace_kind",
+                    "workspace_dirty",
+                    "verification_status",
+                }
             }
-            return result
+            trusted_payload.update(
+                {
+                    "branch": actual_branch,
+                    "head": actual_head,
+                    "checkpoint_id": current_checkpoint_id,
+                    "state_fingerprint": actual_fingerprint,
+                    "state_fingerprint_complete": state_fingerprint_complete(actual),
+                    "workspace_kind": (
+                        "canonical"
+                        if self.effective_workspace_root == self.canonical_project_root
+                        else "managed"
+                    ),
+                    "workspace_dirty": bool(
+                        actual.get("dirty_paths")
+                        or actual.get("staged_paths")
+                        or actual.get("untracked_paths")
+                    ),
+                    "verification_status": verified_status,
+                }
+            )
+            scope = self._continuation_scope(args)
+            record = write_checkpoint(
+                self.canonical_project_root,
+                scope,
+                trusted_payload,
+            )
+            return {
+                "action": action,
+                "scope": scope,
+                "checkpoint": record,
+                "state_reconciliation": reconciliation,
+            }
         finally:
             self._release_state_owner_leases()
 

@@ -18,6 +18,9 @@ from unittest.mock import patch
 
 from coding_tools_mcp import server as server_module
 from coding_tools_mcp import processes as processes_module
+from coding_tools_mcp.continuation import (
+    checkpoint_path as continuation_checkpoint_path,
+)
 from coding_tools_mcp.patching import AtomicPatchCommitter, FileBaseline, StagedFile
 from coding_tools_mcp.protocol import dispatch_rpc
 from coding_tools_mcp.sandbox import ExecutionSandbox, SandboxBackend
@@ -2459,6 +2462,7 @@ Maven home: /usr/share/maven
                 loaded = second.continuation_checkpoint(
                     {"action": "read", "logical_task": "ticketwise-u7.18"}
                 )["checkpoint"]
+                self.assertEqual(loaded["version"], 2)
                 self.assertEqual(loaded["payload"]["head"], "abc123")
                 second.continuation_checkpoint(
                     {
@@ -2466,6 +2470,12 @@ Maven home: /usr/share/maven
                         "logical_task": "ticketwise-u7.18",
                         "payload": {"head": "def456", "next_action": "merge PR"},
                     }
+                )
+                replaced = second.continuation_checkpoint(
+                    {"action": "read", "logical_task": "ticketwise-u7.18"}
+                )["checkpoint"]
+                self.assertEqual(
+                    replaced["payload"], {"head": "def456", "next_action": "merge PR"}
                 )
                 other = Runtime(project_b)
                 self.assertIsNone(
@@ -2506,6 +2516,94 @@ Maven home: /usr/share/maven
                 )
                 second.close()
                 other.close()
+
+    def test_continuation_checkpoint_lists_legacy_bounded_and_malformed_records(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = root / "config"
+            project = root / "project"
+            other_project = root / "other"
+            project.mkdir()
+            other_project.mkdir()
+            with patch.dict(os.environ, {"DEVMCP_CONFIG_DIR": str(config)}):
+                runtime = Runtime(project)
+                other = Runtime(other_project)
+                try:
+                    runtime.continuation_checkpoint(
+                        {
+                            "action": "write",
+                            "logical_task": "newer",
+                            "payload": {
+                                "objective": "new objective",
+                                "state_fingerprint_complete": True,
+                            },
+                        }
+                    )
+                    runtime.continuation_checkpoint(
+                        {
+                            "action": "write",
+                            "branch": "feature/older",
+                            "payload": {"objective": "older objective"},
+                        }
+                    )
+                    legacy_scope = "task:legacy"
+                    legacy_path = continuation_checkpoint_path(project, legacy_scope)
+                    legacy_path.write_text(
+                        json.dumps(
+                            {
+                                "version": 1,
+                                "project": str(project.resolve()),
+                                "scope": legacy_scope,
+                                "updated_at": "2000-01-01T00:00:00+00:00",
+                                "payload": {"next_action": "legacy next"},
+                            }
+                        ),
+                        encoding="utf-8",
+                    )
+                    malformed = legacy_path.parent / "malformed.json"
+                    malformed.write_text("{not-json", encoding="utf-8")
+
+                    listed = runtime.continuation_checkpoint(
+                        {"action": "list", "limit": 2}
+                    )
+                    self.assertEqual(len(listed["checkpoints"]), 2)
+                    self.assertEqual(listed["invalid_count"], 1)
+                    self.assertEqual(
+                        [item["scope"] for item in listed["checkpoints"]],
+                        ["branch:feature/older", "task:newer"],
+                    )
+                    legacy = runtime.continuation_checkpoint(
+                        {"action": "list", "limit": 20}
+                    )
+                    legacy_summary = next(
+                        item
+                        for item in legacy["checkpoints"]
+                        if item["scope"] == legacy_scope
+                    )
+                    self.assertFalse(legacy_summary["resumable"])
+                    self.assertEqual(legacy_summary["resume_blocker"], "legacy_v1")
+                    self.assertEqual(
+                        runtime.continuation_checkpoint(
+                            {"action": "read", "logical_task": "legacy"}
+                        )["checkpoint"]["version"],
+                        1,
+                    )
+                    self.assertEqual(
+                        other.continuation_checkpoint({"action": "list"})[
+                            "checkpoints"
+                        ],
+                        [],
+                    )
+                    for bad_limit in (0, 65, True):
+                        with self.assertRaises(ToolFailure):
+                            runtime.continuation_checkpoint(
+                                {"action": "list", "limit": bad_limit}
+                            )
+                finally:
+                    runtime.close()
+                    other.close()
 
     def test_continuation_checkpoint_rejects_storage_inside_project(self) -> None:
         with TemporaryDirectory() as tmp:

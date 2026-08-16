@@ -10,7 +10,8 @@ When resuming, reconstruct the task from durable state before changing files:
 
 1. select the intended project and read its authority/state files;
 2. inspect the current Git branch, HEAD, upstream, and dirty state;
-3. read the project-scoped `continuation_checkpoint`, if one exists;
+3. list/read the project-scoped `continuation_checkpoint` records and select the
+   relevant trusted v2 record; legacy v1 records are discovery-only;
 4. inspect the active PR and authoritative CI/provider state through the
    connector that owns those credentials;
 5. continue from the first unfinished acceptance item or exact `next_action`.
@@ -35,13 +36,16 @@ actually forced to stop.
 
 Before an actual client/session limit or transport shutdown prevents further
 work, write one small `continuation_checkpoint` containing only the supported
-non-secret fields needed to resume:
+non-secret descriptive fields needed to resume. The state-managed server adds
+the current branch, HEAD, state checkpoint/fingerprint/completeness, workspace
+kind, and dirty-state authority after validating any explicit reconciliation:
 
 - active task/slice;
-- branch and HEAD;
 - PR and workflow run identifiers;
 - concise dirty-state summary;
 - completed acceptance items;
+- objective and remaining items;
+- verification status and verified state identity when applicable;
 - exact next action;
 - blocker type and timestamp.
 
