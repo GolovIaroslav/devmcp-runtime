@@ -1296,6 +1296,41 @@ class StateManagementTests(TestCase):
                     runtime.close()
                     registry.close()
 
+    def test_continuation_resume_requires_active_logical_context(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, _head = init_repo(root)
+            with patch.dict("os.environ", {"DEVMCP_CONFIG_DIR": str(root / "config")}):
+                setup_registry = LogicalContextRegistry()
+                setup, _setup_context = new_context_runtime(repo, setup_registry)
+                try:
+                    write_test_continuation(setup, "active-context-required")
+                finally:
+                    setup.close()
+                    setup_registry.close()
+
+                registry = LogicalContextRegistry()
+                resumed = StateManagedRuntime(
+                    workspace=repo,
+                    sandbox_backend="unsafe",
+                    logical_context_registry=registry,
+                    persist_project_selection=False,
+                )
+                try:
+                    self.assertIsNone(resumed._active_context_id())
+                    with self.assertRaises(ToolFailure) as no_context:
+                        resumed.continuation_checkpoint(
+                            {
+                                "action": "resume",
+                                "logical_task": "active-context-required",
+                            }
+                        )
+                    self.assertEqual(no_context.exception.code, "CONTEXT_NOT_FOUND")
+                    self.assertEqual(no_context.exception.category, "not_found")
+                finally:
+                    resumed.close()
+                    registry.close()
+
     def test_continuation_resume_rejects_live_owner_collision(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
