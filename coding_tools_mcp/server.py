@@ -6902,11 +6902,18 @@ class Runtime:
 
     def continuation_checkpoint(self, args: dict[str, Any]) -> dict[str, Any]:
         action = str(args.get("action", "")).strip().lower()
-        if action not in {"read", "write", "clear", "list"}:
+        if action not in {"read", "write", "clear", "list", "resume"}:
             raise ToolFailure(
                 "INVALID_ARGUMENT",
-                "action must be read, write, clear, or list.",
+                "action must be read, write, clear, list, or resume.",
                 category="validation",
+            )
+        if action == "resume":
+            raise ToolFailure(
+                "INVALID_STATE",
+                "Continuation resume requires the state-managed runtime.",
+                category="conflict",
+                details={"reason": "resume_metadata_insufficient"},
             )
         if action == "list":
             limit = args.get("limit", DEFAULT_LIST_LIMIT)
@@ -10021,7 +10028,7 @@ def input_schemas() -> dict[str, dict[str, Any]]:
             {
                 "action": {
                     "type": "string",
-                    "enum": ["read", "write", "clear", "list"],
+                    "enum": ["read", "write", "clear", "list", "resume"],
                 },
                 "logical_task": {**string, "maxLength": 256},
                 "branch": {**string, "maxLength": 256},

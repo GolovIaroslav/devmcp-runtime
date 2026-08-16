@@ -165,6 +165,66 @@ class LogicalContextRegistry:
                 state.mutation_workspace_claimed = False
                 state.last_seen = time.monotonic()
 
+    def claim_existing_workspace(
+        self,
+        state: LogicalContextState,
+        *,
+        target_workspace: Path,
+        default_cwd: Path,
+    ) -> tuple[Path, Path, bool]:
+        """Atomically bind one context to an already validated workspace."""
+
+        self.prune()
+        target_workspace = target_workspace.resolve(strict=True)
+        default_cwd = default_cwd.resolve(strict=True)
+        with self._lock:
+            current = self._contexts.get(state.context_id)
+            if current is not state:
+                raise RuntimeError("logical context is no longer registered")
+            previous = (
+                state.effective_workspace_root,
+                state.default_cwd,
+                state.mutation_workspace_claimed,
+            )
+            if (
+                state.mutation_workspace_claimed
+                and state.effective_workspace_root != target_workspace
+            ):
+                raise ValueError("context already owns a conflicting workspace")
+            if any(
+                other is not state
+                and other.mutation_workspace_claimed
+                and other.canonical_project_root == state.canonical_project_root
+                and other.effective_workspace_root == target_workspace
+                for other in self._contexts.values()
+            ):
+                raise FileExistsError("workspace already owned by another live context")
+            state.effective_workspace_root = target_workspace
+            state.default_cwd = default_cwd
+            state.mutation_workspace_claimed = True
+            state.last_seen = time.monotonic()
+            return previous
+
+    def rollback_existing_workspace_claim(
+        self,
+        state: LogicalContextState,
+        *,
+        expected_workspace: Path,
+        previous: tuple[Path, Path, bool],
+    ) -> None:
+        with self._lock:
+            current = self._contexts.get(state.context_id)
+            if current is not state:
+                return
+            if state.effective_workspace_root != expected_workspace.resolve(
+                strict=False
+            ):
+                return
+            state.effective_workspace_root = previous[0]
+            state.default_cwd = previous[1]
+            state.mutation_workspace_claimed = previous[2]
+            state.last_seen = time.monotonic()
+
     def retain(self, context_id: str) -> LogicalContextState | None:
         self.prune()
         with self._lock:
