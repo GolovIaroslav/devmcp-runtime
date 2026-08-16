@@ -14,7 +14,9 @@ def managed_worktree_branch(context_id: str) -> str:
     return f"devmcp/context-{digest}"
 
 
-def create_managed_worktree(canonical_project: Path, context_id: str) -> tuple[Path, str]:
+def create_managed_worktree(
+    canonical_project: Path, context_id: str, *, base_revision: str = "HEAD"
+) -> tuple[Path, str]:
     git = shutil.which("git")
     if git is None:
         raise ToolFailure(
@@ -37,7 +39,7 @@ def create_managed_worktree(canonical_project: Path, context_id: str) -> tuple[P
             "-b",
             branch,
             str(path),
-            "HEAD",
+            base_revision,
         ],
         text=True,
         stdout=subprocess.PIPE,
@@ -56,6 +58,7 @@ def create_managed_worktree(canonical_project: Path, context_id: str) -> tuple[P
                 "stderr": result.stderr,
                 "branch": branch,
                 "path": str(path),
+                "base_revision": base_revision,
             },
         )
     return path.resolve(strict=True), branch

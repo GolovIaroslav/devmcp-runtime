@@ -189,6 +189,17 @@ class HTTPSessionStateTests(unittest.TestCase):
                         context_b = state_b["context_id"]
                         self.assertNotEqual(context_a, context_b)
 
+                        base_head = subprocess.run(
+                            ["git", "-C", str(repo), "rev-parse", "HEAD"],
+                            check=True,
+                            text=True,
+                            stdout=subprocess.PIPE,
+                        ).stdout.strip()
+                        client_a.call_tool(
+                            "git_create_branch",
+                            {"name": "context-a-feature", "context_id": context_a},
+                        )
+
                         write_a = structured(
                             client_a.call_tool(
                                 "exec_argv",
@@ -205,6 +216,21 @@ class HTTPSessionStateTests(unittest.TestCase):
                         )
                         self.assertEqual(write_a["workspace"], str(repo.resolve()))
                         self.assertEqual((repo / "same.txt").read_text(), "A\n")
+                        client_a.call_tool(
+                            "git_commit",
+                            {
+                                "message": "context A change",
+                                "paths": ["same.txt"],
+                                "context_id": context_a,
+                            },
+                        )
+                        context_a_head = subprocess.run(
+                            ["git", "-C", str(repo), "rev-parse", "HEAD"],
+                            check=True,
+                            text=True,
+                            stdout=subprocess.PIPE,
+                        ).stdout.strip()
+                        self.assertNotEqual(context_a_head, base_head)
 
                         write_b = structured(
                             client_b.call_tool(
@@ -227,6 +253,15 @@ class HTTPSessionStateTests(unittest.TestCase):
                         )
                         self.assertEqual((repo / "same.txt").read_text(), "A\n")
                         self.assertEqual((worktree / "same.txt").read_text(), "B\n")
+                        self.assertEqual(
+                            subprocess.run(
+                                ["git", "-C", str(worktree), "rev-parse", "HEAD"],
+                                check=True,
+                                text=True,
+                                stdout=subprocess.PIPE,
+                            ).stdout.strip(),
+                            base_head,
+                        )
                         branch = subprocess.run(
                             ["git", "-C", str(worktree), "branch", "--show-current"],
                             check=True,
@@ -265,7 +300,7 @@ class HTTPSessionStateTests(unittest.TestCase):
                             text=True,
                             stdout=subprocess.PIPE,
                         ).stdout.strip()
-                        self.assertEqual(canonical_branch, "main")
+                        self.assertEqual(canonical_branch, "context-a-feature")
                         self.assertEqual(
                             subprocess.run(
                                 [

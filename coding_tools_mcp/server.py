@@ -2105,7 +2105,9 @@ class Runtime:
 
         try:
             worktree_root, _branch = create_managed_worktree(
-                state.canonical_project_root, state.context_id
+                state.canonical_project_root,
+                state.context_id,
+                base_revision=self._context_mutation_workspace_base_revision(state),
             )
         except BaseException:
             registry.rollback_mutation_workspace_claim(state)
@@ -2126,6 +2128,12 @@ class Runtime:
         )
         self._apply_logical_context_state(state)
         self._on_context_mutation_workspace_bound(state)
+
+    def _context_mutation_workspace_base_revision(
+        self, state: LogicalContextState
+    ) -> str:
+        del state
+        return "HEAD"
 
     def _on_context_mutation_workspace_bound(self, state: LogicalContextState) -> None:
         del state
