@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -1215,6 +1216,116 @@ class StateManagementTests(TestCase):
                     )
                     self.assertEqual(result["status"], "success")
                     self.assertTrue((repo / "foreground.txt").exists())
+                    self.assertIn("state_checkpoint", result)
+                    self.assertIsNone(inspect_writer_lease(repo, "main"))
+                finally:
+                    runtime.close()
+
+    def test_http_managed_exec_rejects_unsafe_timeout_before_spawn_or_lease(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, _head = init_repo(root)
+            marker = repo / "must-not-start.txt"
+            with patch.dict("os.environ", {"DEVMCP_CONFIG_DIR": str(root / "config")}):
+                runtime = StateManagedRuntime(
+                    workspace=repo, sandbox_backend="unsafe", transport="http"
+                )
+                try:
+                    with patch.object(runtime, "_state_preflight") as state_preflight:
+                        with self.assertRaises(ToolFailure) as rejected:
+                            runtime.exec_command(
+                                {
+                                    "argv": [
+                                        "python3",
+                                        "-c",
+                                        "from pathlib import Path; Path('must-not-start.txt').write_text('started\\n')",
+                                    ],
+                                    "state_effect": "selected_repo",
+                                    "timeout_ms": core.HTTP_SAFE_BLOCKING_WAIT_MAX_MS
+                                    + 1,
+                                }
+                            )
+                        state_preflight.assert_not_called()
+                    error = rejected.exception
+                    self.assertEqual(error.code, "INVALID_ARGUMENT")
+                    self.assertEqual(error.category, "validation")
+                    self.assertFalse(marker.exists())
+                    self.assertIsNone(inspect_writer_lease(repo, "main"))
+                    self.assertEqual(
+                        error.details,
+                        {
+                            "state_effect": "selected_repo",
+                            "requested_timeout_ms": core.HTTP_SAFE_BLOCKING_WAIT_MAX_MS
+                            + 1,
+                            "max_http_timeout_ms": core.HTTP_SAFE_BLOCKING_WAIT_MAX_MS,
+                            "process_started": False,
+                        },
+                    )
+                    json.dumps(
+                        {
+                            "code": error.code,
+                            "message": error.message,
+                            "category": error.category,
+                            "retryable": error.retryable,
+                            "details": error.details,
+                        }
+                    )
+                finally:
+                    runtime.close()
+
+    def test_http_managed_exec_boundary_default_and_exec_argv_are_bounded(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, _head = init_repo(root)
+            with patch.dict("os.environ", {"DEVMCP_CONFIG_DIR": str(root / "config")}):
+                runtime = StateManagedRuntime(
+                    workspace=repo, sandbox_backend="unsafe", transport="http"
+                )
+                try:
+                    boundary = runtime.exec_command(
+                        {
+                            "cmd": "true",
+                            "state_effect": "selected_repo",
+                            "timeout_ms": core.HTTP_SAFE_BLOCKING_WAIT_MAX_MS,
+                        }
+                    )
+                    self.assertTrue(boundary["command_success"])
+                    default_timeout = runtime.exec_command(
+                        {"cmd": "true", "state_effect": "selected_repo"}
+                    )
+                    self.assertTrue(default_timeout["command_success"])
+                    with self.assertRaises(ToolFailure) as argv_rejected:
+                        runtime.exec_argv(
+                            {
+                                "argv": ["python3", "-c", "raise SystemExit(0)"],
+                                "state_effect": "selected_repo",
+                                "timeout_ms": core.HTTP_SAFE_BLOCKING_WAIT_MAX_MS + 1,
+                            }
+                        )
+                    self.assertEqual(argv_rejected.exception.code, "INVALID_ARGUMENT")
+                    self.assertIsNone(inspect_writer_lease(repo, "main"))
+                finally:
+                    runtime.close()
+
+    def test_stdio_managed_exec_allows_timeout_above_http_ceiling(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, _head = init_repo(root)
+            with patch.dict("os.environ", {"DEVMCP_CONFIG_DIR": str(root / "config")}):
+                runtime = StateManagedRuntime(
+                    workspace=repo, sandbox_backend="unsafe", transport="stdio"
+                )
+                try:
+                    result = runtime.exec_argv(
+                        {
+                            "argv": ["python3", "-c", "raise SystemExit(0)"],
+                            "state_effect": "selected_repo",
+                            "timeout_ms": core.HTTP_SAFE_BLOCKING_WAIT_MAX_MS + 1,
+                        }
+                    )
+                    self.assertTrue(result["command_success"])
                     self.assertIn("state_checkpoint", result)
                     self.assertIsNone(inspect_writer_lease(repo, "main"))
                 finally:
