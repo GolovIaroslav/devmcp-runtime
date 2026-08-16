@@ -2022,6 +2022,24 @@ class Runtime:
             self.logical_context_id = state.context_id
         return self.logical_context_id
 
+    @staticmethod
+    def _map_logical_context_default_cwd(
+        state: LogicalContextState, target_workspace: Path
+    ) -> Path:
+        default_cwd = state.default_cwd.resolve(strict=True)
+        target_workspace = target_workspace.resolve(strict=True)
+        for source_root in (
+            state.effective_workspace_root.resolve(strict=True),
+            state.canonical_project_root.resolve(strict=True),
+        ):
+            try:
+                relative_cwd = default_cwd.relative_to(source_root)
+            except ValueError:
+                continue
+            mapped_cwd = target_workspace / relative_cwd
+            return mapped_cwd if mapped_cwd.is_dir() else target_workspace
+        return default_cwd
+
     def _apply_logical_context_state(self, state: LogicalContextState) -> None:
         canonical_project_root = state.canonical_project_root.resolve(strict=True)
         effective_workspace_root = state.effective_workspace_root.resolve(strict=True)
@@ -2040,9 +2058,11 @@ class Runtime:
                 "Logical context effective workspace is no longer valid.",
                 category="runtime",
             )
-        if not default_cwd.is_dir() or not is_relative_to(
-            default_cwd, effective_workspace_root
-        ):
+        cwd_in_workspace = is_relative_to(default_cwd, effective_workspace_root)
+        external_build_cwd = self.execution_mode == "build" and not is_relative_to(
+            default_cwd, canonical_project_root
+        )
+        if not default_cwd.is_dir() or not (cwd_in_workspace or external_build_cwd):
             raise ToolFailure(
                 "CONTEXT_INVALID",
                 "Logical context default_cwd is no longer valid.",
@@ -2123,13 +2143,7 @@ class Runtime:
             registry.rollback_mutation_workspace_claim(state)
             raise
 
-        try:
-            relative_cwd = state.default_cwd.relative_to(state.canonical_project_root)
-        except ValueError:
-            relative_cwd = Path()
-        mapped_cwd = worktree_root / relative_cwd
-        if not mapped_cwd.is_dir():
-            mapped_cwd = worktree_root
+        mapped_cwd = self._map_logical_context_default_cwd(state, worktree_root)
         registry.update(
             state,
             canonical_project_root=state.canonical_project_root,
@@ -2588,6 +2602,14 @@ class Runtime:
 
     def set_default_cwd(self, args: dict[str, Any]) -> dict[str, Any]:
         resolved = self.workspace.resolve_existing(str(args.get("path", ".")))
+        if self.execution_mode != "build" and not is_relative_to(
+            resolved.path, self.workspace.root
+        ):
+            raise ToolFailure(
+                "PATH_OUTSIDE_WORKSPACE",
+                "Default cwd must stay inside the workspace in PLAN mode.",
+                category="security",
+            )
         if not resolved.path.is_dir():
             raise ToolFailure(
                 "NOT_A_DIRECTORY",

@@ -1134,6 +1134,46 @@ class StateManagementTests(TestCase):
                     resumed.close()
                     resume_registry.close()
 
+    def test_continuation_resume_preserves_external_default_cwd(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, _head = init_repo(root)
+            outside = root / "outside"
+            outside.mkdir()
+            with patch.dict("os.environ", {"DEVMCP_CONFIG_DIR": str(root / "config")}):
+                setup_registry = LogicalContextRegistry()
+                setup, _setup_context = new_context_runtime(repo, setup_registry)
+                try:
+                    worktree, _branch = bind_test_managed_workspace(
+                        setup, setup_registry
+                    )
+                    (worktree / "tracked.txt").write_text(
+                        "dirty continuation\n", encoding="utf-8"
+                    )
+                    write_test_continuation(setup, "external-cwd-resume")
+                finally:
+                    setup.close()
+                    setup_registry.close()
+
+                resume_registry = LogicalContextRegistry()
+                resumed, resume_context = new_context_runtime(repo, resume_registry)
+                try:
+                    resumed.set_default_cwd({"path": str(outside)})
+                    resume_state = resume_registry.get(resume_context)
+                    assert resume_state is not None
+                    resumed._save_logical_context_state(resume_state)
+
+                    result = resumed.continuation_checkpoint(
+                        {"action": "resume", "logical_task": "external-cwd-resume"}
+                    )
+                    self.assertEqual(result["status"], "resumed")
+                    self.assertEqual(resumed.effective_workspace_root, worktree)
+                    self.assertEqual(resumed.default_cwd, outside.resolve())
+                    self.assertEqual(resume_state.default_cwd, outside.resolve())
+                finally:
+                    resumed.close()
+                    resume_registry.close()
+
     def test_continuation_resume_recreates_clean_managed_workspace(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
