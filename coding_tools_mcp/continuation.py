@@ -13,9 +13,13 @@ from .config import ensure_dirs, paths as config_paths
 from .errors import ToolFailure
 
 MAX_CHECKPOINT_BYTES = 16_384
+DEFAULT_LIST_LIMIT = 20
+MAX_LIST_LIMIT = 64
 MAX_COMPLETED_ITEMS = 64
 MAX_COMPLETED_ITEM_CHARS = 256
+MAX_REMAINING_ITEMS = 64
 MAX_TEXT_CHARS = 4096
+VERIFICATION_STATUSES = {"not_run", "partial", "passed", "failed", "stale"}
 CHECKPOINT_FIELDS = {
     "active_task",
     "active_slice",
@@ -30,6 +34,14 @@ CHECKPOINT_FIELDS = {
     "next_action",
     "blocker_type",
     "timestamp",
+    "objective",
+    "remaining_items",
+    "verification_status",
+    "verified_head",
+    "verified_state_fingerprint",
+    "state_fingerprint_complete",
+    "workspace_kind",
+    "workspace_dirty",
 }
 SECRET_VALUE_PATTERNS = (
     re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----", re.IGNORECASE),
@@ -64,6 +76,19 @@ def checkpoint_path(project: Path, scope: str) -> Path:
     return root / f"{scope_id}.json"
 
 
+def checkpoint_root(project: Path) -> Path:
+    project_id, _ = _scope_id(project, "")
+    config_root = ensure_dirs(config_paths()).root.resolve()
+    project_root = project.resolve()
+    if config_root == project_root or config_root.is_relative_to(project_root):
+        raise ToolFailure(
+            "RUNTIME_DIR_UNWRITABLE",
+            "continuation checkpoint storage must be outside the selected project.",
+            category="runtime",
+        )
+    return config_root / "continuation-checkpoints" / project_id
+
+
 def normalize_checkpoint_payload(payload: Any) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ToolFailure(
@@ -81,11 +106,16 @@ def normalize_checkpoint_payload(payload: Any) -> dict[str, Any]:
         )
     normalized: dict[str, Any] = {}
     for key, value in payload.items():
-        if key == "completed_acceptance_items":
-            if not isinstance(value, list) or len(value) > MAX_COMPLETED_ITEMS:
+        if key in {"completed_acceptance_items", "remaining_items"}:
+            max_items = (
+                MAX_COMPLETED_ITEMS
+                if key == "completed_acceptance_items"
+                else MAX_REMAINING_ITEMS
+            )
+            if not isinstance(value, list) or len(value) > max_items:
                 raise ToolFailure(
                     "INVALID_ARGUMENT",
-                    f"{key} must contain at most {MAX_COMPLETED_ITEMS} strings.",
+                    f"{key} must contain at most {max_items} strings.",
                     category="validation",
                 )
             if any(
@@ -98,6 +128,31 @@ def normalize_checkpoint_payload(payload: Any) -> dict[str, Any]:
                     category="validation",
                 )
             normalized[key] = list(value)
+        elif key in {"state_fingerprint_complete", "workspace_dirty"}:
+            if not isinstance(value, bool):
+                raise ToolFailure(
+                    "INVALID_ARGUMENT",
+                    f"{key} must be a boolean.",
+                    category="validation",
+                )
+            normalized[key] = value
+        elif key == "verification_status":
+            if value not in VERIFICATION_STATUSES:
+                raise ToolFailure(
+                    "INVALID_ARGUMENT",
+                    "verification_status is not supported.",
+                    category="validation",
+                    details={"allowed": sorted(VERIFICATION_STATUSES)},
+                )
+            normalized[key] = value
+        elif key == "workspace_kind":
+            if value not in {"canonical", "managed"}:
+                raise ToolFailure(
+                    "INVALID_ARGUMENT",
+                    "workspace_kind must be canonical or managed.",
+                    category="validation",
+                )
+            normalized[key] = value
         elif key in {"pr_number", "workflow_run_id"}:
             if value is not None and (
                 not isinstance(value, int) or isinstance(value, bool) or value < 1
@@ -143,7 +198,7 @@ def normalize_checkpoint_payload(payload: Any) -> dict[str, Any]:
 
 def write_checkpoint(project: Path, scope: str, payload: Any) -> dict[str, Any]:
     record = {
-        "version": 1,
+        "version": 2,
         "project": str(project.resolve()),
         "scope": scope,
         "updated_at": datetime.now(timezone.utc).isoformat(),
@@ -205,6 +260,98 @@ def read_checkpoint(project: Path, scope: str) -> dict[str, Any] | None:
             category="runtime",
         )
     return record
+
+
+def checkpoint_summary(record: dict[str, Any]) -> dict[str, Any]:
+    version = record.get("version")
+    raw_payload = record.get("payload")
+    payload: dict[str, Any] = raw_payload if isinstance(raw_payload, dict) else {}
+    has_trusted_state = (
+        all(
+            isinstance(payload.get(field), str) and bool(payload.get(field))
+            for field in ("branch", "head", "checkpoint_id", "state_fingerprint")
+        )
+        and payload.get("workspace_kind") in {"canonical", "managed"}
+        and isinstance(payload.get("workspace_dirty"), bool)
+    )
+    resumable = (
+        version == 2
+        and has_trusted_state
+        and payload.get("state_fingerprint_complete") is True
+    )
+    blocker: str | None = None
+    if version == 1:
+        resumable = False
+        blocker = "legacy_v1"
+    elif version != 2:
+        resumable = False
+        blocker = "unsupported_version"
+    elif not has_trusted_state:
+        blocker = "missing_state_authority"
+    elif payload.get("state_fingerprint_complete") is not True:
+        blocker = "state_fingerprint_incomplete"
+    return {
+        "version": version,
+        "scope": record.get("scope"),
+        "updated_at": record.get("updated_at"),
+        "active_task": payload.get("active_task"),
+        "active_slice": payload.get("active_slice"),
+        "objective": payload.get("objective"),
+        "branch": payload.get("branch"),
+        "head": payload.get("head"),
+        "workspace_kind": payload.get("workspace_kind"),
+        "workspace_dirty": payload.get("workspace_dirty"),
+        "verification_status": payload.get("verification_status"),
+        "verified_head": payload.get("verified_head"),
+        "verified_state_fingerprint": payload.get("verified_state_fingerprint"),
+        "next_action": payload.get("next_action"),
+        "resumable": resumable,
+        "resume_blocker": blocker,
+    }
+
+
+def list_checkpoints(project: Path, limit: int = DEFAULT_LIST_LIMIT) -> dict[str, Any]:
+    if (
+        not isinstance(limit, int)
+        or isinstance(limit, bool)
+        or not 1 <= limit <= MAX_LIST_LIMIT
+    ):
+        raise ToolFailure(
+            "INVALID_ARGUMENT",
+            f"limit must be an integer from 1 to {MAX_LIST_LIMIT}.",
+            category="validation",
+        )
+    root = checkpoint_root(project)
+    if not root.is_dir():
+        return {"checkpoints": [], "invalid_count": 0}
+    valid: list[dict[str, Any]] = []
+    invalid_count = 0
+    for path in sorted(root.glob("*.json"), key=lambda item: item.name):
+        try:
+            raw = path.read_bytes()
+            if len(raw) > MAX_CHECKPOINT_BYTES + 8192:
+                raise ValueError("oversized")
+            record = json.loads(raw)
+            if (
+                not isinstance(record, dict)
+                or record.get("project") != str(project.resolve())
+                or not isinstance(record.get("scope"), str)
+                or not str(record.get("scope")).startswith(("task:", "branch:"))
+                or not isinstance(record.get("updated_at"), str)
+                or not isinstance(record.get("payload"), dict)
+            ):
+                raise ValueError("malformed")
+            valid.append(checkpoint_summary(record))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
+            invalid_count += 1
+    valid.sort(
+        key=lambda item: (
+            str(item.get("updated_at") or ""),
+            str(item.get("scope") or ""),
+        ),
+        reverse=True,
+    )
+    return {"checkpoints": valid[:limit], "invalid_count": invalid_count}
 
 
 def clear_checkpoint(project: Path, scope: str) -> bool:

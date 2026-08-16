@@ -34,7 +34,13 @@ from typing import Any, cast
 
 from . import __version__
 from .audit import append_tool_event
-from .continuation import clear_checkpoint, read_checkpoint, write_checkpoint
+from .continuation import (
+    DEFAULT_LIST_LIMIT,
+    clear_checkpoint,
+    list_checkpoints,
+    read_checkpoint,
+    write_checkpoint,
+)
 from .envutils import ENV_PREFIX, truthy_env
 from .errors import JsonRpcError, ToolFailure
 from .diagnostics import DiagnosticsRegistry, normalize_diagnostic_path
@@ -807,7 +813,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     ),
     "continuation_checkpoint": ToolSpec(
         title="Continuation checkpoint",
-        description="Read, write, or clear one durable non-secret continuation checkpoint scoped to the selected project and logical task or branch.",
+        description="Read, write, clear, or list bounded durable non-secret continuation checkpoints scoped to the selected canonical project and logical task or branch.",
         destructive=True,
         idempotent=True,
     ),
@@ -6896,12 +6902,19 @@ class Runtime:
 
     def continuation_checkpoint(self, args: dict[str, Any]) -> dict[str, Any]:
         action = str(args.get("action", "")).strip().lower()
-        if action not in {"read", "write", "clear"}:
+        if action not in {"read", "write", "clear", "list"}:
             raise ToolFailure(
                 "INVALID_ARGUMENT",
-                "action must be read, write, or clear.",
+                "action must be read, write, clear, or list.",
                 category="validation",
             )
+        if action == "list":
+            limit = args.get("limit", DEFAULT_LIST_LIMIT)
+            return {
+                "action": action,
+                "limit": limit,
+                **list_checkpoints(self.canonical_project_root, limit),
+            }
         scope = self._continuation_scope(args)
         if action == "read":
             return {
@@ -10008,11 +10021,12 @@ def input_schemas() -> dict[str, dict[str, Any]]:
             {
                 "action": {
                     "type": "string",
-                    "enum": ["read", "write", "clear"],
+                    "enum": ["read", "write", "clear", "list"],
                 },
                 "logical_task": {**string, "maxLength": 256},
                 "branch": {**string, "maxLength": 256},
                 "payload": {"type": "object"},
+                "limit": {**integer, "minimum": 1, "maximum": 64, "default": 20},
             },
             ["action"],
         ),

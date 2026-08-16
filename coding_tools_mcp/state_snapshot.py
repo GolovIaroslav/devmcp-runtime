@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import shutil
+import stat
 import subprocess
 import tomllib
 import urllib.parse
@@ -22,6 +24,9 @@ DRIFT_FIELDS = (
     "staged_paths",
     "untracked_paths",
     "content_hashes",
+    "index_state_hash",
+    "worktree_state_hash",
+    "worktree_state_complete",
 )
 
 
@@ -134,6 +139,103 @@ def content_hashes(project: Path, paths: list[str]) -> dict[str, str]:
     return dict(sorted(hashes.items()))
 
 
+def _git_bytes(
+    project: Path,
+    args: list[str],
+    *,
+    env: dict[str, str] | None = None,
+    timeout: int = 10,
+) -> bytes | None:
+    git = shutil.which("git")
+    if git is None:
+        return None
+    try:
+        result = subprocess.run(
+            [git, "-C", str(project), *args],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            env=env,
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return result.stdout if result.returncode == 0 else None
+
+
+def index_state_hash(project: Path, *, env: dict[str, str] | None = None) -> str | None:
+    raw = _git_bytes(project, ["ls-files", "--stage", "-z"], env=env)
+    return hashlib.sha256(raw).hexdigest() if raw is not None else None
+
+
+def worktree_state_evidence(project: Path, paths: list[str]) -> tuple[str, bool]:
+    digest = hashlib.sha256()
+    complete = True
+    for relative in sorted(set(paths)):
+        candidate = project / relative
+        descriptor: dict[str, Any] = {"path": inventory_key(relative)}
+        try:
+            entry = candidate.lstat()
+        except FileNotFoundError:
+            descriptor["type"] = "missing"
+        except OSError:
+            descriptor["type"] = "unavailable"
+            complete = False
+        else:
+            mode = entry.st_mode
+            descriptor["executable"] = bool(mode & 0o111)
+            if stat.S_ISLNK(mode):
+                descriptor["type"] = "symlink"
+                try:
+                    target = os.readlink(candidate)
+                except OSError:
+                    descriptor["target_hash"] = None
+                    complete = False
+                else:
+                    descriptor["target_hash"] = hashlib.sha256(
+                        os.fsencode(target)
+                    ).hexdigest()
+            elif stat.S_ISREG(mode):
+                descriptor["type"] = "regular"
+                descriptor["size"] = entry.st_size
+                if entry.st_size > MAX_HASH_BYTES:
+                    descriptor["content_hash"] = None
+                    complete = False
+                else:
+                    content = hashlib.sha256()
+                    try:
+                        with candidate.open("rb") as handle:
+                            for chunk in iter(lambda: handle.read(1024 * 128), b""):
+                                content.update(chunk)
+                    except OSError:
+                        descriptor["content_hash"] = None
+                        complete = False
+                    else:
+                        descriptor["content_hash"] = content.hexdigest()
+            elif stat.S_ISDIR(mode):
+                descriptor["type"] = "directory"
+                complete = False
+            else:
+                descriptor["type"] = "special"
+                complete = False
+        digest.update(
+            json.dumps(
+                descriptor,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8", errors="surrogateescape")
+        )
+        digest.update(b"\0")
+    return digest.hexdigest(), complete
+
+
+def state_fingerprint_complete(snapshot: dict[str, Any]) -> bool:
+    return bool(snapshot.get("index_state_hash")) and bool(
+        snapshot.get("worktree_state_complete")
+    )
+
+
 def compare_snapshots(
     expected: dict[str, Any], actual: dict[str, Any]
 ) -> dict[str, dict[str, Any]]:
@@ -198,6 +300,10 @@ def collect_state_snapshot(
     staged_paths = sorted({inventory_key(item) for item in staged})
     untracked_paths = sorted({inventory_key(item) for item in untracked})
     hashes = content_hashes(project, sorted(set(dirty_raw) | set(untracked)))
+    index_hash = index_state_hash(project, env=git_env)
+    worktree_hash, worktree_complete = worktree_state_evidence(
+        project, sorted(set(dirty_raw) | set(untracked))
+    )
     repo = sanitize_repo_url(
         git_text(project, ["remote", "get-url", "origin"], env=git_env)
     )
@@ -231,6 +337,9 @@ def collect_state_snapshot(
         "staged_paths": staged_paths,
         "untracked_paths": untracked_paths,
         "content_hashes": hashes,
+        "index_state_hash": index_hash,
+        "worktree_state_hash": worktree_hash,
+        "worktree_state_complete": worktree_complete,
         "last_commit": last_commit,
         "push_verified": push_verified,
         "workflow_runs_by_sha": {},

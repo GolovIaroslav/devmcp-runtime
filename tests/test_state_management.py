@@ -17,12 +17,14 @@ from coding_tools_mcp.state_checkpoint import read_authoritative_state_checkpoin
 from coding_tools_mcp.state_identity import BuildIdentityMixin
 from coding_tools_mcp.state_mutations import StateMutationMixin
 from coding_tools_mcp.state_snapshot import (
+    MAX_HASH_BYTES,
     collect_state_snapshot,
     compare_snapshots,
     filter_ci_runs_for_sha,
     handoff_text,
     read_build_identity,
     state_fingerprint,
+    state_fingerprint_complete,
 )
 from coding_tools_mcp.stateful_server import StateManagedRuntime
 from coding_tools_mcp.writer_lease import (
@@ -630,6 +632,158 @@ class StateManagementTests(TestCase):
             self.assertTrue(state["untracked_paths"][0].startswith("sensitive:"))
             self.assertNotIn(".env", state["content_hashes"])
 
+    def test_fingerprint_distinguishes_staged_index_blob_with_same_worktree(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, head = init_repo(root)
+            kwargs = dict(
+                project_id="fixture",
+                installed_service_version="1",
+                installed_service_git_sha=head,
+                protocol_version="test",
+                writer_owner=None,
+                logical_task=None,
+            )
+            (repo / "tracked.txt").write_text("index-a\n", encoding="utf-8")
+            subprocess.run(["git", "add", "tracked.txt"], cwd=repo, check=True)
+            (repo / "tracked.txt").write_text("worktree\n", encoding="utf-8")
+            first = collect_state_snapshot(repo, **kwargs)
+
+            (repo / "tracked.txt").write_text("index-b\n", encoding="utf-8")
+            subprocess.run(["git", "add", "tracked.txt"], cwd=repo, check=True)
+            (repo / "tracked.txt").write_text("worktree\n", encoding="utf-8")
+            second = collect_state_snapshot(repo, **kwargs)
+
+            self.assertEqual(first["dirty_paths"], second["dirty_paths"])
+            self.assertEqual(first["staged_paths"], second["staged_paths"])
+            self.assertEqual(first["content_hashes"], second["content_hashes"])
+            self.assertNotEqual(first["index_state_hash"], second["index_state_hash"])
+            self.assertNotEqual(state_fingerprint(first), state_fingerprint(second))
+
+    def test_fingerprint_distinguishes_tracked_content_change(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, head = init_repo(root)
+            kwargs = dict(
+                project_id="fixture",
+                installed_service_version="1",
+                installed_service_git_sha=head,
+                protocol_version="test",
+                writer_owner=None,
+                logical_task=None,
+            )
+            (repo / "tracked.txt").write_text("two\n", encoding="utf-8")
+            first = collect_state_snapshot(repo, **kwargs)
+            (repo / "tracked.txt").write_text("three\n", encoding="utf-8")
+            second = collect_state_snapshot(repo, **kwargs)
+            self.assertNotEqual(state_fingerprint(first), state_fingerprint(second))
+
+    def test_fingerprint_distinguishes_executable_mode_change(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, head = init_repo(root)
+            kwargs = dict(
+                project_id="fixture",
+                installed_service_version="1",
+                installed_service_git_sha=head,
+                protocol_version="test",
+                writer_owner=None,
+                logical_task=None,
+            )
+            path = repo / "tracked.txt"
+            path.write_text("dirty\n", encoding="utf-8")
+            first = collect_state_snapshot(repo, **kwargs)
+            path.chmod(path.stat().st_mode | 0o111)
+            second = collect_state_snapshot(repo, **kwargs)
+            self.assertNotEqual(
+                first["worktree_state_hash"], second["worktree_state_hash"]
+            )
+            self.assertNotEqual(state_fingerprint(first), state_fingerprint(second))
+
+    def test_fingerprint_distinguishes_sensitive_content_without_exposure(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, head = init_repo(root)
+            kwargs = dict(
+                project_id="fixture",
+                installed_service_version="1",
+                installed_service_git_sha=head,
+                protocol_version="test",
+                writer_owner=None,
+                logical_task=None,
+            )
+            secret = repo / ".env"
+            secret.write_text("SECRET=one\n", encoding="utf-8")
+            first = collect_state_snapshot(repo, **kwargs)
+            secret.write_text("SECRET=two\n", encoding="utf-8")
+            second = collect_state_snapshot(repo, **kwargs)
+            self.assertNotEqual(
+                first["worktree_state_hash"], second["worktree_state_hash"]
+            )
+            self.assertNotEqual(state_fingerprint(first), state_fingerprint(second))
+            self.assertNotIn(".env", json.dumps(second, sort_keys=True))
+
+    def test_fingerprint_distinguishes_symlink_target_change(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, head = init_repo(root)
+            kwargs = dict(
+                project_id="fixture",
+                installed_service_version="1",
+                installed_service_git_sha=head,
+                protocol_version="test",
+                writer_owner=None,
+                logical_task=None,
+            )
+            link = repo / "link"
+            link.symlink_to("target-a")
+            first = collect_state_snapshot(repo, **kwargs)
+            link.unlink()
+            link.symlink_to("target-b")
+            second = collect_state_snapshot(repo, **kwargs)
+            self.assertNotEqual(
+                first["worktree_state_hash"], second["worktree_state_hash"]
+            )
+            self.assertNotEqual(state_fingerprint(first), state_fingerprint(second))
+
+    def test_fingerprint_distinguishes_untracked_content_change(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, head = init_repo(root)
+            kwargs = dict(
+                project_id="fixture",
+                installed_service_version="1",
+                installed_service_git_sha=head,
+                protocol_version="test",
+                writer_owner=None,
+                logical_task=None,
+            )
+            untracked = repo / "notes.txt"
+            untracked.write_text("one\n", encoding="utf-8")
+            first = collect_state_snapshot(repo, **kwargs)
+            untracked.write_text("two\n", encoding="utf-8")
+            second = collect_state_snapshot(repo, **kwargs)
+            self.assertNotEqual(state_fingerprint(first), state_fingerprint(second))
+
+    def test_large_dirty_state_marks_fingerprint_incomplete(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, head = init_repo(root)
+            (repo / "large.bin").write_bytes(b"x" * (MAX_HASH_BYTES + 1))
+            state = collect_state_snapshot(
+                repo,
+                project_id="fixture",
+                installed_service_version="1",
+                installed_service_git_sha=head,
+                protocol_version="test",
+                writer_owner=None,
+                logical_task=None,
+            )
+            self.assertFalse(state["worktree_state_complete"])
+            self.assertFalse(state_fingerprint_complete(state))
+
     def test_ci_identity_rejects_stale_sha(self) -> None:
         current, stale = filter_ci_runs_for_sha(
             "new",
@@ -818,6 +972,142 @@ class StateManagementTests(TestCase):
                         "checkpoint_identity_mismatch",
                     )
                     self.assertIsNone(inspect_writer_lease(repo, "after-reconcile"))
+                finally:
+                    runtime.close()
+
+    def test_continuation_v2_uses_server_derived_state_authority(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, head = init_repo(root)
+            with patch.dict("os.environ", {"DEVMCP_CONFIG_DIR": str(root / "config")}):
+                runtime = StateManagedRuntime(workspace=repo, sandbox_backend="unsafe")
+                try:
+                    written = runtime.continuation_checkpoint(
+                        {
+                            "action": "write",
+                            "logical_task": "trusted-v2",
+                            "payload": {
+                                "objective": "finish 4A",
+                                "remaining_items": ["verify"],
+                                "branch": "forged-branch",
+                                "head": "forged-head",
+                                "state_fingerprint": "forged-fingerprint",
+                                "workspace_kind": "managed",
+                                "workspace_dirty": True,
+                                "state_fingerprint_complete": False,
+                            },
+                        }
+                    )
+                    payload = written["checkpoint"]["payload"]
+                    self.assertEqual(written["checkpoint"]["version"], 2)
+                    self.assertEqual(payload["branch"], "main")
+                    self.assertEqual(payload["head"], head)
+                    self.assertNotEqual(
+                        payload["state_fingerprint"], "forged-fingerprint"
+                    )
+                    self.assertTrue(payload["state_fingerprint_complete"])
+                    self.assertEqual(payload["workspace_kind"], "canonical")
+                    self.assertFalse(payload["workspace_dirty"])
+                    self.assertTrue(payload["checkpoint_id"])
+                finally:
+                    runtime.close()
+
+    def test_continuation_validation_happens_before_persistence(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, _head = init_repo(root)
+            with patch.dict("os.environ", {"DEVMCP_CONFIG_DIR": str(root / "config")}):
+                runtime = StateManagedRuntime(workspace=repo, sandbox_backend="unsafe")
+                try:
+                    runtime.continuation_checkpoint(
+                        {
+                            "action": "write",
+                            "logical_task": "validate-first",
+                            "payload": {"objective": "trusted-before-drift"},
+                        }
+                    )
+                    scope = "task:validate-first"
+                    before = continuation_checkpoint_path(repo, scope).read_bytes()
+                    (repo / "external.txt").write_text("drift\n", encoding="utf-8")
+                    rejected = runtime.continuation_checkpoint(
+                        {
+                            "action": "write",
+                            "logical_task": "validate-first",
+                            "payload": {
+                                "objective": "must-not-persist",
+                                "branch": "main",
+                                "head": "wrong",
+                                "checkpoint_id": "wrong",
+                                "state_fingerprint": "wrong",
+                            },
+                        }
+                    )
+                    self.assertEqual(
+                        rejected["state_reconciliation"]["status"], "not_applied"
+                    )
+                    self.assertEqual(
+                        continuation_checkpoint_path(repo, scope).read_bytes(), before
+                    )
+                finally:
+                    runtime.close()
+
+    def test_passed_verification_is_downgraded_when_state_does_not_match(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, head = init_repo(root)
+            with patch.dict("os.environ", {"DEVMCP_CONFIG_DIR": str(root / "config")}):
+                runtime = StateManagedRuntime(workspace=repo, sandbox_backend="unsafe")
+                try:
+                    fingerprint = state_fingerprint(runtime._state_snapshot())
+                    passed = runtime.continuation_checkpoint(
+                        {
+                            "action": "write",
+                            "logical_task": "verification",
+                            "payload": {
+                                "verification_status": "passed",
+                                "verified_head": head,
+                                "verified_state_fingerprint": fingerprint,
+                            },
+                        }
+                    )
+                    self.assertEqual(
+                        passed["checkpoint"]["payload"]["verification_status"],
+                        "passed",
+                    )
+                    (repo / "external.txt").write_text("changed\n", encoding="utf-8")
+                    observed = runtime.continuation_checkpoint(
+                        {"action": "read", "logical_task": "verification"}
+                    )
+                    self.assertEqual(
+                        observed["checkpoint"]["payload"]["verification_status"],
+                        "stale",
+                    )
+                    listed = runtime.continuation_checkpoint({"action": "list"})
+                    summary = next(
+                        item
+                        for item in listed["checkpoints"]
+                        if item["scope"] == "task:verification"
+                    )
+                    self.assertEqual(summary["verification_status"], "stale")
+                    with self.assertRaises(ToolFailure) as drift:
+                        runtime.git_create_branch({"name": "blocked-verification"})
+                    evidence = drift.exception.details["reconciliation_evidence"]
+                    stale = runtime.continuation_checkpoint(
+                        {
+                            "action": "write",
+                            "logical_task": "verification",
+                            "payload": {
+                                **evidence,
+                                "verification_status": "passed",
+                                "verified_head": head,
+                                "verified_state_fingerprint": fingerprint,
+                            },
+                        }
+                    )
+                    self.assertEqual(
+                        stale["checkpoint"]["payload"]["verification_status"],
+                        "stale",
+                    )
                 finally:
                     runtime.close()
 

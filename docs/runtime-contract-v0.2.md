@@ -677,19 +677,25 @@ connector rather than treating the wait result as remote-system state.
 
 ### continuation_checkpoint
 
-Inputs: `"action"`, `"logical_task"`, `"branch"`, `"payload"`.
+Inputs: `"action"`, `"logical_task"`, `"branch"`, `"payload"`, `"limit"`.
 
 Annotations: `{"title":"Continuation checkpoint","readOnlyHint":false,"destructiveHint":true,"idempotentHint":true,"openWorldHint":false}`.
 
-Reads, atomically writes, or clears one bounded non-secret JSON continuation
-record scoped to the canonical selected project plus either `logical_task` or
-`branch`. If neither scope argument is supplied, the selected repository's
-current branch is used. Storage lives under DevMCP's private configuration root,
-never inside the selected project; attempts to configure checkpoint storage
-inside the project fail. Payload keys are restricted to task/slice, branch,
-HEAD, PR/workflow identifiers, dirty-state summary, completed acceptance items,
-next action, blocker type, and timestamp. Unknown or oversized payload data is
-rejected, as are values matching common credential/private-key forms.
+Reads, atomically writes, clears, or lists bounded non-secret JSON continuation
+records scoped to the canonical selected project plus either `logical_task` or
+`branch`. If neither scope argument is supplied for read/write/clear, the
+selected repository's current branch is used. New writes are version 2; version
+1 remains readable/listable but is marked non-resumable. `action=list` returns
+newest-first bounded summaries only, with `limit` default 20 and range 1-64;
+malformed records are skipped and counted. Storage lives under DevMCP's private
+configuration root, never inside the selected project. The payload is a closed
+16 KiB-bounded schema. Descriptive fields include task/slice, objective,
+remaining/completed items, PR/workflow identifiers, verification metadata,
+next action, blocker type, and timestamp. In the state-managed runtime, branch,
+HEAD, state checkpoint/fingerprint/completeness, workspace kind, and dirty state
+are server-derived after required reconciliation; caller values for those fields
+cannot forge trusted resume state. Unknown/oversized data and common
+credential/private-key value forms are rejected.
 
 ### antigravity_delegate
 
