@@ -109,6 +109,27 @@ class StateManagedRuntime(StateMutationMixin, BuildIdentityMixin, core.Runtime):
 
         managed_args = dict(args)
         timeout_ms = int(managed_args.get("timeout_ms", 30000))
+        if (
+            self.transport == "http"
+            and timeout_ms > core.HTTP_SAFE_BLOCKING_WAIT_MAX_MS
+        ):
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                (
+                    "state_effect=selected_repo execution is synchronous, and HTTP "
+                    "cannot safely wait for the requested timeout. Maximum safe HTTP "
+                    f"timeout is {core.HTTP_SAFE_BLOCKING_WAIT_MAX_MS} ms; the process "
+                    "was not started. Use state_effect=none only for long non-mutating "
+                    "checks/builds/tests; split or reduce genuinely mutating commands."
+                ),
+                category="validation",
+                details={
+                    "state_effect": self._EXEC_STATE_EFFECT_SELECTED_REPO,
+                    "requested_timeout_ms": timeout_ms,
+                    "max_http_timeout_ms": core.HTTP_SAFE_BLOCKING_WAIT_MAX_MS,
+                    "process_started": False,
+                },
+            )
         managed_args["yield_time_ms"] = timeout_ms
         managed_args["_force_foreground_wait"] = True
 

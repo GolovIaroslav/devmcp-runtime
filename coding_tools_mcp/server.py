@@ -170,9 +170,10 @@ DESTRUCTIVE_RE = re.compile(
 MAX_HTTP_REQUEST_BYTES = 1_048_576
 EXEC_PREVIEW_BYTES = 4096
 HTTP_INITIAL_EXEC_MAX_WAIT_MS = 10_000
-HTTP_WRITE_STDIN_MAX_WAIT_MS = 60_000
-JOB_STATUS_MAX_WAIT_MS = 60_000
-JOB_STATUS_NEXT_WAIT_MS = 60_000
+HTTP_SAFE_BLOCKING_WAIT_MAX_MS = 60_000
+HTTP_WRITE_STDIN_MAX_WAIT_MS = HTTP_SAFE_BLOCKING_WAIT_MAX_MS
+JOB_STATUS_MAX_WAIT_MS = HTTP_SAFE_BLOCKING_WAIT_MAX_MS
+JOB_STATUS_NEXT_WAIT_MS = HTTP_SAFE_BLOCKING_WAIT_MAX_MS
 MAX_ACTIVE_EXEC_SESSIONS = 16
 MAX_RETAINED_OUTPUT_SESSIONS = 32
 COMPLETED_SESSION_TTL_SECONDS = 300
@@ -10015,7 +10016,7 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                     **string,
                     "enum": ["none", "selected_repo"],
                     "default": "none",
-                    "description": "Default none leaves repository state unmanaged; selected_repo runs synchronously and advances the selected repository checkpoint only after exit 0.",
+                    "description": "Default none leaves repository state unmanaged and supports job-backed long work; selected_repo runs synchronously, advances the selected repository checkpoint only after exit 0, and over HTTP is limited to bounded foreground mutation.",
                 },
                 "max_bytes": {
                     **integer,
@@ -10074,7 +10075,7 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                     **string,
                     "enum": ["none", "selected_repo"],
                     "default": "none",
-                    "description": "Default none leaves repository state unmanaged; selected_repo runs synchronously and advances the selected repository checkpoint only after exit 0.",
+                    "description": "Default none leaves repository state unmanaged and supports job-backed long work; selected_repo runs synchronously, advances the selected repository checkpoint only after exit 0, and over HTTP is limited to bounded foreground mutation.",
                 },
                 "max_output_bytes": {
                     **integer,
