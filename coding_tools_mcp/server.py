@@ -11446,7 +11446,9 @@ def run_http(args: argparse.Namespace) -> int:
         "preserved_dirty": 0,
         "preserved_error": 0,
     }
-    for project in runtime._discover_projects():
+    discover_projects = getattr(runtime, "_discover_projects", None)
+    discovered_projects = discover_projects() if callable(discover_projects) else []
+    for project in discovered_projects:
         project_path = Path(str(project.get("path", "")))
         if not project_path.is_dir():
             continue
