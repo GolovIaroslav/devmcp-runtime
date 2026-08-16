@@ -76,6 +76,33 @@ class StateManagedRuntime(StateMutationMixin, BuildIdentityMixin, core.Runtime):
         if owner:
             self._ensure_state_baseline(owner=owner)
 
+    def _on_context_mutation_workspace_bound(self, state: Any) -> None:
+        owner = str(getattr(state, "context_id", "") or "")
+        actual = self._state_snapshot()
+        branch = str(actual.get("branch") or "")
+        if not owner or not branch:
+            raise ToolFailure(
+                "INVALID_STATE",
+                "Managed worktree binding requires a named branch and logical context.",
+                category="conflict",
+            )
+        previous = read_authoritative_state_checkpoint(
+            self.canonical_project_root, owner
+        )
+        write_state_checkpoint(
+            self.canonical_project_root,
+            branch,
+            snapshot=actual,
+            phase="baseline",
+            operation="managed_worktree_bind",
+            owner=owner,
+            logical_task=self._state_task(),
+            outcome="baseline",
+            previous_checkpoint_id=str((previous or {}).get("checkpoint_id") or "")
+            or None,
+            authority_owner=owner,
+        )
+
     def local_state_snapshot(self, args: dict[str, Any]) -> dict[str, Any]:
         self._ensure_state_baseline()
         return super().local_state_snapshot(args)

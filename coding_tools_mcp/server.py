@@ -82,6 +82,7 @@ from .protocol import (
     response_id,
     validate_rpc_envelope,
 )
+from .managed_worktree import create_managed_worktree
 from .project_context import ProjectContext, load_project_context
 from .session_state import (
     LogicalContextRegistry,
@@ -123,6 +124,22 @@ DEFAULT_EXCLUDED_NAMES = {
     ".ruff_cache",
     "__pycache__",
 }
+WORKTREE_CLAIM_TOOLS = frozenset(
+    {
+        "apply_patch",
+        "exec_command",
+        "exec_argv",
+        "git_commit",
+        "git_create_branch",
+        "git_delete_branch",
+        "git_merge_remote_branch",
+        "git_pull",
+        "git_switch_branch",
+        "run_checks_for_diff",
+        "run_project_check",
+        "run_task",
+    }
+)
 GREP_MAX_LINE_CHARS = 500
 IMAGE_RESIZE_MAX_DIMENSION = 2000
 SENSITIVE_ENV_RE = re.compile(
@@ -2061,6 +2078,58 @@ class Runtime:
             default_cwd=self.default_cwd,
         )
 
+    def _ensure_context_mutation_workspace(
+        self, state: LogicalContextState, tool_name: str
+    ) -> None:
+        registry = self.logical_context_registry
+        if (
+            registry is None
+            or self.execution_mode != "build"
+            or tool_name not in WORKTREE_CLAIM_TOOLS
+        ):
+            return
+        try:
+            needs_isolation = registry.claim_mutation_workspace(state)
+        except RuntimeError as exc:
+            raise ToolFailure(
+                "CONTEXT_NOT_FOUND",
+                "Logical context disappeared before mutation workspace allocation.",
+                category="not_found",
+                retryable=True,
+            ) from exc
+        if (
+            not needs_isolation
+            or state.effective_workspace_root != state.canonical_project_root
+        ):
+            return
+
+        try:
+            worktree_root, _branch = create_managed_worktree(
+                state.canonical_project_root, state.context_id
+            )
+        except BaseException:
+            registry.rollback_mutation_workspace_claim(state)
+            raise
+
+        try:
+            relative_cwd = state.default_cwd.relative_to(state.canonical_project_root)
+        except ValueError:
+            relative_cwd = Path()
+        mapped_cwd = worktree_root / relative_cwd
+        if not mapped_cwd.is_dir():
+            mapped_cwd = worktree_root
+        registry.update(
+            state,
+            canonical_project_root=state.canonical_project_root,
+            effective_workspace_root=worktree_root,
+            default_cwd=mapped_cwd,
+        )
+        self._apply_logical_context_state(state)
+        self._on_context_mutation_workspace_bound(state)
+
+    def _on_context_mutation_workspace_bound(self, state: LogicalContextState) -> None:
+        del state
+
     def _active_context_id(self) -> str | None:
         value = getattr(self.request_context, "logical_context_id", None)
         if isinstance(value, str) and value:
@@ -2390,6 +2459,8 @@ class Runtime:
             self.request_context.logical_context_id = context_id
             self.request_context.task_scope_id = requested_task_scope
             self.request_context.used_capability_leases = used_capability_leases
+            if context_state is not None:
+                self._ensure_context_mutation_workspace(context_state, name)
             cancel_event: threading.Event | None = None
             if isinstance(request_id, (str, int)) and not isinstance(request_id, bool):
                 cancel_event = threading.Event()
@@ -2740,6 +2811,13 @@ class Runtime:
             )
         selected = matches[0]
         selected_path = Path(str(selected["path"]))
+        if (
+            selected_path.resolve(strict=True) == self.canonical_project_root
+            and self.effective_workspace_root != self.canonical_project_root
+        ):
+            self.default_cwd = self.effective_workspace_root
+            self.active_project = selected
+            return dict(selected)
         with self.sessions_lock:
             starting_processes = self.starting_sessions
             active_processes = [

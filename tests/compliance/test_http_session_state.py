@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 import shlex
+import subprocess
+import sys
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
@@ -167,6 +169,151 @@ class HTTPSessionStateTests(unittest.TestCase):
                             fresh_client.call_tool("current_project", {})
                         )
                         self.assertEqual(fresh["relative_path"], "a")
+
+    def test_competing_mutating_context_gets_linked_worktree_and_reuses_it(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            projects = root / "projects"
+            repo = self._repo(projects, "a")
+            config_root = root / "config"
+            with patch.dict(
+                os.environ, {"DEVMCP_CONFIG_DIR": str(config_root)}, clear=False
+            ):
+                with self._server(repo, projects) as client_a:
+                    with MCPClient(repo, url=client_a.url) as client_b:
+                        state_a = structured(client_a.call_tool("current_project", {}))
+                        state_b = structured(client_b.call_tool("current_project", {}))
+                        context_a = state_a["context_id"]
+                        context_b = state_b["context_id"]
+                        self.assertNotEqual(context_a, context_b)
+
+                        write_a = structured(
+                            client_a.call_tool(
+                                "exec_argv",
+                                {
+                                    "argv": [
+                                        sys.executable,
+                                        "-c",
+                                        "from pathlib import Path; Path('same.txt').write_text('A\\n')",
+                                    ],
+                                    "context_id": context_a,
+                                    "state_effect": "selected_repo",
+                                },
+                            )
+                        )
+                        self.assertEqual(write_a["workspace"], str(repo.resolve()))
+                        self.assertEqual((repo / "same.txt").read_text(), "A\n")
+
+                        write_b = structured(
+                            client_b.call_tool(
+                                "exec_argv",
+                                {
+                                    "argv": [
+                                        sys.executable,
+                                        "-c",
+                                        "from pathlib import Path; Path('same.txt').write_text('B\\n')",
+                                    ],
+                                    "context_id": context_b,
+                                    "state_effect": "selected_repo",
+                                },
+                            )
+                        )
+                        worktree = Path(write_b["workspace"])
+                        self.assertNotEqual(worktree, repo.resolve())
+                        self.assertEqual(
+                            write_b["active_project"]["path"], str(repo.resolve())
+                        )
+                        self.assertEqual((repo / "same.txt").read_text(), "A\n")
+                        self.assertEqual((worktree / "same.txt").read_text(), "B\n")
+                        branch = subprocess.run(
+                            ["git", "-C", str(worktree), "branch", "--show-current"],
+                            check=True,
+                            text=True,
+                            stdout=subprocess.PIPE,
+                        ).stdout.strip()
+                        self.assertTrue(branch.startswith("devmcp/context-"))
+
+                        read_b = structured(
+                            client_b.call_tool(
+                                "read_file",
+                                {"path": "same.txt", "context_id": context_b},
+                            )
+                        )
+                        self.assertEqual(read_b["content"], "B\n")
+                        self.assertEqual(read_b["workspace"], str(worktree))
+
+                        selected_again = structured(
+                            client_b.call_tool(
+                                "select_project",
+                                {"project": "a", "context_id": context_b},
+                            )
+                        )
+                        self.assertEqual(selected_again["workspace"], str(worktree))
+
+                        switched = structured(
+                            client_b.call_tool(
+                                "git_create_branch",
+                                {"name": "context-b-feature", "context_id": context_b},
+                            )
+                        )
+                        self.assertEqual(switched["workspace"], str(worktree))
+                        canonical_branch = subprocess.run(
+                            ["git", "-C", str(repo), "branch", "--show-current"],
+                            check=True,
+                            text=True,
+                            stdout=subprocess.PIPE,
+                        ).stdout.strip()
+                        self.assertEqual(canonical_branch, "main")
+                        self.assertEqual(
+                            subprocess.run(
+                                [
+                                    "git",
+                                    "-C",
+                                    str(worktree),
+                                    "branch",
+                                    "--show-current",
+                                ],
+                                check=True,
+                                text=True,
+                                stdout=subprocess.PIPE,
+                            ).stdout.strip(),
+                            "context-b-feature",
+                        )
+
+                        unmanaged = structured(
+                            client_b.call_tool(
+                                "exec_argv",
+                                {
+                                    "argv": [
+                                        sys.executable,
+                                        "-c",
+                                        "from pathlib import Path; Path('unmanaged.txt').write_text('drift\\n')",
+                                    ],
+                                    "context_id": context_b,
+                                },
+                            )
+                        )
+                        self.assertTrue(unmanaged["command_success"])
+                        blocked = client_b.call_tool(
+                            "git_create_branch",
+                            {"name": "must-not-create", "context_id": context_b},
+                        )
+                        self.assertTrue(blocked["isError"])
+                        self.assertEqual(
+                            structured(blocked)["error"]["code"], "STATE_DRIFT"
+                        )
+
+                        with MCPClient(repo, url=client_a.url) as reconnect:
+                            resumed = structured(
+                                reconnect.call_tool(
+                                    "read_file",
+                                    {"path": "same.txt", "context_id": context_b},
+                                )
+                            )
+                            self.assertEqual(resumed["content"], "B\n")
+                            self.assertEqual(resumed["workspace"], str(worktree))
 
     def test_job_handle_survives_new_http_session_and_enforces_context_owner(
         self,
