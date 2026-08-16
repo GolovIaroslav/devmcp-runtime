@@ -62,3 +62,88 @@ def create_managed_worktree(
             },
         )
     return path.resolve(strict=True), branch
+
+
+def managed_worktree_root(canonical_project: Path) -> Path:
+    return state_root(canonical_project) / "worktrees"
+
+
+def _registered_managed_worktrees(canonical_project: Path) -> list[Path]:
+    git = shutil.which("git")
+    if git is None:
+        return []
+    root = managed_worktree_root(canonical_project).resolve()
+    result = subprocess.run(
+        [git, "-C", str(canonical_project), "worktree", "list", "--porcelain"],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=30,
+        check=False,
+    )
+    if result.returncode != 0:
+        return []
+    paths: list[Path] = []
+    for line in result.stdout.splitlines():
+        if not line.startswith("worktree "):
+            continue
+        path = Path(line.removeprefix("worktree ")).resolve()
+        try:
+            path.relative_to(root)
+        except ValueError:
+            continue
+        paths.append(path)
+    return paths
+
+
+def cleanup_managed_worktree(canonical_project: Path, worktree: Path) -> str:
+    """Remove one clean DevMCP-owned worktree without deleting its branch."""
+
+    canonical = canonical_project.resolve(strict=True)
+    path = worktree.resolve(strict=False)
+    root = managed_worktree_root(canonical).resolve()
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return "ignored_unmanaged"
+    if path not in _registered_managed_worktrees(canonical):
+        return "ignored_unregistered"
+    git = shutil.which("git")
+    if git is None or not path.is_dir():
+        return "preserved_error"
+    status = subprocess.run(
+        [git, "-C", str(path), "status", "--porcelain", "--untracked-files=all"],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=30,
+        check=False,
+    )
+    if status.returncode != 0:
+        return "preserved_error"
+    if status.stdout.strip():
+        return "preserved_dirty"
+    removed = subprocess.run(
+        [git, "-C", str(canonical), "worktree", "remove", str(path)],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=30,
+        check=False,
+    )
+    return "removed_clean" if removed.returncode == 0 else "preserved_error"
+
+
+def recover_managed_worktrees(canonical_project: Path) -> dict[str, int]:
+    counts = {
+        "found": 0,
+        "removed_clean": 0,
+        "preserved_dirty": 0,
+        "preserved_error": 0,
+    }
+    for worktree in _registered_managed_worktrees(canonical_project):
+        counts["found"] += 1
+        outcome = cleanup_managed_worktree(canonical_project, worktree)
+        if outcome in counts:
+            counts[outcome] += 1
+    return counts
