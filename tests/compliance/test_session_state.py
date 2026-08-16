@@ -6,7 +6,9 @@ import time
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
+from coding_tools_mcp.managed_worktree import create_managed_worktree
 from coding_tools_mcp.processes import ExecSession
 from coding_tools_mcp.session_state import LogicalContextRegistry, SharedJobRegistry
 
@@ -40,6 +42,105 @@ class SessionStateRegistryTests(unittest.TestCase):
             state.last_seen -= 10
             registry.prune()
             self.assertIsNone(registry.get(state.context_id))
+
+    def test_mutation_claim_keeps_first_context_canonical_and_contends_next(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = LogicalContextRegistry()
+            first = registry.create(root, root, root)
+            second = registry.create(root, root, root)
+            self.assertFalse(registry.claim_mutation_workspace(first))
+            self.assertTrue(first.mutation_workspace_claimed)
+            self.assertTrue(registry.claim_mutation_workspace(second))
+            self.assertTrue(second.mutation_workspace_claimed)
+
+    def test_mutation_claim_is_reused_after_context_workspace_isolated(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            isolated = root / "isolated"
+            isolated.mkdir()
+            registry = LogicalContextRegistry()
+            first = registry.create(root, root, root)
+            second = registry.create(root, root, root)
+            self.assertFalse(registry.claim_mutation_workspace(first))
+            self.assertTrue(registry.claim_mutation_workspace(second))
+            registry.update(
+                second,
+                canonical_project_root=root,
+                effective_workspace_root=isolated,
+                default_cwd=isolated,
+            )
+            self.assertTrue(registry.claim_mutation_workspace(second))
+
+    def test_project_switch_resets_mutation_claim(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            other = root / "other"
+            other.mkdir()
+            registry = LogicalContextRegistry()
+            state = registry.create(root, root, root)
+            self.assertFalse(registry.claim_mutation_workspace(state))
+            registry.update(
+                state,
+                canonical_project_root=other,
+                effective_workspace_root=other,
+                default_cwd=other,
+            )
+            self.assertFalse(state.mutation_workspace_claimed)
+
+    def test_managed_worktree_is_linked_and_uses_private_generated_branch(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            canonical = root / "repo"
+            storage = root / "state"
+            canonical.mkdir()
+            subprocess.run(
+                ["git", "init", "-b", "main", str(canonical)],
+                check=True,
+                stdout=subprocess.DEVNULL,
+            )
+            subprocess.run(
+                ["git", "-C", str(canonical), "config", "user.name", "DevMCP Test"],
+                check=True,
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(canonical),
+                    "config",
+                    "user.email",
+                    "devmcp@example.invalid",
+                ],
+                check=True,
+            )
+            (canonical / "tracked.txt").write_text("base\n")
+            subprocess.run(
+                ["git", "-C", str(canonical), "add", "tracked.txt"], check=True
+            )
+            subprocess.run(
+                ["git", "-C", str(canonical), "commit", "-m", "base"],
+                check=True,
+                stdout=subprocess.DEVNULL,
+            )
+            with patch(
+                "coding_tools_mcp.managed_worktree.state_root", return_value=storage
+            ):
+                worktree, branch = create_managed_worktree(
+                    canonical, "ctx_test_context_123456"
+                )
+            self.assertNotEqual(worktree, canonical.resolve())
+            self.assertTrue((worktree / "tracked.txt").is_file())
+            current_branch = subprocess.run(
+                ["git", "-C", str(worktree), "branch", "--show-current"],
+                check=True,
+                text=True,
+                stdout=subprocess.PIPE,
+            ).stdout.strip()
+            self.assertEqual(current_branch, branch)
+            self.assertTrue(branch.startswith("devmcp/context-"))
 
     def test_shared_job_pins_context_and_checks_owner(self) -> None:
         with TemporaryDirectory() as tmp:

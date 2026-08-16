@@ -27,6 +27,7 @@ class LogicalContextState:
     created_at: float = field(default_factory=time.monotonic)
     last_seen: float = field(default_factory=time.monotonic)
     leases: int = 0
+    mutation_workspace_claimed: bool = False
     lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
 
 
@@ -93,10 +94,41 @@ class LogicalContextRegistry:
             current = self._contexts.get(state.context_id)
             if current is not state:
                 return
+            if state.canonical_project_root != canonical_project_root:
+                state.mutation_workspace_claimed = False
             state.canonical_project_root = canonical_project_root
             state.effective_workspace_root = effective_workspace_root
             state.default_cwd = default_cwd
             state.last_seen = time.monotonic()
+
+    def claim_mutation_workspace(self, state: LogicalContextState) -> bool:
+        """Claim mutation ownership and report whether this context must isolate."""
+        self.prune()
+        with self._lock:
+            current = self._contexts.get(state.context_id)
+            if current is not state:
+                raise RuntimeError("logical context is no longer registered")
+            if state.mutation_workspace_claimed:
+                return state.effective_workspace_root != state.canonical_project_root
+            contended = any(
+                other is not state
+                and other.mutation_workspace_claimed
+                and other.canonical_project_root == state.canonical_project_root
+                for other in self._contexts.values()
+            )
+            state.mutation_workspace_claimed = True
+            state.last_seen = time.monotonic()
+            return contended
+
+    def rollback_mutation_workspace_claim(self, state: LogicalContextState) -> None:
+        with self._lock:
+            current = self._contexts.get(state.context_id)
+            if (
+                current is state
+                and state.effective_workspace_root == state.canonical_project_root
+            ):
+                state.mutation_workspace_claimed = False
+                state.last_seen = time.monotonic()
 
     def retain(self, context_id: str) -> LogicalContextState | None:
         self.prune()
