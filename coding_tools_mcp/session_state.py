@@ -123,7 +123,10 @@ class LogicalContextRegistry:
     def rollback_mutation_workspace_claim(self, state: LogicalContextState) -> None:
         with self._lock:
             current = self._contexts.get(state.context_id)
-            if current is state and state.effective_workspace_root == state.canonical_project_root:
+            if (
+                current is state
+                and state.effective_workspace_root == state.canonical_project_root
+            ):
                 state.mutation_workspace_claimed = False
                 state.last_seen = time.monotonic()
 

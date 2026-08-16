@@ -43,7 +43,9 @@ class SessionStateRegistryTests(unittest.TestCase):
             registry.prune()
             self.assertIsNone(registry.get(state.context_id))
 
-    def test_mutation_claim_keeps_first_context_canonical_and_contends_next(self) -> None:
+    def test_mutation_claim_keeps_first_context_canonical_and_contends_next(
+        self,
+    ) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             registry = LogicalContextRegistry()
@@ -94,14 +96,41 @@ class SessionStateRegistryTests(unittest.TestCase):
             canonical = root / "repo"
             storage = root / "state"
             canonical.mkdir()
-            subprocess.run(["git", "init", "-b", "main", str(canonical)], check=True, stdout=subprocess.DEVNULL)
-            subprocess.run(["git", "-C", str(canonical), "config", "user.name", "DevMCP Test"], check=True)
-            subprocess.run(["git", "-C", str(canonical), "config", "user.email", "devmcp@example.invalid"], check=True)
+            subprocess.run(
+                ["git", "init", "-b", "main", str(canonical)],
+                check=True,
+                stdout=subprocess.DEVNULL,
+            )
+            subprocess.run(
+                ["git", "-C", str(canonical), "config", "user.name", "DevMCP Test"],
+                check=True,
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(canonical),
+                    "config",
+                    "user.email",
+                    "devmcp@example.invalid",
+                ],
+                check=True,
+            )
             (canonical / "tracked.txt").write_text("base\n")
-            subprocess.run(["git", "-C", str(canonical), "add", "tracked.txt"], check=True)
-            subprocess.run(["git", "-C", str(canonical), "commit", "-m", "base"], check=True, stdout=subprocess.DEVNULL)
-            with patch("coding_tools_mcp.managed_worktree.state_root", return_value=storage):
-                worktree, branch = create_managed_worktree(canonical, "ctx_test_context_123456")
+            subprocess.run(
+                ["git", "-C", str(canonical), "add", "tracked.txt"], check=True
+            )
+            subprocess.run(
+                ["git", "-C", str(canonical), "commit", "-m", "base"],
+                check=True,
+                stdout=subprocess.DEVNULL,
+            )
+            with patch(
+                "coding_tools_mcp.managed_worktree.state_root", return_value=storage
+            ):
+                worktree, branch = create_managed_worktree(
+                    canonical, "ctx_test_context_123456"
+                )
             self.assertNotEqual(worktree, canonical.resolve())
             self.assertTrue((worktree / "tracked.txt").is_file())
             current_branch = subprocess.run(
