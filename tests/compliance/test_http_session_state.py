@@ -327,6 +327,95 @@ class HTTPSessionStateTests(unittest.TestCase):
                         )
                         self.assertEqual(fresh["relative_path"], "a")
 
+    def test_continuation_resume_uses_explicit_context_after_project_switch(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            projects = root / "projects"
+            repo_a = self._repo(projects, "a")
+            repo_b = self._repo(projects, "b")
+            config_root = root / "config"
+            with patch.dict(
+                os.environ, {"DEVMCP_CONFIG_DIR": str(config_root)}, clear=False
+            ):
+                with self._server(repo_a, projects) as client:
+                    selected = structured(
+                        client.call_tool("select_project", {"project": "a"})
+                    )
+                    context_c = selected["context_id"]
+                    switched = structured(
+                        client.call_tool(
+                            "select_project",
+                            {"project": "b", "context_id": context_c},
+                        )
+                    )
+                    self.assertEqual(switched["context_id"], context_c)
+                    self.assertEqual(switched["relative_path"], "b")
+                    self.assertEqual(switched["workspace"], str(repo_b.resolve()))
+
+                    written = structured(
+                        client.call_tool(
+                            "continuation_checkpoint",
+                            {
+                                "action": "write",
+                                "logical_task": "http-explicit-context-resume",
+                                "payload": {
+                                    "objective": "resume through explicit HTTP context"
+                                },
+                                "context_id": context_c,
+                            },
+                        )
+                    )
+                    self.assertEqual(written["context_id"], context_c)
+
+                    with MCPClient(repo_a, url=client.url) as reconnect:
+                        default_context = structured(
+                            reconnect.call_tool("current_project", {})
+                        )
+                        context_d = default_context["context_id"]
+                        self.assertNotEqual(context_d, context_c)
+                        self.assertEqual(default_context["relative_path"], "a")
+
+                        resume_result = reconnect.call_tool(
+                            "continuation_checkpoint",
+                            {
+                                "action": "resume",
+                                "logical_task": "http-explicit-context-resume",
+                                "context_id": context_c,
+                            },
+                        )
+                        self.assertFalse(
+                            resume_result["isError"], structured(resume_result)
+                        )
+                        resumed = structured(resume_result)
+                        self.assertEqual(resumed["status"], "resumed")
+                        self.assertEqual(resumed["context_id"], context_c)
+                        self.assertEqual(resumed["workspace"], str(repo_b.resolve()))
+
+                        again = structured(
+                            reconnect.call_tool(
+                                "continuation_checkpoint",
+                                {
+                                    "action": "resume",
+                                    "logical_task": "http-explicit-context-resume",
+                                    "context_id": context_c,
+                                },
+                            )
+                        )
+                        self.assertEqual(again["status"], "already_resumed")
+                        self.assertEqual(again["context_id"], context_c)
+                        self.assertEqual(again["workspace"], str(repo_b.resolve()))
+
+                        default_again = structured(
+                            reconnect.call_tool("current_project", {})
+                        )
+                        self.assertEqual(default_again["context_id"], context_d)
+                        self.assertEqual(default_again["relative_path"], "a")
+                        self.assertEqual(
+                            default_again["workspace"], str(repo_a.resolve())
+                        )
+
     def test_competing_mutating_context_gets_linked_worktree_and_reuses_it(
         self,
     ) -> None:

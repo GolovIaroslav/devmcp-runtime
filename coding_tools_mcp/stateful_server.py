@@ -515,7 +515,7 @@ class StateManagedRuntime(StateMutationMixin, BuildIdentityMixin, core.Runtime):
                 category="not_found",
                 retryable=True,
             )
-        context_id = self._ensure_logical_context()
+        context_id = self._active_context_id()
         if context_id is None:
             raise ToolFailure(
                 "CONTEXT_NOT_FOUND",
