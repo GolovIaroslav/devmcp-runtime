@@ -1199,6 +1199,12 @@ def exec_output_diagnostics(payload: dict[str, Any]) -> list[dict[str, str]]:
     stderr = str(payload.get("stderr", ""))
     combined = "\n".join(part for part in (stderr, stdout) if part)
     lower = combined.lower()
+    exit_code = payload.get("exit_code")
+    execution_failed = (
+        payload.get("command_success") is False
+        or (isinstance(exit_code, int) and exit_code != 0)
+        or payload.get("status") in {"failed", "timeout"}
+    )
     if payload.get("timed_out") or payload.get("status") == "timeout":
         diagnostics.append(
             diagnostic(
@@ -1244,13 +1250,20 @@ def exec_output_diagnostics(payload: dict[str, Any]) -> list[dict[str, str]]:
         r"no module named ['\"]?([A-Za-z0-9_.-]+)", combined, re.I
     )
     command_missing = re.search(
-        r"(?:command not found|not found):?\s*([A-Za-z0-9_.-]+)?", combined, re.I
+        r"^(?:[^:\n]+:\s*)?(?:command not found:\s*([A-Za-z0-9_./+-]+)|"
+        r"(?:(?:line\s+)?\d+:\s*)?([A-Za-z0-9_./+-]+):\s*(?:command\s+)?not found)\s*$",
+        combined,
+        re.I | re.M,
     )
-    if missing_module or command_missing:
+    if execution_failed and (missing_module or command_missing):
         missing = (
             missing_module.group(1)
             if missing_module is not None
-            else (command_missing.group(1) if command_missing is not None else None)
+            else (
+                next((group for group in command_missing.groups() if group), None)
+                if command_missing is not None
+                else None
+            )
         )
         diagnostics.append(
             diagnostic(
@@ -1321,8 +1334,7 @@ def exec_output_diagnostics(payload: dict[str, Any]) -> list[dict[str, str]]:
         )
     if (
         payload.get("exit_code") == 127
-        or "command not found" in lower
-        or ("not found" in lower and "exec" in lower)
+        or (execution_failed and command_missing is not None)
     ):
         diagnostics.append(
             diagnostic(

@@ -141,6 +141,48 @@ class ProjectEnvironmentTests(unittest.TestCase):
         codes = {item["code"] for item in diagnostics}
         self.assertIn("PROJECT_DEPENDENCY_MISSING", codes)
 
+    def test_successful_command_not_found_text_is_not_missing_dependency(self) -> None:
+        diagnostics = exec_output_diagnostics(
+            {
+                "status": "success",
+                "command_success": True,
+                "exit_code": 0,
+                "stdout": '{"status":"ok","note":"optional cache not found"}',
+                "stderr": "",
+            }
+        )
+        codes = {item["code"] for item in diagnostics}
+        self.assertNotIn("PROJECT_DEPENDENCY_MISSING", codes)
+        self.assertNotIn("EXECUTABLE_NOT_FOUND", codes)
+
+    def test_assertion_failure_not_found_text_is_not_missing_dependency(self) -> None:
+        diagnostics = exec_output_diagnostics(
+            {
+                "status": "failed",
+                "command_success": False,
+                "exit_code": 1,
+                "stdout": 'AssertionError: expected "widget not found" to equal "ready"',
+                "stderr": "",
+            }
+        )
+        codes = {item["code"] for item in diagnostics}
+        self.assertNotIn("PROJECT_DEPENDENCY_MISSING", codes)
+        self.assertNotIn("EXECUTABLE_NOT_FOUND", codes)
+
+    def test_shell_command_not_found_is_still_classified(self) -> None:
+        diagnostics = exec_output_diagnostics(
+            {
+                "status": "failed",
+                "command_success": False,
+                "exit_code": 127,
+                "stdout": "",
+                "stderr": "sh: 1: missing-tool: not found",
+            }
+        )
+        codes = {item["code"] for item in diagnostics}
+        self.assertIn("PROJECT_DEPENDENCY_MISSING", codes)
+        self.assertIn("EXECUTABLE_NOT_FOUND", codes)
+
     def test_exec_command_structured_argv_bypasses_shell_interpretation(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
