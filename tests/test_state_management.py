@@ -163,7 +163,9 @@ class StateManagementTests(TestCase):
                     state = registry.get(second_context)
                     assert state is not None
                     self.assertNotEqual(state.effective_workspace_root, repo.resolve())
-                    self.assertEqual(canonical_file.read_text(encoding="utf-8"), "one\n")
+                    self.assertEqual(
+                        canonical_file.read_text(encoding="utf-8"), "one\n"
+                    )
                     self.assertEqual(
                         (state.effective_workspace_root / "tracked.txt").read_text(
                             encoding="utf-8"
@@ -177,7 +179,10 @@ class StateManagementTests(TestCase):
 
                     committed = second.call_tool(
                         "git_commit",
-                        {"message": "test: commit isolated patch", "paths": ["tracked.txt"]},
+                        {
+                            "message": "test: commit isolated patch",
+                            "paths": ["tracked.txt"],
+                        },
                     )
                     self.assertFalse(committed.get("isError", False), committed)
                     self.assertEqual(

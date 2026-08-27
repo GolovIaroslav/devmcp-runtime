@@ -1332,9 +1332,8 @@ def exec_output_diagnostics(payload: dict[str, Any]) -> list[dict[str, str]]:
                 suggested_fix="Add the missing toolchain path to CODING_TOOLS_MCP_EXEC_ALLOW_ROOTS or the default read roots.",
             )
         )
-    if (
-        payload.get("exit_code") == 127
-        or (execution_failed and command_missing is not None)
+    if payload.get("exit_code") == 127 or (
+        execution_failed and command_missing is not None
     ):
         diagnostics.append(
             diagnostic(
@@ -2959,7 +2958,9 @@ class Runtime:
                 package_data = json.loads(package_json.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):
                 package_data = {}
-            scripts = package_data.get("scripts") if isinstance(package_data, dict) else None
+            scripts = (
+                package_data.get("scripts") if isinstance(package_data, dict) else None
+            )
             if isinstance(scripts, dict):
                 existing_ids = {str(item["id"]) for item in checks}
                 for check_id in (
