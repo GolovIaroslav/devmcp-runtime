@@ -1199,6 +1199,12 @@ def exec_output_diagnostics(payload: dict[str, Any]) -> list[dict[str, str]]:
     stderr = str(payload.get("stderr", ""))
     combined = "\n".join(part for part in (stderr, stdout) if part)
     lower = combined.lower()
+    exit_code = payload.get("exit_code")
+    execution_failed = (
+        payload.get("command_success") is False
+        or (isinstance(exit_code, int) and exit_code != 0)
+        or payload.get("status") in {"failed", "timeout"}
+    )
     if payload.get("timed_out") or payload.get("status") == "timeout":
         diagnostics.append(
             diagnostic(
@@ -1244,13 +1250,20 @@ def exec_output_diagnostics(payload: dict[str, Any]) -> list[dict[str, str]]:
         r"no module named ['\"]?([A-Za-z0-9_.-]+)", combined, re.I
     )
     command_missing = re.search(
-        r"(?:command not found|not found):?\s*([A-Za-z0-9_.-]+)?", combined, re.I
+        r"^(?:[^:\n]+:\s*)?(?:command not found:\s*([A-Za-z0-9_./+-]+)|"
+        r"(?:(?:line\s+)?\d+:\s*)?([A-Za-z0-9_./+-]+):\s*(?:command\s+)?not found)\s*$",
+        combined,
+        re.I | re.M,
     )
-    if missing_module or command_missing:
+    if execution_failed and (missing_module or command_missing):
         missing = (
             missing_module.group(1)
             if missing_module is not None
-            else (command_missing.group(1) if command_missing is not None else None)
+            else (
+                next((group for group in command_missing.groups() if group), None)
+                if command_missing is not None
+                else None
+            )
         )
         diagnostics.append(
             diagnostic(
@@ -1319,10 +1332,8 @@ def exec_output_diagnostics(payload: dict[str, Any]) -> list[dict[str, str]]:
                 suggested_fix="Add the missing toolchain path to CODING_TOOLS_MCP_EXEC_ALLOW_ROOTS or the default read roots.",
             )
         )
-    if (
-        payload.get("exit_code") == 127
-        or "command not found" in lower
-        or ("not found" in lower and "exec" in lower)
+    if payload.get("exit_code") == 127 or (
+        execution_failed and command_missing is not None
     ):
         diagnostics.append(
             diagnostic(
@@ -2281,6 +2292,7 @@ class Runtime:
         return
 
     def resolve_existing(self, raw_path: str = ".") -> ResolvedPath:
+        raw_path = self._map_canonical_path_to_effective_workspace(raw_path)
         resolved = self.workspace.resolve_existing_at(
             self.default_cwd, raw_path, roots=self.readable_roots()
         )
@@ -2288,11 +2300,24 @@ class Runtime:
         return resolved
 
     def resolve_for_write(self, raw_path: str) -> ResolvedPath:
+        raw_path = self._map_canonical_path_to_effective_workspace(raw_path)
         resolved = self.workspace.resolve_for_write_at(
             self.default_cwd, raw_path, roots=self.writable_roots()
         )
         self._consume_additional_root(resolved.path, write=True)
         return resolved
+
+    def _map_canonical_path_to_effective_workspace(self, raw_path: str) -> str:
+        if self.effective_workspace_root == self.canonical_project_root:
+            return raw_path
+        if not Workspace._path_text_is_absolute(raw_path):
+            return raw_path
+        try:
+            candidate = Path(raw_path).expanduser().resolve(strict=False)
+            relative = candidate.relative_to(self.canonical_project_root)
+        except (OSError, ValueError):
+            return raw_path
+        return str(self.effective_workspace_root / relative)
 
     def git_path_filter(self, raw_path: str) -> str:
         if raw_path == ".":
@@ -2927,6 +2952,40 @@ class Runtime:
                             "source": "Makefile",
                         }
                     )
+        package_json = root / "package.json"
+        if package_json.is_file():
+            try:
+                package_data = json.loads(package_json.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                package_data = {}
+            scripts = (
+                package_data.get("scripts") if isinstance(package_data, dict) else None
+            )
+            if isinstance(scripts, dict):
+                existing_ids = {str(item["id"]) for item in checks}
+                for check_id in (
+                    "ci",
+                    "check",
+                    "test",
+                    "lint",
+                    "format-check",
+                    "typecheck",
+                    "deadcode",
+                    "build",
+                ):
+                    if (
+                        check_id not in existing_ids
+                        and isinstance(scripts.get(check_id), str)
+                        and scripts[check_id].strip()
+                    ):
+                        checks.append(
+                            {
+                                "id": check_id,
+                                "argv": ["npm", "run", check_id],
+                                "environment": "repository-npm",
+                                "source": "package.json",
+                            }
+                        )
         pyproject = root / "pyproject.toml"
         if pyproject.is_file() and not any(item["id"] == "test" for item in checks):
             if (root / ".venv" / "bin" / "python").is_file():

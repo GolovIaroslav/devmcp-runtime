@@ -48,6 +48,27 @@ class ProjectEnvironmentTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    def test_package_json_validation_scripts_are_discovered(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = self._repo(root, makefile="")
+            (repo / "package.json").write_text(
+                """{"scripts":{"lint":"eslint .","typecheck":"tsc --noEmit","deadcode":"knip","test":"vitest run","build":"tsc"}}\n""",
+                encoding="utf-8",
+            )
+            runtime = Runtime(repo, sandbox_backend="unsafe")
+            try:
+                checks = runtime.project_checks({})["checks"]
+                by_id = {item["id"]: item for item in checks}
+                self.assertEqual(
+                    set(by_id), {"lint", "typecheck", "deadcode", "test", "build"}
+                )
+                for check_id in by_id:
+                    self.assertEqual(by_id[check_id]["argv"], ["npm", "run", check_id])
+                    self.assertEqual(by_id[check_id]["source"], "package.json")
+            finally:
+                runtime.close()
+
     @unittest.skipIf(os.name == "nt", "fixture uses POSIX venv/bin layout")
     def test_project_venv_has_priority_for_make_python3(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -140,6 +161,48 @@ class ProjectEnvironmentTests(unittest.TestCase):
         )
         codes = {item["code"] for item in diagnostics}
         self.assertIn("PROJECT_DEPENDENCY_MISSING", codes)
+
+    def test_successful_command_not_found_text_is_not_missing_dependency(self) -> None:
+        diagnostics = exec_output_diagnostics(
+            {
+                "status": "success",
+                "command_success": True,
+                "exit_code": 0,
+                "stdout": '{"status":"ok","note":"optional cache not found"}',
+                "stderr": "",
+            }
+        )
+        codes = {item["code"] for item in diagnostics}
+        self.assertNotIn("PROJECT_DEPENDENCY_MISSING", codes)
+        self.assertNotIn("EXECUTABLE_NOT_FOUND", codes)
+
+    def test_assertion_failure_not_found_text_is_not_missing_dependency(self) -> None:
+        diagnostics = exec_output_diagnostics(
+            {
+                "status": "failed",
+                "command_success": False,
+                "exit_code": 1,
+                "stdout": 'AssertionError: expected "widget not found" to equal "ready"',
+                "stderr": "",
+            }
+        )
+        codes = {item["code"] for item in diagnostics}
+        self.assertNotIn("PROJECT_DEPENDENCY_MISSING", codes)
+        self.assertNotIn("EXECUTABLE_NOT_FOUND", codes)
+
+    def test_shell_command_not_found_is_still_classified(self) -> None:
+        diagnostics = exec_output_diagnostics(
+            {
+                "status": "failed",
+                "command_success": False,
+                "exit_code": 127,
+                "stdout": "",
+                "stderr": "sh: 1: missing-tool: not found",
+            }
+        )
+        codes = {item["code"] for item in diagnostics}
+        self.assertIn("PROJECT_DEPENDENCY_MISSING", codes)
+        self.assertIn("EXECUTABLE_NOT_FOUND", codes)
 
     def test_exec_command_structured_argv_bypasses_shell_interpretation(self) -> None:
         with TemporaryDirectory() as tmp:
