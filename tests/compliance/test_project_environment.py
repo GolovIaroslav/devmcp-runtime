@@ -48,6 +48,27 @@ class ProjectEnvironmentTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    def test_package_json_validation_scripts_are_discovered(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = self._repo(root, makefile="")
+            (repo / "package.json").write_text(
+                """{"scripts":{"lint":"eslint .","typecheck":"tsc --noEmit","deadcode":"knip","test":"vitest run","build":"tsc"}}\n""",
+                encoding="utf-8",
+            )
+            runtime = Runtime(repo, sandbox_backend="unsafe")
+            try:
+                checks = runtime.project_checks({})["checks"]
+                by_id = {item["id"]: item for item in checks}
+                self.assertEqual(
+                    set(by_id), {"lint", "typecheck", "deadcode", "test", "build"}
+                )
+                for check_id in by_id:
+                    self.assertEqual(by_id[check_id]["argv"], ["npm", "run", check_id])
+                    self.assertEqual(by_id[check_id]["source"], "package.json")
+            finally:
+                runtime.close()
+
     @unittest.skipIf(os.name == "nt", "fixture uses POSIX venv/bin layout")
     def test_project_venv_has_priority_for_make_python3(self) -> None:
         with TemporaryDirectory() as tmp:

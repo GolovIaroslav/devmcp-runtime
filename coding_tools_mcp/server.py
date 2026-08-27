@@ -2953,6 +2953,38 @@ class Runtime:
                             "source": "Makefile",
                         }
                     )
+        package_json = root / "package.json"
+        if package_json.is_file():
+            try:
+                package_data = json.loads(package_json.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                package_data = {}
+            scripts = package_data.get("scripts") if isinstance(package_data, dict) else None
+            if isinstance(scripts, dict):
+                existing_ids = {str(item["id"]) for item in checks}
+                for check_id in (
+                    "ci",
+                    "check",
+                    "test",
+                    "lint",
+                    "format-check",
+                    "typecheck",
+                    "deadcode",
+                    "build",
+                ):
+                    if (
+                        check_id not in existing_ids
+                        and isinstance(scripts.get(check_id), str)
+                        and scripts[check_id].strip()
+                    ):
+                        checks.append(
+                            {
+                                "id": check_id,
+                                "argv": ["npm", "run", check_id],
+                                "environment": "repository-npm",
+                                "source": "package.json",
+                            }
+                        )
         pyproject = root / "pyproject.toml"
         if pyproject.is_file() and not any(item["id"] == "test" for item in checks):
             if (root / ".venv" / "bin" / "python").is_file():
