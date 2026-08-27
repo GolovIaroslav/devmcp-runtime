@@ -2281,6 +2281,7 @@ class Runtime:
         return
 
     def resolve_existing(self, raw_path: str = ".") -> ResolvedPath:
+        raw_path = self._map_canonical_path_to_effective_workspace(raw_path)
         resolved = self.workspace.resolve_existing_at(
             self.default_cwd, raw_path, roots=self.readable_roots()
         )
@@ -2288,11 +2289,24 @@ class Runtime:
         return resolved
 
     def resolve_for_write(self, raw_path: str) -> ResolvedPath:
+        raw_path = self._map_canonical_path_to_effective_workspace(raw_path)
         resolved = self.workspace.resolve_for_write_at(
             self.default_cwd, raw_path, roots=self.writable_roots()
         )
         self._consume_additional_root(resolved.path, write=True)
         return resolved
+
+    def _map_canonical_path_to_effective_workspace(self, raw_path: str) -> str:
+        if self.effective_workspace_root == self.canonical_project_root:
+            return raw_path
+        if not Workspace._path_text_is_absolute(raw_path):
+            return raw_path
+        try:
+            candidate = Path(raw_path).expanduser().resolve(strict=False)
+            relative = candidate.relative_to(self.canonical_project_root)
+        except (OSError, ValueError):
+            return raw_path
+        return str(self.effective_workspace_root / relative)
 
     def git_path_filter(self, raw_path: str) -> str:
         if raw_path == ".":

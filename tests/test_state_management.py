@@ -136,6 +136,58 @@ def new_context_runtime(
 
 
 class StateManagementTests(TestCase):
+    def test_absolute_canonical_patch_path_stays_in_managed_worktree(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, _head = init_repo(root)
+            with patch.dict("os.environ", {"DEVMCP_CONFIG_DIR": str(root / "config")}):
+                registry = LogicalContextRegistry()
+                first, _first_context = new_context_runtime(repo, registry)
+                second, second_context = new_context_runtime(repo, registry)
+                try:
+                    first_claim = first.call_tool("exec_argv", {"argv": ["true"]})
+                    self.assertFalse(first_claim.get("isError", False), first_claim)
+
+                    canonical_file = repo / "tracked.txt"
+                    patch_text = f"""*** Begin Patch
+*** Update File: {canonical_file}
+@@ -1,1 +1,1 @@
+-one
++two
+*** End Patch
+"""
+                    applied = second.call_tool("apply_patch", {"patch": patch_text})
+                    self.assertFalse(applied.get("isError", False), applied)
+                    payload = applied["structuredContent"]
+
+                    state = registry.get(second_context)
+                    assert state is not None
+                    self.assertNotEqual(state.effective_workspace_root, repo.resolve())
+                    self.assertEqual(canonical_file.read_text(encoding="utf-8"), "one\n")
+                    self.assertEqual(
+                        (state.effective_workspace_root / "tracked.txt").read_text(
+                            encoding="utf-8"
+                        ),
+                        "two\n",
+                    )
+                    self.assertEqual(
+                        payload["state_checkpoint"]["snapshot"]["dirty_paths"],
+                        ["tracked.txt"],
+                    )
+
+                    committed = second.call_tool(
+                        "git_commit",
+                        {"message": "test: commit isolated patch", "paths": ["tracked.txt"]},
+                    )
+                    self.assertFalse(committed.get("isError", False), committed)
+                    self.assertEqual(
+                        committed["structuredContent"]["paths"], ["tracked.txt"]
+                    )
+                finally:
+                    second.close()
+                    first.close()
+                    registry.close()
+
     def test_canonical_namespace_with_effective_linked_worktree_snapshot(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
