@@ -201,6 +201,7 @@ HTTP_SAFE_BLOCKING_WAIT_MAX_MS = 60_000
 HTTP_WRITE_STDIN_MAX_WAIT_MS = HTTP_SAFE_BLOCKING_WAIT_MAX_MS
 JOB_STATUS_MAX_WAIT_MS = HTTP_SAFE_BLOCKING_WAIT_MAX_MS
 JOB_STATUS_NEXT_WAIT_MS = HTTP_SAFE_BLOCKING_WAIT_MAX_MS
+EXEC_PROCESS_TIMEOUT_MAX_MS = 3_600_000
 MAX_ACTIVE_EXEC_SESSIONS = 16
 MAX_RETAINED_OUTPUT_SESSIONS = 32
 COMPLETED_SESSION_TTL_SECONDS = 300
@@ -10229,7 +10230,7 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                 "timeout_ms": {
                     **integer,
                     "minimum": 1,
-                    "maximum": 300000,
+                    "maximum": EXEC_PROCESS_TIMEOUT_MAX_MS,
                     "default": 30000,
                 },
                 "yield_time_ms": {
@@ -10288,7 +10289,7 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                 "timeout_ms": {
                     **integer,
                     "minimum": 1,
-                    "maximum": 300000,
+                    "maximum": EXEC_PROCESS_TIMEOUT_MAX_MS,
                     "default": 30000,
                 },
                 "yield_time_ms": {

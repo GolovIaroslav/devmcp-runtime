@@ -136,6 +136,15 @@ Long-running HTTP commands use opaque `job_...` handles in a server-owned job
 registry. A job is bound to its owning logical context, so a different client
 context cannot poll, read, write, or cancel it. Running jobs survive transport
 session teardown; completed jobs expire after a bounded retention interval.
+Generic `exec_command` and `exec_argv` jobs may request process lifetimes up to
+one hour while HTTP request waits remain independently bounded. Synchronous
+`state_effect="selected_repo"` execution keeps its stricter HTTP safety bound.
+
+When competing logical contexts need mutation isolation, DevMCP may bind one
+context to a managed Git worktree. That worktree is a Git checkout, so ignored
+or untracked build artifacts from the canonical checkout (for example `dist/`)
+are not copied into it. Use a project-native build in that worktree or an
+explicit path/cwd when an existing external artifact is intentionally required.
 
 Once selected, the repository is the primary writable root. Path trust is based
 on canonical containment, not spelling: relative paths resolve from the logical

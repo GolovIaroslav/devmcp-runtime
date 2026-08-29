@@ -2035,6 +2035,29 @@ Maven home: /usr/share/maven
         self.assertEqual(wait_schema["maximum"], 60000)
         self.assertEqual(wait_schema["default"], 0)
 
+    def test_generic_exec_allows_job_timeout_above_five_minutes(self) -> None:
+        schemas = server_module.input_schemas()
+        for tool_name in ("exec_command", "exec_argv"):
+            timeout_schema = schemas[tool_name]["properties"]["timeout_ms"]
+            self.assertEqual(
+                timeout_schema["maximum"], server_module.EXEC_PROCESS_TIMEOUT_MAX_MS
+            )
+            self.assertGreater(timeout_schema["maximum"], 300000)
+
+        with TemporaryDirectory() as tmp:
+            runtime = Runtime(Path(tmp), permission_mode="trusted", transport="http")
+            try:
+                result = runtime.exec_argv(
+                    {
+                        "argv": [sys.executable, "-c", "raise SystemExit(0)"],
+                        "timeout_ms": 300001,
+                    }
+                )
+                self.assertEqual(result["status"], "success", result)
+                self.assertTrue(result["command_success"], result)
+            finally:
+                runtime.close()
+
     def test_read_output_pages_streams_independently(self) -> None:
         with TemporaryDirectory() as tmp:
             runtime = Runtime(Path(tmp), permission_mode="trusted")
