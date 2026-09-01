@@ -122,7 +122,7 @@ jobs:
             --output reports/final.md
 
       - name: Upload final audit evidence
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@v7
         with:
           name: final-audit-evidence
           path: reports/final.md
