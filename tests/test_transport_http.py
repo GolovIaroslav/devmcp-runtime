@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 import unittest
 
+from coding_tools_mcp.server import MCPHandler
 from coding_tools_mcp.transport_http import (
     HTTP_SESSION_TTL_SECONDS,
     MAX_HTTP_SESSIONS,
@@ -34,6 +35,19 @@ class RuntimeFactory:
 
 
 class HTTPSessionManagerTests(unittest.TestCase):
+    def test_closed_peer_during_response_write_is_not_a_server_failure(self) -> None:
+        class ClosedPeer:
+            def write(self, _body: bytes) -> None:
+                raise ConnectionAbortedError("peer closed")
+
+        class FakeHandler:
+            wfile = ClosedPeer()
+            close_connection = False
+
+        handler = FakeHandler()
+        MCPHandler._write_body_safely(handler, b"response")  # type: ignore[arg-type]
+        self.assertTrue(handler.close_connection)
+
     def test_repeated_abandoned_sessions_stay_bounded_at_capacity(self) -> None:
         factory = RuntimeFactory()
         manager = HTTPSessionManager(factory)
@@ -221,6 +235,72 @@ class HTTPSessionManagerTests(unittest.TestCase):
         self.assertIn(background.http_session_id, manager._sessions)
         manager.release(replacement.http_session_id)
         manager.close()
+
+
+class BearerAuthorizationTests(unittest.TestCase):
+    def test_auth_disabled_returns_true(self) -> None:
+        class FakeRuntimeNoAuth:
+            auth_token = None
+            auth_tokens: tuple[str, ...] = ()
+            oauth_config = None
+
+            def auth_enabled(self) -> bool:
+                return False
+
+        class FakeHandler:
+            runtime = FakeRuntimeNoAuth()
+            headers: dict[str, str] = {}
+
+        self.assertTrue(MCPHandler.is_authorized(FakeHandler()))  # type: ignore[arg-type]
+
+    def test_single_token_accepted_with_bearer_and_raw_rejected(self) -> None:
+        class FakeRuntimeSingle:
+            auth_token = "mcp-primary-secret"
+            auth_tokens = ("mcp-primary-secret",)
+            oauth_config = None
+
+            def auth_enabled(self) -> bool:
+                return True
+
+        class FakeHandler:
+            runtime = FakeRuntimeSingle()
+            headers: dict[str, str] = {"Authorization": "Bearer mcp-primary-secret"}
+
+        self.assertTrue(MCPHandler.is_authorized(FakeHandler()))  # type: ignore[arg-type]
+
+        # Raw token without Bearer scheme must be strictly rejected
+        FakeHandler.headers = {"Authorization": "mcp-primary-secret"}
+        self.assertFalse(MCPHandler.is_authorized(FakeHandler()))  # type: ignore[arg-type]
+
+        FakeHandler.headers = {"Authorization": "Bearer wrong-secret"}
+        self.assertFalse(MCPHandler.is_authorized(FakeHandler()))  # type: ignore[arg-type]
+
+    def test_multiple_tokens_accepted(self) -> None:
+        class FakeRuntimeMulti:
+            auth_token = "mcp-primary-secret"
+            auth_tokens = ("mcp-primary-secret", "tunnel-control-plane-key-12345")
+            oauth_config = None
+
+            def auth_enabled(self) -> bool:
+                return True
+
+        class FakeHandler:
+            runtime = FakeRuntimeMulti()
+            headers: dict[str, str] = {
+                "Authorization": "Bearer tunnel-control-plane-key-12345"
+            }
+
+        self.assertTrue(MCPHandler.is_authorized(FakeHandler()))  # type: ignore[arg-type]
+
+        FakeHandler.headers = {"Authorization": "Bearer mcp-primary-secret"}
+        self.assertTrue(MCPHandler.is_authorized(FakeHandler()))  # type: ignore[arg-type]
+
+        # Raw token without Bearer prefix rejected
+        FakeHandler.headers = {"Authorization": "tunnel-control-plane-key-12345"}
+        self.assertFalse(MCPHandler.is_authorized(FakeHandler()))  # type: ignore[arg-type]
+
+        FakeHandler.headers = {"Authorization": "Bearer some-random-attacker-token"}
+        self.assertFalse(MCPHandler.is_authorized(FakeHandler()))  # type: ignore[arg-type]
 
 
 if __name__ == "__main__":

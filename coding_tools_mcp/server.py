@@ -201,7 +201,19 @@ HTTP_SAFE_BLOCKING_WAIT_MAX_MS = 60_000
 HTTP_WRITE_STDIN_MAX_WAIT_MS = HTTP_SAFE_BLOCKING_WAIT_MAX_MS
 JOB_STATUS_MAX_WAIT_MS = HTTP_SAFE_BLOCKING_WAIT_MAX_MS
 JOB_STATUS_NEXT_WAIT_MS = HTTP_SAFE_BLOCKING_WAIT_MAX_MS
+WINDOWS_HTTP_JOB_STATUS_WAIT_MAX_MS = 10_000
 EXEC_PROCESS_TIMEOUT_MAX_MS = 3_600_000
+
+
+def job_status_wait_limit_ms(
+    transport: str, *, platform_name: str | None = None
+) -> int:
+    platform = os.name if platform_name is None else platform_name
+    if platform == "nt" and transport == "http":
+        return WINDOWS_HTTP_JOB_STATUS_WAIT_MAX_MS
+    return JOB_STATUS_MAX_WAIT_MS
+
+
 MAX_ACTIVE_EXEC_SESSIONS = 16
 MAX_RETAINED_OUTPUT_SESSIONS = 32
 COMPLETED_SESSION_TTL_SECONDS = 300
@@ -1596,6 +1608,7 @@ class Runtime:
         shell_env_policy: ShellEnvPolicy | None = None,
         allow_network: bool = False,
         auth_token: str | None = None,
+        extra_auth_tokens: tuple[str, ...] | list[str] | None = None,
         oauth_config: OAuthConfig | None = None,
         project_context: ProjectContext | None = None,
         fake_readonly_annotations: bool = False,
@@ -1686,6 +1699,12 @@ class Runtime:
         self.shell_env_policy = shell_env_policy or ShellEnvPolicy()
         self.allow_network = True
         self.auth_token = auth_token or None
+        collected_tokens = [auth_token] if auth_token else []
+        if extra_auth_tokens:
+            collected_tokens.extend(extra_auth_tokens)
+        self.auth_tokens: tuple[str, ...] = tuple(
+            dict.fromkeys(t for t in collected_tokens if t)
+        )
         self.oauth_config = oauth_config
         self.server_instance_id = secrets.token_urlsafe(12)
         self._set_runtime_dir(
@@ -2226,7 +2245,11 @@ class Runtime:
         return list(self._exposed_tool_names)
 
     def auth_enabled(self) -> bool:
-        return self.auth_token is not None or self.oauth_config is not None
+        return (
+            bool(getattr(self, "auth_tokens", ()))
+            or self.auth_token is not None
+            or self.oauth_config is not None
+        )
 
     def oauth_enabled(self) -> bool:
         return self.oauth_config is not None
@@ -5688,7 +5711,7 @@ class Runtime:
             if session.pty_master_fd is None:
                 next_arguments: dict[str, Any] = {
                     "session_id": session.session_id,
-                    "wait_ms": JOB_STATUS_NEXT_WAIT_MS,
+                    "wait_ms": job_status_wait_limit_ms(self.transport),
                 }
                 next_tool = "job_status"
             else:
@@ -8477,7 +8500,10 @@ class Runtime:
                 )
             if session is None:
                 return {"status": "not_found", "session_id": session_id}
-        wait_ms = max(0, min(int(args.get("wait_ms", 0)), JOB_STATUS_MAX_WAIT_MS))
+        wait_ms = max(
+            0,
+            min(int(args.get("wait_ms", 0)), job_status_wait_limit_ms(self.transport)),
+        )
         if wait_ms > 0 and session.process.poll() is None:
             try:
                 session.process.wait(timeout=wait_ms / 1000.0)
@@ -8497,7 +8523,7 @@ class Runtime:
         if poll is None:
             next_arguments: dict[str, Any] = {
                 "session_id": session_id,
-                "wait_ms": JOB_STATUS_NEXT_WAIT_MS,
+                "wait_ms": job_status_wait_limit_ms(self.transport),
             }
             if context_id := self._active_context_id():
                 next_arguments["context_id"] = context_id
@@ -9284,7 +9310,9 @@ def add_landlock_path(
     ruleset_fd: int, path: Path, allowed_access: int, *, required: bool = True
 ) -> None:
     try:
-        fd = os.open(path, getattr(os, "O_PATH", os.O_RDONLY) | os.O_CLOEXEC)
+        fd = os.open(
+            path, getattr(os, "O_PATH", os.O_RDONLY) | getattr(os, "O_CLOEXEC", 0)
+        )
     except OSError as exc:
         if required:
             raise ToolFailure(
@@ -10794,11 +10822,16 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         if not self.runtime.auth_enabled():
             return True
         header = self.headers.get("Authorization", "").strip()
-        if self.runtime.auth_token is not None:
-            if secrets.compare_digest(header, f"Bearer {self.runtime.auth_token}"):
+        if not header.startswith("Bearer "):
+            return False
+        token = header[len("Bearer ") :].strip()
+        tokens = getattr(self.runtime, "auth_tokens", ())
+        if not tokens and self.runtime.auth_token:
+            tokens = (self.runtime.auth_token,)
+        for candidate in tokens:
+            if secrets.compare_digest(token, candidate):
                 return True
-        if self.runtime.oauth_config is not None and header.startswith("Bearer "):
-            token = header[len("Bearer ") :]
+        if self.runtime.oauth_config is not None:
             if validate_access_token(
                 token, self.runtime.oauth_config, self.oauth_base_url()
             ):
@@ -10895,6 +10928,15 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             head_only=head_only,
         )
 
+    def _write_body_safely(self, body: bytes) -> None:
+        try:
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+            # A client may reach its own deadline while a bounded MCP request is
+            # still finishing. A closed peer is request cancellation, not a
+            # server failure that should escape the HTTP worker.
+            self.close_connection = True
+
     def _send_html(self, body: str, *, status: int = 200) -> None:
         data = body.encode("utf-8")
         self.send_response(status)
@@ -10902,7 +10944,7 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
-        self.wfile.write(data)
+        self._write_body_safely(data)
 
     def _oauth_login_page(
         self,
@@ -11288,7 +11330,7 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             self.send_header(name, value)
         self.end_headers()
         if not head_only:
-            self.wfile.write(body)
+            self._write_body_safely(body)
 
 
 class RuntimeHTTPServer(http.server.ThreadingHTTPServer):
@@ -11322,6 +11364,7 @@ def build_runtime(
     runtime_policy: RuntimePolicy,
     *,
     auth_token: str | None = None,
+    extra_auth_tokens: tuple[str, ...] | list[str] | None = None,
     oauth_config: OAuthConfig | None = None,
     emit_warning: bool = True,
     project_context: ProjectContext | None = None,
@@ -11346,6 +11389,7 @@ def build_runtime(
         shell_env_policy=runtime_policy.shell_env_policy,
         allow_network=runtime_policy.allow_network,
         auth_token=auth_token,
+        extra_auth_tokens=extra_auth_tokens,
         oauth_config=oauth_config,
         project_context=project_context,
         fake_readonly_annotations=runtime_policy.fake_readonly_annotations,
@@ -11410,6 +11454,34 @@ def run_http(args: argparse.Namespace) -> int:
             return 2
         if not auth_token:
             print("ERROR: MCP auth token file is empty.", file=sys.stderr)
+            return 2
+    extra_auth_tokens: list[str] = list(getattr(args, "extra_auth_token", []) or [])
+    for file_path in getattr(args, "extra_auth_token_file", []) or []:
+        try:
+            token_val = Path(file_path).expanduser().read_text(encoding="utf-8").strip()
+            if token_val:
+                extra_auth_tokens.append(token_val)
+        except OSError as exc:
+            print(
+                f"ERROR: unable to read extra auth token file {file_path}: {exc}",
+                file=sys.stderr,
+            )
+            return 2
+    extra_file_env = os.environ.get("DEVMCP_EXTRA_AUTH_TOKEN_FILE") or os.environ.get(
+        "CODING_TOOLS_MCP_EXTRA_AUTH_TOKEN_FILE"
+    )
+    if extra_file_env:
+        try:
+            token_val = (
+                Path(extra_file_env).expanduser().read_text(encoding="utf-8").strip()
+            )
+            if token_val and token_val not in extra_auth_tokens:
+                extra_auth_tokens.append(token_val)
+        except OSError as exc:
+            print(
+                f"ERROR: unable to read extra auth token file {extra_file_env}: {exc}",
+                file=sys.stderr,
+            )
             return 2
     try:
         runtime_policy = runtime_policy_from_args(args)
@@ -11566,6 +11638,7 @@ def run_http(args: argparse.Namespace) -> int:
             args,
             runtime_policy,
             auth_token=auth_token,
+            extra_auth_tokens=tuple(extra_auth_tokens),
             oauth_config=oauth_config,
             transport="http",
             logical_context_registry=logical_context_registry,
@@ -11611,6 +11684,7 @@ def run_http(args: argparse.Namespace) -> int:
             args,
             runtime_policy,
             auth_token=auth_token,
+            extra_auth_tokens=tuple(extra_auth_tokens),
             oauth_config=oauth_config,
             emit_warning=False,
             project_context=runtime.project_context,
@@ -11705,6 +11779,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="read the bearer token from a 0600 file instead of exposing it in arguments or shell history",
     )
     parser.add_argument(
+        "--extra-auth-token",
+        action="append",
+        default=[],
+        help="specify an additional authorized bearer token (can be repeated)",
+    )
+    parser.add_argument(
+        "--extra-auth-token-file",
+        action="append",
+        default=[],
+        help="read an additional authorized bearer token from a 0600 file (can be repeated)",
+    )
+    parser.add_argument(
         "--oauth-mode",
         action="store_true",
         default=False,
@@ -11746,7 +11832,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--sandbox-backend",
-        choices=("bwrap", "podman", "unsafe"),
+        choices=("bwrap", "podman", "unsafe", "none"),
         default="bwrap",
         help="execution backend; unsafe is explicit and visibly warned",
     )

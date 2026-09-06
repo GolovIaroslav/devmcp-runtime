@@ -20,6 +20,7 @@ import tomllib
 import urllib.error
 import urllib.parse
 import urllib.request
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -44,9 +45,26 @@ from coding_tools_mcp.protocol import PROTOCOL_VERSION
 
 MCP_SERVICE = "devmcp-runtime.service"
 TUNNEL_SERVICE = "devmcp-tunnel.service"
-TUNNEL_BIN = Path(
-    os.environ.get("TUNNEL_CLIENT_BIN", "~/.local/bin/tunnel-client")
-).expanduser()
+MCP_PROCESS_MARKER = "-m apps.devmcp.cli serve"
+TUNNEL_PROCESS_MARKER = "-m apps.devmcp.cli tunnel run"
+
+
+def _resolve_tunnel_bin() -> Path:
+    raw = os.environ.get("TUNNEL_CLIENT_BIN")
+    if raw:
+        return Path(raw).expanduser()
+    default_path = Path("~/.local/bin/tunnel-client").expanduser()
+    if os.name == "nt":
+        if default_path.with_suffix(".exe").exists():
+            return default_path.with_suffix(".exe")
+        which = shutil.which("tunnel-client")
+        if which:
+            return Path(which)
+        return default_path.with_suffix(".exe")
+    return default_path
+
+
+TUNNEL_BIN = _resolve_tunnel_bin()
 
 
 def _config() -> tuple[ConfigPaths, dict[str, Any]]:
@@ -80,7 +98,190 @@ def _systemctl(*args: str, check: bool = False) -> subprocess.CompletedProcess[s
     )
 
 
+def _is_pid_running(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if handle == 0:
+            return False
+        exit_code = ctypes.c_ulong()
+        kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code))
+        kernel32.CloseHandle(handle)
+        STILL_ACTIVE = 259
+        return exit_code.value == STILL_ACTIVE
+    try:
+        os.kill(pid, 0)
+        return True
+    except (OSError, ProcessLookupError):
+        return False
+
+
+def _windows_process_command_line(pid: int) -> str:
+    if os.name != "nt" or pid <= 0:
+        return ""
+    command = (
+        f"$p = Get-CimInstance Win32_Process -Filter 'ProcessId = {pid}' "
+        "-ErrorAction SilentlyContinue; "
+        "if ($null -ne $p) { $p.CommandLine }"
+    )
+    try:
+        result = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-Command", command],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def _pid_matches_command(pid: int, marker: str) -> bool:
+    command_line = _windows_process_command_line(pid)
+    return bool(command_line) and marker.lower() in command_line.lower()
+
+
+def _read_pid(file: Path, *, command_marker: str | None = None) -> int | None:
+    try:
+        raw = file.read_text(encoding="utf-8").strip()
+        pid = int(raw)
+    except (OSError, ValueError):
+        return None
+    if not _is_pid_running(pid):
+        file.unlink(missing_ok=True)
+        return None
+    if (
+        os.name == "nt"
+        and command_marker
+        and not _pid_matches_command(pid, command_marker)
+    ):
+        file.unlink(missing_ok=True)
+        return None
+    return pid
+
+
+def _windows_listener_pid(port: int) -> int | None:
+    if os.name != "nt":
+        return None
+    command = (
+        f"$c = Get-NetTCPConnection -State Listen -LocalPort {int(port)} "
+        "-ErrorAction SilentlyContinue | Select-Object -First 1; "
+        "if ($null -ne $c) { $c.OwningProcess }"
+    )
+    try:
+        result = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-Command", command],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=5,
+        )
+        pid = int(result.stdout.strip())
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return None
+    return pid if pid > 0 else None
+
+
+def _windows_tunnel_pid(tunnel_id: str) -> int | None:
+    if os.name != "nt" or not tunnel_id:
+        return None
+    command = (
+        "Get-CimInstance Win32_Process -Filter \"Name = 'tunnel-client.exe'\" "
+        "-ErrorAction SilentlyContinue | "
+        "Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress"
+    )
+    try:
+        result = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-Command", command],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=5,
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            return None
+        parsed = json.loads(result.stdout)
+    except (OSError, json.JSONDecodeError, subprocess.TimeoutExpired):
+        return None
+    records = parsed if isinstance(parsed, list) else [parsed]
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        command_line = str(record.get("CommandLine") or "")
+        if (
+            "--control-plane.tunnel-id" not in command_line
+            or tunnel_id not in command_line
+        ):
+            continue
+        raw_pid = record.get("ProcessId")
+        if raw_pid is None:
+            continue
+        try:
+            pid = int(raw_pid)
+        except (TypeError, ValueError):
+            continue
+        if pid > 0:
+            return pid
+    return None
+
+
+def _windows_kill_process_tree(pid: int) -> bool:
+    try:
+        result = subprocess.run(
+            ["taskkill", "/F", "/T", "/PID", str(pid)],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0 or not _is_pid_running(pid)
+
+
+@contextmanager
+def _windows_service_lock(selected: ConfigPaths):
+    run_dir = selected.root / "run"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    lock_file = run_dir / "service.lock"
+    handle = lock_file.open("a+b")
+    try:
+        handle.seek(0, os.SEEK_END)
+        if handle.tell() == 0:
+            handle.write(b"\0")
+            handle.flush()
+        handle.seek(0)
+        import msvcrt
+
+        msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+        try:
+            yield
+        finally:
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+    finally:
+        handle.close()
+
+
 def _active(unit: str) -> bool:
+    if os.name == "nt":
+        selected, config = _config()
+        run_dir = selected.root / "run"
+        if unit == MCP_SERVICE:
+            if _read_pid(run_dir / "mcp.pid", command_marker=MCP_PROCESS_MARKER):
+                return True
+            return _mcp_health(config, selected)
+        if unit == TUNNEL_SERVICE:
+            if _read_pid(run_dir / "tunnel.pid", command_marker=TUNNEL_PROCESS_MARKER):
+                return True
+            return bool(_tunnel_status(selected))
+        return False
     return _systemctl("is-active", "--quiet", unit).returncode == 0
 
 
@@ -257,6 +458,13 @@ def _mcp_runtime_state(
 
 
 def _unit_loaded(unit: str) -> bool:
+    if os.name == "nt":
+        _selected, config = _config()
+        if unit == MCP_SERVICE:
+            return bool(config.get("workspace"))
+        if unit == TUNNEL_SERVICE:
+            return bool(config.get("tunnel_id"))
+        return False
     result = _systemctl("show", "--property=LoadState", "--value", unit)
     return result.returncode == 0 and result.stdout.strip() != "not-found"
 
@@ -265,8 +473,11 @@ def _wait_for_mcp_health(timeout_seconds: float = 30.0) -> bool:
     selected, config = _config()
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
-        if _active(MCP_SERVICE) and _mcp_health(config, selected):
+        if _mcp_health(config, selected):
             return True
+        if os.name != "nt" and not _active(MCP_SERVICE):
+            time.sleep(0.25)
+            continue
         time.sleep(0.25)
     return False
 
@@ -319,6 +530,18 @@ def _tunnel_health_flags(tunnel: dict[str, Any]) -> tuple[bool, bool]:
     return healthy, ready
 
 
+def _wait_for_tunnel_health(
+    selected: ConfigPaths, timeout_seconds: float = 15.0
+) -> bool:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        healthy, ready = _tunnel_health_flags(_tunnel_status(selected))
+        if healthy and ready:
+            return True
+        time.sleep(0.25)
+    return False
+
+
 def _status(_: argparse.Namespace) -> int:
     selected, config = _config()
     tunnel = _tunnel_status(selected)
@@ -360,7 +583,208 @@ def _status(_: argparse.Namespace) -> int:
     return 0
 
 
+def _powershell_literal(value: str | Path) -> str:
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def _spawn_windows_cli(selected: ConfigPaths, args: list[str], log_file: Path) -> int:
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+    error_file = log_file.with_name(f"{log_file.stem}.err{log_file.suffix}")
+    run_dir = selected.root / "run"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    pid_output = run_dir / f".spawn-{os.getpid()}-{time.time_ns()}.pid"
+    argument_list = ", ".join(
+        _powershell_literal(item) for item in ["-u", "-m", "apps.devmcp.cli", *args]
+    )
+    command = (
+        f"$env:DEVMCP_CONFIG_DIR = {_powershell_literal(selected.root)}; "
+        f"$p = Start-Process -FilePath {_powershell_literal(sys.executable)} "
+        f"-ArgumentList @({argument_list}) -WindowStyle Hidden "
+        f"-RedirectStandardOutput {_powershell_literal(log_file)} "
+        f"-RedirectStandardError {_powershell_literal(error_file)} -PassThru; "
+        f"[IO.File]::WriteAllText({_powershell_literal(pid_output)}, [string]$p.Id)"
+    )
+    try:
+        result = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-Command", command],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+        )
+        if result.returncode != 0:
+            raise OSError(f"PowerShell launcher exited with {result.returncode}")
+        pid = int(pid_output.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+        raise OSError(f"unable to launch background process: {exc}") from exc
+    finally:
+        pid_output.unlink(missing_ok=True)
+    if pid <= 0:
+        raise OSError("background process did not return a valid PID")
+    return pid
+
+
+def _windows_mcp_pid(config: dict[str, Any], pid_file: Path) -> int | None:
+    pid = _read_pid(pid_file, command_marker=MCP_PROCESS_MARKER)
+    if pid is not None:
+        return pid
+    listener = _windows_listener_pid(int(config.get("mcp_port", 47157)))
+    if listener is not None and _pid_matches_command(listener, MCP_PROCESS_MARKER):
+        return listener
+    return None
+
+
+def _windows_stop_services(
+    selected: ConfigPaths,
+    config: dict[str, Any],
+    mcp_pid_file: Path,
+    tunnel_pid_file: Path,
+) -> int:
+    failed = False
+    tunnel_pid = _read_pid(
+        tunnel_pid_file, command_marker=TUNNEL_PROCESS_MARKER
+    ) or _windows_tunnel_pid(str(config.get("tunnel_id", "")).strip())
+    if tunnel_pid is not None:
+        if _windows_kill_process_tree(tunnel_pid):
+            print(f"Stopped Tunnel process (PID {tunnel_pid})")
+        else:
+            print(
+                f"Failed to stop Tunnel process (PID {tunnel_pid})",
+                file=sys.stderr,
+            )
+            failed = True
+    tunnel_pid_file.unlink(missing_ok=True)
+
+    mcp_pid = _windows_mcp_pid(config, mcp_pid_file)
+    listener = _windows_listener_pid(int(config.get("mcp_port", 47157)))
+    if mcp_pid is not None:
+        if _windows_kill_process_tree(mcp_pid):
+            print(f"Stopped MCP process (PID {mcp_pid})")
+        else:
+            print(f"Failed to stop MCP process (PID {mcp_pid})", file=sys.stderr)
+            failed = True
+    elif listener is not None:
+        command_line = _windows_process_command_line(listener)
+        print(
+            "Refusing to terminate the listener on the configured MCP port because "
+            f"it is not an identified DevMCP process (PID {listener}): {command_line}",
+            file=sys.stderr,
+        )
+        failed = True
+    mcp_pid_file.unlink(missing_ok=True)
+    return 1 if failed else 0
+
+
+def _windows_start_mcp(
+    selected: ConfigPaths,
+    config: dict[str, Any],
+    mcp_pid_file: Path,
+    log_file: Path,
+) -> int:
+    if _mcp_health(config, selected):
+        listener = _windows_listener_pid(int(config.get("mcp_port", 47157)))
+        if listener is not None and _pid_matches_command(listener, MCP_PROCESS_MARKER):
+            mcp_pid_file.write_text(str(listener), encoding="utf-8")
+        print("MCP server is already running")
+        return 0
+
+    listener = _windows_listener_pid(int(config.get("mcp_port", 47157)))
+    if listener is not None:
+        command_line = _windows_process_command_line(listener)
+        if _pid_matches_command(listener, MCP_PROCESS_MARKER):
+            message = (
+                "An existing DevMCP process owns the configured MCP port but is not "
+                "healthy; run `devmcp restart` instead of starting another serve process."
+            )
+        else:
+            message = (
+                "The configured MCP port is already owned by a non-DevMCP process "
+                f"(PID {listener}): {command_line}"
+            )
+        print(message, file=sys.stderr)
+        return 1
+
+    try:
+        pid = _spawn_windows_cli(selected, ["serve"], log_file)
+    except OSError as exc:
+        print(f"Failed to start MCP server: {exc}", file=sys.stderr)
+        return 1
+    mcp_pid_file.write_text(str(pid), encoding="utf-8")
+    if not _wait_for_mcp_health():
+        _windows_kill_process_tree(pid)
+        mcp_pid_file.unlink(missing_ok=True)
+        print("MCP service failed to become healthy", file=sys.stderr)
+        return 1
+    print(f"Started MCP server (PID {pid})")
+    return 0
+
+
+def _windows_start_tunnel(
+    selected: ConfigPaths,
+    config: dict[str, Any],
+    tunnel_pid_file: Path,
+    log_file: Path,
+) -> int:
+    tunnel_id = str(config.get("tunnel_id", "")).strip()
+    auth = secret_status(selected)
+    if not (
+        tunnel_id
+        and auth["control_plane_key_configured"]
+        and auth["mcp_token_configured"]
+    ):
+        return 0
+    healthy, ready = _tunnel_health_flags(_tunnel_status(selected))
+    if healthy and ready:
+        pid = _windows_tunnel_pid(tunnel_id)
+        if pid is not None:
+            tunnel_pid_file.write_text(str(pid), encoding="utf-8")
+        print("Tunnel process is already running")
+        return 0
+    try:
+        pid = _spawn_windows_cli(selected, ["tunnel", "run"], log_file)
+    except OSError as exc:
+        print(f"Failed to start tunnel: {exc}", file=sys.stderr)
+        return 1
+    tunnel_pid_file.write_text(str(pid), encoding="utf-8")
+    if not _wait_for_tunnel_health(selected):
+        _windows_kill_process_tree(pid)
+        tunnel_pid_file.unlink(missing_ok=True)
+        print("Tunnel service failed to become ready", file=sys.stderr)
+        return 1
+    print(f"Started Secure MCP Tunnel (PID {pid})")
+    return 0
+
+
+def _windows_service_action(action: str) -> int:
+    selected, config = _config()
+    run_dir = selected.root / "run"
+    logs_dir = selected.root / "logs"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    mcp_pid_file = run_dir / "mcp.pid"
+    tunnel_pid_file = run_dir / "tunnel.pid"
+    with _windows_service_lock(selected):
+        if action in {"stop", "restart"}:
+            stopped = _windows_stop_services(
+                selected, config, mcp_pid_file, tunnel_pid_file
+            )
+            if stopped != 0 or action == "stop":
+                return stopped
+        if action in {"start", "restart"}:
+            started = _windows_start_mcp(
+                selected, config, mcp_pid_file, logs_dir / "mcp.log"
+            )
+            if started != 0:
+                return started
+            return _windows_start_tunnel(
+                selected, config, tunnel_pid_file, logs_dir / "tunnel.log"
+            )
+    return 0
+
+
 def _service_action(action: str) -> int:
+    if os.name == "nt":
+        return _windows_service_action(action)
+
     tunnel_loaded = _unit_loaded(TUNNEL_SERVICE)
     units = [MCP_SERVICE, *([TUNNEL_SERVICE] if tunnel_loaded else [])]
     if action == "stop":
@@ -390,25 +814,46 @@ def _service_action(action: str) -> int:
 def _read_service_logs(selected: ConfigPaths) -> tuple[str, str, int]:
     """Read a bounded, redacted service log view for the CLI and local UI."""
 
-    result = subprocess.run(
-        [
-            "journalctl",
-            "--user",
-            "-u",
-            MCP_SERVICE,
-            "-u",
-            TUNNEL_SERVICE,
-            "-n",
-            "200",
-            "--no-pager",
-            "--output",
-            "cat",
-        ],
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    output = result.stdout
+    if os.name == "nt":
+        logs_dir = selected.root / "logs"
+        sections: list[str] = []
+        log_sources = (
+            ("MCP Service Log", logs_dir / "mcp.log"),
+            ("MCP Service Error Log", logs_dir / "mcp.err.log"),
+            ("Tunnel Service Log", logs_dir / "tunnel.log"),
+            ("Tunnel Service Error Log", logs_dir / "tunnel.err.log"),
+        )
+        for title, log_path in log_sources:
+            if not log_path.is_file():
+                continue
+            if sections:
+                sections.append("")
+            sections.append(f"=== {title} ===")
+            content = log_path.read_text(
+                encoding="utf-8", errors="replace"
+            ).splitlines()
+            sections.extend(content[-100:])
+        output = "\n".join(sections)
+    else:
+        result = subprocess.run(
+            [
+                "journalctl",
+                "--user",
+                "-u",
+                MCP_SERVICE,
+                "-u",
+                TUNNEL_SERVICE,
+                "-n",
+                "200",
+                "--no-pager",
+                "--output",
+                "cat",
+            ],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        output = result.stdout
     for secret_path in (
         selected.mcp_token,
         selected.control_plane_key,
@@ -420,7 +865,9 @@ def _read_service_logs(selected: ConfigPaths) -> tuple[str, str, int]:
             secret = ""
         if secret:
             output = output.replace(secret, "[REDACTED]")
-    return output, result.stderr, result.returncode
+    stderr = result.stderr if os.name != "nt" else ""
+    returncode = result.returncode if os.name != "nt" else 0
+    return output, stderr, returncode
 
 
 def _logs(_: argparse.Namespace) -> int:
@@ -625,6 +1072,8 @@ def _tunnel_command(args: argparse.Namespace) -> int:
             f"http://{config.get('mcp_host', '127.0.0.1')}:{int(config.get('mcp_port', 47157))}/mcp",
             "--mcp.extra-headers",
             f"Authorization: file:{mcp_authorization_header}",
+            "--mcp.discovery-extra-headers",
+            f"Authorization: file:{mcp_authorization_header}",
             "--health.listen-addr",
             "127.0.0.1:0",
             "--health.url-file",
@@ -658,6 +1107,25 @@ def _unit_environment(name: str, value: str | Path) -> str:
 
 def _service_install(_: argparse.Namespace) -> int:
     selected, _config_data = _config()
+    if os.name == "nt":
+        startup_dir = (
+            Path(os.environ.get("APPDATA", ""))
+            / "Microsoft"
+            / "Windows"
+            / "Start Menu"
+            / "Programs"
+            / "Startup"
+        )
+        startup_dir.mkdir(parents=True, exist_ok=True)
+        vbs_path = startup_dir / "devmcp-autostart.vbs"
+        python_exe = sys.executable
+        vbs_content = f'''Set WshShell = CreateObject("WScript.Shell")
+WshShell.Run """{python_exe}"" -m apps.devmcp.cli start", 0, False
+'''
+        vbs_path.write_text(vbs_content, encoding="utf-8")
+        print(f"Installed Windows autostart script at {vbs_path}")
+        return 0
+
     systemd_dir = Path.home() / ".config/systemd/user"
     systemd_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     python = sys.executable
@@ -905,12 +1373,32 @@ def _serve(_: argparse.Namespace) -> int:
         "--max-removed-percent",
         str(float(config.get("patch", {}).get("max_removed_percent", 30.0))),
     ]
+    if secret_status(selected)["control_plane_key_configured"]:
+        server_args.extend(["--extra-auth-token-file", str(selected.control_plane_key)])
     for project_root in config.get("workspaces", [config["workspace"]]):
         server_args.extend(["--project-root", str(project_root)])
     return server_main(server_args)
 
 
 def _service_uninstall(_: argparse.Namespace) -> int:
+    if os.name == "nt":
+        startup_dir = (
+            Path(os.environ.get("APPDATA", ""))
+            / "Microsoft"
+            / "Windows"
+            / "Start Menu"
+            / "Programs"
+            / "Startup"
+        )
+        vbs_path = startup_dir / "devmcp-autostart.vbs"
+        vbs_path.unlink(missing_ok=True)
+        _service_action("stop")
+        print(
+            "Removed DevMCP Windows autostart script and stopped services; "
+            "configuration, secrets, audit log, and workspaces were preserved."
+        )
+        return 0
+
     systemd_dir = Path.home() / ".config/systemd/user"
     for unit in (MCP_SERVICE, TUNNEL_SERVICE):
         _systemctl("disable", "--now", unit)

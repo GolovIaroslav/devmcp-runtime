@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+
 import os
 import subprocess
 import tempfile
@@ -28,7 +29,8 @@ class ReleaseConfigTests(unittest.TestCase):
             with patch.dict(os.environ, {"DEVMCP_CONFIG_DIR": tmp}, clear=False):
                 selected = paths()
                 config = load_config(selected, workspace=tmp)
-                self.assertEqual(selected.root.stat().st_mode & 0o777, 0o700)
+                if os.name != "nt":
+                    self.assertEqual(selected.root.stat().st_mode & 0o777, 0o700)
                 self.assertNotIn("super-secret-value", str(redact_config(config)))
                 save_config(config, selected)
                 self.assertTrue(selected.config_file.is_file())
@@ -83,6 +85,7 @@ class ReleaseConfigTests(unittest.TestCase):
             self.assertEqual(delete_request.method, "DELETE")
             self.assertEqual(delete_request.get_header("Mcp-session-id"), "session-1")
 
+    @unittest.skipIf(os.name == "nt", "systemd service action is Linux-only")
     def test_service_restart_waits_for_mcp_health_before_tunnel_restart(self) -> None:
         calls: list[tuple[str, ...]] = []
 
@@ -777,7 +780,7 @@ class ReleaseLifecycleTests(unittest.TestCase):
                 execution_mode="build",
             )
             try:
-                command = "printf custom-policy-approved"
+                command = "echo custom-policy-approved"
                 completed = runtime.exec_command({"cmd": command})
                 self.assertTrue(completed["ok"])
                 self.assertEqual(completed["status"], "success")
@@ -927,13 +930,19 @@ class ReleaseLifecycleTests(unittest.TestCase):
                 command[header_index + 1],
                 f"Authorization: file:{selected.mcp_authorization_header}",
             )
+            discovery_header_index = command.index("--mcp.discovery-extra-headers")
+            self.assertEqual(
+                command[discovery_header_index + 1],
+                f"Authorization: file:{selected.mcp_authorization_header}",
+            )
             self.assertEqual(
                 selected.mcp_authorization_header.read_text(encoding="utf-8"),
                 "Bearer fixture-token\n",
             )
-            self.assertEqual(
-                selected.mcp_authorization_header.stat().st_mode & 0o777, 0o600
-            )
+            if os.name != "nt":
+                self.assertEqual(
+                    selected.mcp_authorization_header.stat().st_mode & 0o777, 0o600
+                )
 
     def test_status_accepts_tunnel_health_endpoint_shape(self) -> None:
         healthy, ready = cli._tunnel_health_flags(
@@ -942,6 +951,7 @@ class ReleaseLifecycleTests(unittest.TestCase):
         self.assertTrue(healthy)
         self.assertTrue(ready)
 
+    @unittest.skipIf(os.name == "nt", "systemd service units are Linux-only")
     def test_service_units_use_config_launcher_not_a_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

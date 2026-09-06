@@ -157,7 +157,7 @@ def detect_sandbox_backend(
             available,
             "optional rootless Podman backend; verify before enabling",
         )
-    if normalized in {"unsafe", "host"}:
+    if normalized in {"unsafe", "host", "none"}:
         return SandboxBackend(
             "unsafe",
             False,
@@ -340,7 +340,7 @@ def _safe_write_relative(
             while written < len(data):
                 written += os.write(fd, data[written:])
             if mode is not None:
-                os.fchmod(fd, stat.S_IMODE(mode))
+                getattr(os, "fchmod")(fd, stat.S_IMODE(mode))
         finally:
             os.close(fd)
     finally:
