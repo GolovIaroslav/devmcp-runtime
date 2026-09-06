@@ -169,6 +169,25 @@ def _read_pid(file: Path, *, command_marker: str | None = None) -> int | None:
 def _windows_listener_pid(port: int) -> int | None:
     if os.name != "nt":
         return None
+    try:
+        result = subprocess.run(
+            ["netstat.exe", "-ano", "-p", "tcp"],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=10,
+        )
+        for line in result.stdout.splitlines():
+            parts = line.strip().split()
+            if len(parts) >= 5 and parts[0] == "TCP" and parts[3] == "LISTENING":
+                local_addr = parts[1]
+                if local_addr.endswith(f":{port}"):
+                    pid = int(parts[4])
+                    if pid > 0:
+                        return pid
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        pass
+
     command = (
         f"$c = Get-NetTCPConnection -State Listen -LocalPort {int(port)} "
         "-ErrorAction SilentlyContinue | Select-Object -First 1; "
@@ -180,12 +199,12 @@ def _windows_listener_pid(port: int) -> int | None:
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            timeout=5,
+            timeout=10,
         )
         pid = int(result.stdout.strip())
+        return pid if pid > 0 else None
     except (OSError, ValueError, subprocess.TimeoutExpired):
         return None
-    return pid if pid > 0 else None
 
 
 def _windows_tunnel_pid(tunnel_id: str) -> int | None:

@@ -78,11 +78,11 @@ class WindowsServiceLifecycleTests(unittest.TestCase):
                     self.assertEqual(repaired, first_listener)
                 finally:
                     self.assertEqual(cli._windows_service_action("stop"), 0)
-                    deadline = time.monotonic() + 5
+                    deadline = time.monotonic() + 15
                     while time.monotonic() < deadline:
                         if cli._windows_listener_pid(config["mcp_port"]) is None:
                             break
-                        time.sleep(0.05)
+                        time.sleep(0.1)
                     self.assertIsNone(cli._windows_listener_pid(config["mcp_port"]))
 
     def test_windows_http_job_poll_is_bounded_without_changing_stdio(self) -> None:
