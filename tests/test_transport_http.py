@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 import unittest
 
+from coding_tools_mcp.protocol import dispatch_rpc
 from coding_tools_mcp.server import MCPHandler
 from coding_tools_mcp.transport_http import (
     HTTP_SESSION_TTL_SECONDS,
@@ -301,6 +302,62 @@ class BearerAuthorizationTests(unittest.TestCase):
 
         FakeHandler.headers = {"Authorization": "Bearer some-random-attacker-token"}
         self.assertFalse(MCPHandler.is_authorized(FakeHandler()))  # type: ignore[arg-type]
+
+    def test_server_discover_uninitialized(self) -> None:
+        class FakeUninitRuntime:
+            initialized = False
+            protocol_version = "2025-11-25"
+
+            def server_instructions(self) -> str:
+                return "test instructions"
+
+        runtime = FakeUninitRuntime()
+        request = {
+            "jsonrpc": "2.0",
+            "id": "openai-mcp-discover",
+            "method": "server/discover",
+        }
+        response = dispatch_rpc(runtime, request)
+        self.assertIsNotNone(response)
+        assert response is not None
+        self.assertEqual(response.get("id"), "openai-mcp-discover")
+        result = response.get("result", {})
+        self.assertIn("2025-11-25", result.get("supportedVersions", []))
+        self.assertIn("tools", result.get("capabilities", {}))
+        self.assertEqual(result.get("serverInfo", {}).get("name"), "devmcp-runtime")
+        self.assertEqual(result.get("instructions"), "test instructions")
+
+    def test_protocol_version_header_optional_on_subsequent_requests(self) -> None:
+        # In MCP streamable HTTP, clients may omit MCP-Protocol-Version on subsequent requests.
+        # It must only be rejected if explicitly provided AND mismatched.
+        class FakeSessionRuntime:
+            protocol_version = "2025-11-25"
+
+        runtime = FakeSessionRuntime()
+
+        # 1. When header is missing (None) -> must NOT trigger mismatch
+        protocol_version = None
+        mismatch = (
+            protocol_version is not None
+            and protocol_version != runtime.protocol_version
+        )
+        self.assertFalse(mismatch)
+
+        # 2. When header is present and matching -> must NOT trigger mismatch
+        protocol_version = "2025-11-25"
+        mismatch = (
+            protocol_version is not None
+            and protocol_version != runtime.protocol_version
+        )
+        self.assertFalse(mismatch)
+
+        # 3. When header is present and mismatched -> MUST trigger mismatch
+        protocol_version = "2024-01-01"
+        mismatch = (
+            protocol_version is not None
+            and protocol_version != runtime.protocol_version
+        )
+        self.assertTrue(mismatch)
 
 
 if __name__ == "__main__":

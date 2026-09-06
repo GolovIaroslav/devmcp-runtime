@@ -2199,9 +2199,23 @@ class Runtime:
             return value
         return self.logical_context_id
 
+    def server_instructions(self) -> str:
+        return (
+            "In BUILD mode, DevMCP runs commands with the current OS user's filesystem, "
+            "environment, and network authority. The selected project is the default coding "
+            "context and cwd, not a filesystem security boundary; explicit absolute paths and "
+            "cwd values are available according to normal OS permissions. High-level Git tools "
+            "remain scoped to the selected repository until a separate multi-project Git "
+            "refactor. When the user names or asks to continue a project, call list_projects, "
+            "select the matching repository with select_project, then read the returned "
+            "authority_files before changing that project.\n\n"
+            + self.project_context.server_instructions()
+        )
+
     def initialize(self, client_info: dict[str, Any] | None = None) -> dict[str, Any]:
         context_id = self._ensure_logical_context()
         self.telemetry.record_session_start(client_info, self.protocol_version)
+        instructions = self.server_instructions()
         result: dict[str, Any] = {
             "protocolVersion": self.protocol_version,
             "capabilities": {"tools": {"listChanged": False}},
@@ -2211,17 +2225,7 @@ class Runtime:
                 "version": __version__,
                 "schemaVersion": TOOL_SCHEMA_VERSION,
             },
-            "instructions": (
-                "In BUILD mode, DevMCP runs commands with the current OS user's filesystem, "
-                "environment, and network authority. The selected project is the default coding "
-                "context and cwd, not a filesystem security boundary; explicit absolute paths and "
-                "cwd values are available according to normal OS permissions. High-level Git tools "
-                "remain scoped to the selected repository until a separate multi-project Git "
-                "refactor. When the user names or asks to continue a project, call list_projects, "
-                "select the matching repository with select_project, then read the returned "
-                "authority_files before changing that project.\n\n"
-                + self.project_context.server_instructions()
-            ),
+            "instructions": instructions,
         }
         if context_id is not None:
             result["devmcpContextId"] = context_id
@@ -10773,7 +10777,7 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             self._runtime = runtime
             self._send_session_header = True
             managed_session_id = session_id
-        elif method == "ping":
+        elif method in {"ping", "server/discover"}:
             self._runtime = self.server.control_runtime  # type: ignore[attr-defined]
         else:
             self.send_rpc_error(
@@ -10784,6 +10788,7 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             if (
                 managed_session_id is not None
                 and not created_session
+                and protocol_version is not None
                 and protocol_version != self.runtime.protocol_version
             ):
                 self.send_rpc_error(
