@@ -104,7 +104,7 @@ def _is_pid_running(pid: int) -> bool:
     if os.name == "nt":
         import ctypes
 
-        kernel32 = ctypes.windll.kernel32
+        kernel32 = getattr(ctypes, "windll").kernel32
         PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
         handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
         if handle == 0:
@@ -259,12 +259,12 @@ def _windows_service_lock(selected: ConfigPaths):
         handle.seek(0)
         import msvcrt
 
-        msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+        getattr(msvcrt, "locking")(handle.fileno(), getattr(msvcrt, "LK_LOCK"), 1)
         try:
             yield
         finally:
             handle.seek(0)
-            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            getattr(msvcrt, "locking")(handle.fileno(), getattr(msvcrt, "LK_UNLCK"), 1)
     finally:
         handle.close()
 
