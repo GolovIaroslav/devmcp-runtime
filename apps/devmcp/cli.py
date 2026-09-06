@@ -1392,7 +1392,7 @@ def _serve(_: argparse.Namespace) -> int:
         "--max-removed-percent",
         str(float(config.get("patch", {}).get("max_removed_percent", 30.0))),
     ]
-    if secret_status(selected)["control_plane_key_configured"]:
+    if os.name != "nt" and secret_status(selected)["control_plane_key_configured"]:
         server_args.extend(["--extra-auth-token-file", str(selected.control_plane_key)])
     for project_root in config.get("workspaces", [config["workspace"]]):
         server_args.extend(["--project-root", str(project_root)])

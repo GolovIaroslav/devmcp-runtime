@@ -328,36 +328,88 @@ class BearerAuthorizationTests(unittest.TestCase):
         self.assertEqual(result.get("instructions"), "test instructions")
 
     def test_protocol_version_header_optional_on_subsequent_requests(self) -> None:
-        # In MCP streamable HTTP, clients may omit MCP-Protocol-Version on subsequent requests.
-        # It must only be rejected if explicitly provided AND mismatched.
-        class FakeSessionRuntime:
-            protocol_version = "2025-11-25"
+        import json
+        from io import BytesIO
+        from email.message import Message
+        from typing import Any
+        from coding_tools_mcp.server import MCPHandler
 
-        runtime = FakeSessionRuntime()
+        # Mocks to simulate a request to the server
+        class MockServer:
+            control_runtime = None
+            def __init__(self):
+                self.sessions = self
+            def get(self, session_id):
+                class FakeRuntime:
+                    http_session_id = session_id
+                    protocol_version = "2025-11-25"
+                    auth_tokens = ()
+                    def auth_enabled(self): return False
+                    def initialize(self, info): pass
+                return FakeRuntime() if session_id == "valid-session" else None
+            def touch(self, session_id): pass
+            def release(self, session_id): pass
 
-        # 1. When header is missing (None) -> must NOT trigger mismatch
-        protocol_version = None
-        mismatch = (
-            protocol_version is not None
-            and protocol_version != runtime.protocol_version
-        )
-        self.assertFalse(mismatch)
+        class MockRequest:
+            def makefile(self, *args, **kwargs):
+                return BytesIO(b"")
 
-        # 2. When header is present and matching -> must NOT trigger mismatch
-        protocol_version = "2025-11-25"
-        mismatch = (
-            protocol_version is not None
-            and protocol_version != runtime.protocol_version
-        )
-        self.assertFalse(mismatch)
+        # Basic request template
+        def simulate_request(header_dict: dict[str, str]) -> dict[str, Any]:
+            body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "ping"}).encode("utf-8")
+            
+            headers = Message()
+            for k, v in header_dict.items():
+                headers[k] = v
+            headers["Content-Length"] = str(len(body))
+            headers["Content-Type"] = "application/json"
 
-        # 3. When header is present and mismatched -> MUST trigger mismatch
-        protocol_version = "2024-01-01"
-        mismatch = (
-            protocol_version is not None
-            and protocol_version != runtime.protocol_version
-        )
-        self.assertTrue(mismatch)
+            handler = MCPHandler(MockRequest(), client_address=("127.0.0.1", 12345), server=MockServer()) # type: ignore
+            handler.path = "/mcp"
+            handler.headers = headers # type: ignore
+            handler.rfile = BytesIO(body)
+            handler.wfile = BytesIO()
+            handler.client_address = ("127.0.0.1", 12345)
+            handler._runtime = handler.server.get("valid-session")
+            
+            # Monkeypatch send_rpc_error and send_json to capture response
+            handler.response_data = None
+            handler.error_data = None
+            
+            def send_json(payload, **kwargs):
+                handler.response_data = payload
+                
+            def send_rpc_error(code, msg, **kwargs):
+                handler.error_data = {"code": code, "message": msg, **kwargs}
+                
+            handler.send_json = send_json
+            handler.send_rpc_error = send_rpc_error
+            handler.handle_rpc = lambda req: {"jsonrpc": "2.0", "id": req.get("id"), "result": {}}
+            
+            handler.do_POST()
+            return {"response": handler.response_data, "error": handler.error_data}
+
+        # 1. Missing header -> Accepted
+        res1 = simulate_request({"Mcp-Session-Id": "valid-session"})
+        self.assertIsNone(res1["error"])
+        self.assertIsNotNone(res1["response"])
+
+        # 2. Matching header -> Accepted
+        res2 = simulate_request({
+            "Mcp-Session-Id": "valid-session",
+            "MCP-Protocol-Version": "2025-11-25"
+        })
+        self.assertIsNone(res2["error"])
+        self.assertIsNotNone(res2["response"])
+
+        # 3. Mismatched header -> Rejected
+        res3 = simulate_request({
+            "Mcp-Session-Id": "valid-session",
+            "MCP-Protocol-Version": "2025-06-18"
+        })
+        self.assertIsNotNone(res3["error"])
+        self.assertEqual(res3["error"]["code"], -32600)
+        self.assertIn("does not match", res3["error"]["message"])
 
 
 if __name__ == "__main__":
