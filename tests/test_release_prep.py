@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -689,6 +690,11 @@ class ReleaseLifecycleTests(unittest.TestCase):
                 }.get(name),
             ),
             patch.object(cli.subprocess, "run", side_effect=completed) as run,
+            patch.object(
+                cli,
+                "_uv_tool_launcher",
+                return_value=Path("C:/Users/test/.local/bin/devmcp.exe"),
+            ),
         ):
             result = cli._service_update(
                 SimpleNamespace(
@@ -983,6 +989,55 @@ class ReleaseLifecycleTests(unittest.TestCase):
                 self.assertNotIn("runtimes connect", tunnel)
                 self.assertIn(f"After={cli.MCP_SERVICE}", tunnel)
                 self.assertNotIn(f"Requires={cli.MCP_SERVICE}", tunnel)
+
+    @unittest.skipUnless(os.name == "nt", "Windows autostart is Windows-only")
+    def test_windows_service_install_uses_installed_devmcp_launcher(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_root = root / "config"
+            appdata = root / "appdata"
+            workspace = root / "workspace"
+            workspace.mkdir()
+            launcher = root / "tool-bin" / "devmcp.exe"
+            launcher.parent.mkdir()
+            launcher.write_text("fixture", encoding="utf-8")
+            with (
+                patch.dict(
+                    os.environ,
+                    {"DEVMCP_CONFIG_DIR": str(config_root), "APPDATA": str(appdata)},
+                    clear=False,
+                ),
+                patch.object(cli, "_windows_devmcp_launcher", return_value=launcher),
+            ):
+                selected = paths()
+                config = load_config(selected, workspace=str(workspace))
+                save_config(config, selected)
+                self.assertEqual(cli._service_install(SimpleNamespace()), 0)
+            vbs = (
+                appdata
+                / "Microsoft"
+                / "Windows"
+                / "Start Menu"
+                / "Programs"
+                / "Startup"
+                / "devmcp-autostart.vbs"
+            ).read_text(encoding="utf-8")
+            self.assertIn(str(launcher), vbs)
+            self.assertIn('"" start", 0, False', vbs)
+            self.assertNotIn("apps.devmcp.cli", vbs)
+            self.assertNotIn(sys.executable, vbs)
+
+    def test_uv_tool_launcher_resolves_absolute_installed_launcher(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bin_dir = Path(tmp) / "bin"
+            bin_dir.mkdir()
+            name = "devmcp.exe" if os.name == "nt" else "devmcp"
+            launcher = bin_dir / name
+            launcher.write_text("fixture", encoding="utf-8")
+            completed = subprocess.CompletedProcess([], 0, str(bin_dir) + "\n", "")
+            with patch.object(cli.subprocess, "run", return_value=completed) as run:
+                self.assertEqual(cli._uv_tool_launcher("uv", "devmcp"), launcher)
+            self.assertEqual(run.call_args.args[0], ["uv", "tool", "dir", "--bin"])
 
     def test_serve_reads_the_current_config_on_every_start(self) -> None:
         with (

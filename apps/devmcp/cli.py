@@ -1124,6 +1124,43 @@ def _unit_environment(name: str, value: str | Path) -> str:
     return f'Environment="{name}={escaped}"'
 
 
+def _uv_executable() -> str | None:
+    uv = shutil.which("uv")
+    if uv is not None:
+        return uv
+    names = ("uv.exe", "uv") if os.name == "nt" else ("uv",)
+    for name in names:
+        fallback = Path.home() / ".local" / "bin" / name
+        if fallback.is_file() and os.access(fallback, os.X_OK):
+            return str(fallback)
+    return None
+
+
+def _uv_tool_launcher(uv: str, command: str) -> Path | None:
+    result = subprocess.run(
+        [uv, "tool", "dir", "--bin"],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=30,
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        return None
+    suffix = ".exe" if os.name == "nt" else ""
+    launcher = Path(result.stdout.strip()) / f"{command}{suffix}"
+    return launcher if launcher.is_file() else None
+
+
+def _windows_devmcp_launcher() -> Path | None:
+    invoked = Path(sys.argv[0]).expanduser()
+    if invoked.name.lower() in {"devmcp", "devmcp.exe"} and invoked.is_file():
+        return invoked.resolve()
+    uv = _uv_executable()
+    if uv is None:
+        return None
+    return _uv_tool_launcher(uv, "devmcp")
+
+
 def _service_install(_: argparse.Namespace) -> int:
     selected, _config_data = _config()
     if os.name == "nt":
@@ -1137,9 +1174,16 @@ def _service_install(_: argparse.Namespace) -> int:
         )
         startup_dir.mkdir(parents=True, exist_ok=True)
         vbs_path = startup_dir / "devmcp-autostart.vbs"
-        python_exe = sys.executable
+        launcher = _windows_devmcp_launcher()
+        if launcher is None:
+            print(
+                "Windows autostart requires an installed DevMCP launcher; "
+                "install DevMCP with uv tool install first",
+                file=sys.stderr,
+            )
+            return 1
         vbs_content = f'''Set WshShell = CreateObject("WScript.Shell")
-WshShell.Run """{python_exe}"" -m apps.devmcp.cli start", 0, False
+WshShell.Run """{launcher}"" start", 0, False
 '''
         vbs_path.write_text(vbs_content, encoding="utf-8")
         print(f"Installed Windows autostart script at {vbs_path}")
@@ -1290,11 +1334,7 @@ def _service_update(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 1
-    uv = shutil.which("uv")
-    if uv is None:
-        fallback = Path.home() / ".local" / "bin" / "uv"
-        if fallback.is_file() and os.access(fallback, os.X_OK):
-            uv = str(fallback)
+    uv = _uv_executable()
     if uv is None:
         print("uv is required to update the installed DevMCP runtime", file=sys.stderr)
         return 1
@@ -1321,16 +1361,27 @@ def _service_update(args: argparse.Namespace) -> int:
     config["installed_runtime_dirty_build"] = False
     save_config(config, selected)
 
-    refreshed_python = Path(sys.executable)
-    if not refreshed_python.is_file():
-        print(
-            "DevMCP tool installation did not restore its Python runtime",
-            file=sys.stderr,
-        )
-        return 1
+    if os.name == "nt":
+        refreshed_launcher = _uv_tool_launcher(uv, "devmcp")
+        if refreshed_launcher is None:
+            print(
+                "DevMCP tool installation did not create its Windows launcher",
+                file=sys.stderr,
+            )
+            return 1
+        service_prefix = [str(refreshed_launcher)]
+    else:
+        refreshed_python = Path(sys.executable)
+        if not refreshed_python.is_file():
+            print(
+                "DevMCP tool installation did not restore its Python runtime",
+                file=sys.stderr,
+            )
+            return 1
+        service_prefix = [str(refreshed_python), "-m", "apps.devmcp.cli"]
     for service_command in (("service", "install"), ("restart",)):
         completed = subprocess.run(
-            [str(refreshed_python), "-m", "apps.devmcp.cli", *service_command],
+            [*service_prefix, *service_command],
             env=os.environ.copy(),
             text=True,
             stdout=subprocess.PIPE,
