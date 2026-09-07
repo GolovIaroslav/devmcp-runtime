@@ -2,11 +2,15 @@ from __future__ import annotations
 
 from typing import Any
 
+from . import __version__
 from .errors import JsonRpcError
 
 
 PROTOCOL_VERSION = "2025-11-25"
 SUPPORTED_PROTOCOL_VERSIONS = (PROTOCOL_VERSION, "2025-06-18")
+SERVER_NAME = "devmcp-runtime"
+SERVER_TITLE = "DevMCP Runtime"
+TOOL_SCHEMA_VERSION = "2.0"
 
 
 def jsonrpc_error(
@@ -104,7 +108,11 @@ def dispatch_rpc(runtime: Any, request: dict[str, Any]) -> dict[str, Any] | None
         validate_rpc_envelope(request)
         method = request["method"]
         params = rpc_params(request)
-        if not runtime.initialized and method not in {"initialize", "ping"}:
+        if not runtime.initialized and method not in {
+            "initialize",
+            "ping",
+            "server/discover",
+        }:
             raise JsonRpcError(-32002, "Server not initialized")
         if method == "initialize":
             if runtime.initialized:
@@ -127,6 +135,30 @@ def dispatch_rpc(runtime: Any, request: dict[str, Any]) -> dict[str, Any] | None
             return None
         elif method == "ping":
             result = {}
+        elif method == "server/discover":
+            instructions = (
+                runtime.server_instructions()
+                if hasattr(runtime, "server_instructions")
+                else ""
+            )
+            result = {
+                "supportedVersions": list(SUPPORTED_PROTOCOL_VERSIONS),
+                "capabilities": {"tools": {"listChanged": False}},
+                "serverInfo": {
+                    "name": SERVER_NAME,
+                    "title": SERVER_TITLE,
+                    "version": __version__,
+                    "schemaVersion": TOOL_SCHEMA_VERSION,
+                },
+                "_meta": {
+                    "io.modelcontextprotocol/serverInfo": {
+                        "name": SERVER_NAME,
+                        "version": __version__,
+                    }
+                },
+            }
+            if instructions:
+                result["instructions"] = instructions
         elif method == "tools/list":
             result = runtime.list_tools()
         elif method == "tools/call":

@@ -57,7 +57,7 @@ def project_lock(project: Path) -> Iterator[None]:
         else:
             import fcntl
 
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            getattr(fcntl, "flock")(handle.fileno(), getattr(fcntl, "LOCK_EX"))
         yield
     finally:
         try:
@@ -71,7 +71,7 @@ def project_lock(project: Path) -> Iterator[None]:
             else:
                 import fcntl
 
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                getattr(fcntl, "flock")(handle.fileno(), getattr(fcntl, "LOCK_UN"))
         finally:
             handle.close()
 

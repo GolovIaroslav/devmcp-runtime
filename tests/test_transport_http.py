@@ -3,6 +3,8 @@ from __future__ import annotations
 import time
 import unittest
 
+from coding_tools_mcp.protocol import dispatch_rpc
+from coding_tools_mcp.server import MCPHandler
 from coding_tools_mcp.transport_http import (
     HTTP_SESSION_TTL_SECONDS,
     MAX_HTTP_SESSIONS,
@@ -34,6 +36,19 @@ class RuntimeFactory:
 
 
 class HTTPSessionManagerTests(unittest.TestCase):
+    def test_closed_peer_during_response_write_is_not_a_server_failure(self) -> None:
+        class ClosedPeer:
+            def write(self, _body: bytes) -> None:
+                raise ConnectionAbortedError("peer closed")
+
+        class FakeHandler:
+            wfile = ClosedPeer()
+            close_connection = False
+
+        handler = FakeHandler()
+        MCPHandler._write_body_safely(handler, b"response")  # type: ignore[arg-type]
+        self.assertTrue(handler.close_connection)
+
     def test_repeated_abandoned_sessions_stay_bounded_at_capacity(self) -> None:
         factory = RuntimeFactory()
         manager = HTTPSessionManager(factory)
@@ -221,6 +236,197 @@ class HTTPSessionManagerTests(unittest.TestCase):
         self.assertIn(background.http_session_id, manager._sessions)
         manager.release(replacement.http_session_id)
         manager.close()
+
+
+class BearerAuthorizationTests(unittest.TestCase):
+    def test_auth_disabled_returns_true(self) -> None:
+        class FakeRuntimeNoAuth:
+            auth_token = None
+            auth_tokens: tuple[str, ...] = ()
+            oauth_config = None
+
+            def auth_enabled(self) -> bool:
+                return False
+
+        class FakeHandler:
+            runtime = FakeRuntimeNoAuth()
+            headers: dict[str, str] = {}
+
+        self.assertTrue(MCPHandler.is_authorized(FakeHandler()))  # type: ignore[arg-type]
+
+    def test_single_token_accepted_with_bearer_and_raw_rejected(self) -> None:
+        class FakeRuntimeSingle:
+            auth_token = "mcp-primary-secret"
+            auth_tokens = ("mcp-primary-secret",)
+            oauth_config = None
+
+            def auth_enabled(self) -> bool:
+                return True
+
+        class FakeHandler:
+            runtime = FakeRuntimeSingle()
+            headers: dict[str, str] = {"Authorization": "Bearer mcp-primary-secret"}
+
+        self.assertTrue(MCPHandler.is_authorized(FakeHandler()))  # type: ignore[arg-type]
+
+        # Raw token without Bearer scheme must be strictly rejected
+        FakeHandler.headers = {"Authorization": "mcp-primary-secret"}
+        self.assertFalse(MCPHandler.is_authorized(FakeHandler()))  # type: ignore[arg-type]
+
+        FakeHandler.headers = {"Authorization": "Bearer wrong-secret"}
+        self.assertFalse(MCPHandler.is_authorized(FakeHandler()))  # type: ignore[arg-type]
+
+    def test_multiple_tokens_accepted(self) -> None:
+        class FakeRuntimeMulti:
+            auth_token = "mcp-primary-secret"
+            auth_tokens = ("mcp-primary-secret", "tunnel-control-plane-key-12345")
+            oauth_config = None
+
+            def auth_enabled(self) -> bool:
+                return True
+
+        class FakeHandler:
+            runtime = FakeRuntimeMulti()
+            headers: dict[str, str] = {
+                "Authorization": "Bearer tunnel-control-plane-key-12345"
+            }
+
+        self.assertTrue(MCPHandler.is_authorized(FakeHandler()))  # type: ignore[arg-type]
+
+        FakeHandler.headers = {"Authorization": "Bearer mcp-primary-secret"}
+        self.assertTrue(MCPHandler.is_authorized(FakeHandler()))  # type: ignore[arg-type]
+
+        # Raw token without Bearer prefix rejected
+        FakeHandler.headers = {"Authorization": "tunnel-control-plane-key-12345"}
+        self.assertFalse(MCPHandler.is_authorized(FakeHandler()))  # type: ignore[arg-type]
+
+        FakeHandler.headers = {"Authorization": "Bearer some-random-attacker-token"}
+        self.assertFalse(MCPHandler.is_authorized(FakeHandler()))  # type: ignore[arg-type]
+
+    def test_server_discover_uninitialized(self) -> None:
+        class FakeUninitRuntime:
+            initialized = False
+            protocol_version = "2025-11-25"
+
+            def server_instructions(self) -> str:
+                return "test instructions"
+
+        runtime = FakeUninitRuntime()
+        request = {
+            "jsonrpc": "2.0",
+            "id": "openai-mcp-discover",
+            "method": "server/discover",
+        }
+        response = dispatch_rpc(runtime, request)
+        self.assertIsNotNone(response)
+        assert response is not None
+        self.assertEqual(response.get("id"), "openai-mcp-discover")
+        result = response.get("result", {})
+        self.assertIn("2025-11-25", result.get("supportedVersions", []))
+        self.assertIn("tools", result.get("capabilities", {}))
+        self.assertEqual(result.get("serverInfo", {}).get("name"), "devmcp-runtime")
+        self.assertEqual(result.get("instructions"), "test instructions")
+
+    def test_protocol_version_header_optional_on_subsequent_requests(self) -> None:
+        import json
+        from io import BytesIO
+        from email.message import Message
+        from typing import Any
+        from coding_tools_mcp.server import MCPHandler
+
+        # Mocks to simulate a request to the server
+        class MockServer:
+            control_runtime = None
+
+            def __init__(self):
+                self.sessions = self
+
+            def get(self, session_id):
+                class FakeRuntime:
+                    http_session_id = session_id
+                    protocol_version = "2025-11-25"
+                    auth_tokens = ()
+
+                    def auth_enabled(self):
+                        return False
+
+                    def initialize(self, info):
+                        pass
+
+                return FakeRuntime() if session_id == "valid-session" else None
+
+            def touch(self, session_id):
+                pass
+
+            def release(self, session_id):
+                pass
+
+        class MockRequest:
+            def makefile(self, *args, **kwargs):
+                return BytesIO(b"")
+
+        # Basic request template
+        def simulate_request(header_dict: dict[str, str]) -> dict[str, Any]:
+            body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "ping"}).encode(
+                "utf-8"
+            )
+
+            headers = Message()
+            for k, v in header_dict.items():
+                headers[k] = v
+            headers["Content-Length"] = str(len(body))
+            headers["Content-Type"] = "application/json"
+
+            handler = MCPHandler(
+                MockRequest(), client_address=("127.0.0.1", 12345), server=MockServer()
+            )  # type: ignore
+            handler.path = "/mcp"
+            handler.headers = headers  # type: ignore
+            handler.rfile = BytesIO(body)
+            handler.wfile = BytesIO()
+            handler.client_address = ("127.0.0.1", 12345)
+            handler._runtime = handler.server.get("valid-session")
+
+            # Monkeypatch send_rpc_error and send_json to capture response
+            handler.response_data = None
+            handler.error_data = None
+
+            def send_json(payload, **kwargs):
+                handler.response_data = payload
+
+            def send_rpc_error(code, msg, **kwargs):
+                handler.error_data = {"code": code, "message": msg, **kwargs}
+
+            handler.send_json = send_json
+            handler.send_rpc_error = send_rpc_error
+            handler.handle_rpc = lambda req: {
+                "jsonrpc": "2.0",
+                "id": req.get("id"),
+                "result": {},
+            }
+
+            handler.do_POST()
+            return {"response": handler.response_data, "error": handler.error_data}
+
+        # 1. Missing header -> Accepted
+        res1 = simulate_request({"Mcp-Session-Id": "valid-session"})
+        self.assertIsNone(res1["error"])
+        self.assertIsNotNone(res1["response"])
+
+        # 2. Matching header -> Accepted
+        res2 = simulate_request(
+            {"Mcp-Session-Id": "valid-session", "MCP-Protocol-Version": "2025-11-25"}
+        )
+        self.assertIsNone(res2["error"])
+        self.assertIsNotNone(res2["response"])
+
+        # 3. Mismatched header -> Rejected
+        res3 = simulate_request(
+            {"Mcp-Session-Id": "valid-session", "MCP-Protocol-Version": "2025-06-18"}
+        )
+        self.assertIsNotNone(res3["error"])
+        self.assertEqual(res3["error"]["code"], -32600)
+        self.assertIn("does not match", res3["error"]["message"])
 
 
 if __name__ == "__main__":

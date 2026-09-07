@@ -2035,6 +2035,20 @@ Maven home: /usr/share/maven
         self.assertEqual(wait_schema["maximum"], 60000)
         self.assertEqual(wait_schema["default"], 0)
 
+    def test_job_status_wait_limit_caps_only_windows_http(self) -> None:
+        self.assertEqual(
+            server_module.job_status_wait_limit_ms("http", platform_name="nt"),
+            server_module.WINDOWS_HTTP_JOB_STATUS_WAIT_MAX_MS,
+        )
+        self.assertEqual(
+            server_module.job_status_wait_limit_ms("stdio", platform_name="nt"),
+            server_module.JOB_STATUS_MAX_WAIT_MS,
+        )
+        self.assertEqual(
+            server_module.job_status_wait_limit_ms("http", platform_name="posix"),
+            server_module.JOB_STATUS_MAX_WAIT_MS,
+        )
+
     def test_generic_exec_allows_job_timeout_above_five_minutes(self) -> None:
         schemas = server_module.input_schemas()
         for tool_name in ("exec_command", "exec_argv"):
