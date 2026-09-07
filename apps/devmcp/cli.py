@@ -492,11 +492,11 @@ def _wait_for_mcp_health(timeout_seconds: float = 30.0) -> bool:
     selected, config = _config()
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
-        if _mcp_health(config, selected):
+        if os.name == "nt":
+            if _mcp_health(config, selected):
+                return True
+        elif _active(MCP_SERVICE) and _mcp_health(config, selected):
             return True
-        if os.name != "nt" and not _active(MCP_SERVICE):
-            time.sleep(0.25)
-            continue
         time.sleep(0.25)
     return False
 
