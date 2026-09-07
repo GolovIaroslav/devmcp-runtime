@@ -75,7 +75,7 @@ jobs:
           .package-verify/bin/python -c 'import coding_tools_mcp; assert coding_tools_mcp.__version__'
 
       - name: Upload release artifacts
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@v7
         with:
           name: devmcp-runtime-distributions
           path: dist/
