@@ -25,7 +25,9 @@ class AuthSeparationTests(unittest.TestCase):
             fake_os = SimpleNamespace(name="posix", environ=os.environ)
             with (
                 patch.object(cli, "os", fake_os),
-                patch("coding_tools_mcp.stateful_server.main", return_value=0) as server_main,
+                patch(
+                    "coding_tools_mcp.stateful_server.main", return_value=0
+                ) as server_main,
             ):
                 self.assertEqual(cli._serve(SimpleNamespace()), 0)
 
@@ -39,7 +41,9 @@ class AuthSeparationTests(unittest.TestCase):
             self.assertNotIn("--extra-auth-token-file", server_args)
             self.assertNotIn(str(selected.control_plane_key), server_args)
 
-    def test_linux_health_gate_requires_active_systemd_unit_and_mcp_health(self) -> None:
+    def test_linux_health_gate_requires_active_systemd_unit_and_mcp_health(
+        self,
+    ) -> None:
         fake_os = SimpleNamespace(name="posix")
         fake_selected = object()
         fake_config: dict[str, object] = {}
