@@ -337,18 +337,29 @@ class BearerAuthorizationTests(unittest.TestCase):
         # Mocks to simulate a request to the server
         class MockServer:
             control_runtime = None
+
             def __init__(self):
                 self.sessions = self
+
             def get(self, session_id):
                 class FakeRuntime:
                     http_session_id = session_id
                     protocol_version = "2025-11-25"
                     auth_tokens = ()
-                    def auth_enabled(self): return False
-                    def initialize(self, info): pass
+
+                    def auth_enabled(self):
+                        return False
+
+                    def initialize(self, info):
+                        pass
+
                 return FakeRuntime() if session_id == "valid-session" else None
-            def touch(self, session_id): pass
-            def release(self, session_id): pass
+
+            def touch(self, session_id):
+                pass
+
+            def release(self, session_id):
+                pass
 
         class MockRequest:
             def makefile(self, *args, **kwargs):
@@ -356,36 +367,44 @@ class BearerAuthorizationTests(unittest.TestCase):
 
         # Basic request template
         def simulate_request(header_dict: dict[str, str]) -> dict[str, Any]:
-            body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "ping"}).encode("utf-8")
-            
+            body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "ping"}).encode(
+                "utf-8"
+            )
+
             headers = Message()
             for k, v in header_dict.items():
                 headers[k] = v
             headers["Content-Length"] = str(len(body))
             headers["Content-Type"] = "application/json"
 
-            handler = MCPHandler(MockRequest(), client_address=("127.0.0.1", 12345), server=MockServer()) # type: ignore
+            handler = MCPHandler(
+                MockRequest(), client_address=("127.0.0.1", 12345), server=MockServer()
+            )  # type: ignore
             handler.path = "/mcp"
-            handler.headers = headers # type: ignore
+            handler.headers = headers  # type: ignore
             handler.rfile = BytesIO(body)
             handler.wfile = BytesIO()
             handler.client_address = ("127.0.0.1", 12345)
             handler._runtime = handler.server.get("valid-session")
-            
+
             # Monkeypatch send_rpc_error and send_json to capture response
             handler.response_data = None
             handler.error_data = None
-            
+
             def send_json(payload, **kwargs):
                 handler.response_data = payload
-                
+
             def send_rpc_error(code, msg, **kwargs):
                 handler.error_data = {"code": code, "message": msg, **kwargs}
-                
+
             handler.send_json = send_json
             handler.send_rpc_error = send_rpc_error
-            handler.handle_rpc = lambda req: {"jsonrpc": "2.0", "id": req.get("id"), "result": {}}
-            
+            handler.handle_rpc = lambda req: {
+                "jsonrpc": "2.0",
+                "id": req.get("id"),
+                "result": {},
+            }
+
             handler.do_POST()
             return {"response": handler.response_data, "error": handler.error_data}
 
@@ -395,18 +414,16 @@ class BearerAuthorizationTests(unittest.TestCase):
         self.assertIsNotNone(res1["response"])
 
         # 2. Matching header -> Accepted
-        res2 = simulate_request({
-            "Mcp-Session-Id": "valid-session",
-            "MCP-Protocol-Version": "2025-11-25"
-        })
+        res2 = simulate_request(
+            {"Mcp-Session-Id": "valid-session", "MCP-Protocol-Version": "2025-11-25"}
+        )
         self.assertIsNone(res2["error"])
         self.assertIsNotNone(res2["response"])
 
         # 3. Mismatched header -> Rejected
-        res3 = simulate_request({
-            "Mcp-Session-Id": "valid-session",
-            "MCP-Protocol-Version": "2025-06-18"
-        })
+        res3 = simulate_request(
+            {"Mcp-Session-Id": "valid-session", "MCP-Protocol-Version": "2025-06-18"}
+        )
         self.assertIsNotNone(res3["error"])
         self.assertEqual(res3["error"]["code"], -32600)
         self.assertIn("does not match", res3["error"]["message"])
