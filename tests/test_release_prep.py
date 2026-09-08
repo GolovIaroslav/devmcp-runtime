@@ -158,6 +158,7 @@ class ReleaseLifecycleTests(unittest.TestCase):
         self.assertEqual(dev, f"devmcp-self-update-dev-{expected_sha}")
         self.assertNotEqual(prod, dev)
 
+    @patch("coding_tools_mcp.server.sys.platform", "linux")
     def test_service_update_source_path_does_not_affect_unit_identity(self) -> None:
         expected_sha = "c" * 40
         completed = subprocess.CompletedProcess([], 0, "", "")
@@ -186,6 +187,7 @@ class ReleaseLifecycleTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    @patch("coding_tools_mcp.server.sys.platform", "linux")
     def test_service_update_duplicate_unit_returns_already_scheduled(self) -> None:
         expected_sha = "d" * 40
         failed = subprocess.CompletedProcess([], 1, "", "scheduler failure")
@@ -216,6 +218,7 @@ class ReleaseLifecycleTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    @patch("coding_tools_mcp.server.sys.platform", "linux")
     def test_service_update_unrelated_systemd_failure_is_preserved(self) -> None:
         expected_sha = "e" * 40
         failed = subprocess.CompletedProcess([], 7, "out", "err")
@@ -242,6 +245,7 @@ class ReleaseLifecycleTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    @patch("coding_tools_mcp.server.sys.platform", "linux")
     def test_service_update_modeled_concurrency_coalesces_duplicate(self) -> None:
         expected_sha = "f" * 40
         barrier = threading.Barrier(2)
@@ -293,6 +297,7 @@ class ReleaseLifecycleTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    @patch("coding_tools_mcp.server.sys.platform", "linux")
     def test_service_update_failed_scheduler_can_retry_after_unit_is_absent(
         self,
     ) -> None:
@@ -440,6 +445,7 @@ class ReleaseLifecycleTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    @patch("coding_tools_mcp.server.sys.platform", "linux")
     def test_autonomous_profile_runs_host_diagnostics_and_schedules_restart(
         self,
     ) -> None:

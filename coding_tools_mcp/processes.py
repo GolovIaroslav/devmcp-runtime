@@ -248,6 +248,7 @@ class ExecSession:
     resource_cleanup: Callable[[], None] | None = field(default=None, repr=False)
     auto_release_resources_on_exit: bool = True
     _stdin_closed: bool = False
+    _stdin_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     _resource_cleanup_done: bool = field(default=False, repr=False)
     _reaper_started: bool = field(default=False, repr=False)
     _resource_cleanup_lock: threading.Lock = field(
@@ -282,6 +283,14 @@ class ExecSession:
             )
 
     def write_input(self, data: bytes) -> None:
+        with self._stdin_lock:
+            try:
+                self._write_input(data)
+            finally:
+                if self._stdin_closed:
+                    self._close_stdin_stream()
+
+    def _write_input(self, data: bytes) -> None:
         if self._stdin_closed:
             raise ToolFailure(
                 "SESSION_CLOSED", "Session stdin is closed.", category="runtime"
@@ -305,7 +314,17 @@ class ExecSession:
         if self.pty_master_fd is not None or self._stdin_closed:
             return
         self._stdin_closed = True
-        if self.process.stdin is not None:
+        # A pipe writer can hold the Windows CRT/BufferedWriter lock indefinitely.
+        # Never wait for it during cleanup; the writer closes its stream on return.
+        if not self._stdin_lock.acquire(blocking=False):
+            return
+        try:
+            self._close_stdin_stream()
+        finally:
+            self._stdin_lock.release()
+
+    def _close_stdin_stream(self) -> None:
+        if getattr(self.process, "stdin", None) is not None:
             try:
                 self.process.stdin.close()
             except OSError:
@@ -332,12 +351,7 @@ class ExecSession:
             return True
 
     def close_process_streams(self) -> None:
-        stdin = getattr(self.process, "stdin", None)
-        if stdin is not None:
-            try:
-                stdin.close()
-            except OSError:
-                pass
+        self.close_stdin()
         # Do not close stdout/stderr if reader threads are still running.
         # On Windows (CRT), closing an anonymous pipe while a worker thread is
         # blocked inside os.read() deadlocks on the CRT internal file lock (_lock_fhandle).

@@ -7935,6 +7935,8 @@ class Runtime:
         return payload
 
     def _schedule_devmcp_restart(self) -> dict[str, Any]:
+        if sys.platform == "win32":
+            return self._schedule_windows_service(["restart"])
         systemd_run = shutil.which("systemd-run")
         if systemd_run is None:
             raise ToolFailure(
@@ -7983,6 +7985,25 @@ class Runtime:
 
     def service_restart(self, args: dict[str, Any]) -> dict[str, Any]:
         return self._schedule_devmcp_restart()
+
+    def _schedule_windows_service(self, args: list[str]) -> dict[str, Any]:
+        from apps.devmcp.cli import _config, _spawn_windows_cli
+
+        selected, _ = _config()
+        try:
+            pid = _spawn_windows_cli(
+                selected,
+                args,
+                selected.root / "logs" / "service-action.log",
+                delay_seconds=2,
+            )
+        except OSError as exc:
+            raise ToolFailure(
+                "SERVICE_COMMAND_FAILED",
+                "Failed to schedule Windows service action.",
+                category="environment",
+            ) from exc
+        return {"status": "scheduled", "pid": pid, "delay_seconds": 2}
 
     @staticmethod
     def _is_devmcp_source_checkout(path: Path) -> bool:
@@ -8073,6 +8094,23 @@ class Runtime:
     def _schedule_devmcp_update(
         self, source: Path, expected_sha: str, *, development_mode: bool = False
     ) -> dict[str, Any]:
+        if sys.platform == "win32":
+            args = [
+                "service",
+                "update",
+                "--source",
+                str(source),
+                "--expected-sha",
+                expected_sha,
+            ]
+            if development_mode:
+                args.append("--development-mode")
+            return {
+                **self._schedule_windows_service(args),
+                "source": str(source),
+                "expected_sha": expected_sha,
+                "development_mode": development_mode,
+            }
         systemd_run = shutil.which("systemd-run")
         if systemd_run is None:
             raise ToolFailure(

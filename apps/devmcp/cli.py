@@ -8,6 +8,7 @@ does not weaken the new configuration model.
 from __future__ import annotations
 
 import argparse
+import base64
 import getpass
 import json
 import os
@@ -606,7 +607,9 @@ def _powershell_literal(value: str | Path) -> str:
     return "'" + str(value).replace("'", "''") + "'"
 
 
-def _spawn_windows_cli(selected: ConfigPaths, args: list[str], log_file: Path) -> int:
+def _spawn_windows_cli(
+    selected: ConfigPaths, args: list[str], log_file: Path, *, delay_seconds: int = 0
+) -> int:
     log_file.parent.mkdir(parents=True, exist_ok=True)
     error_file = log_file.with_name(f"{log_file.stem}.err{log_file.suffix}")
     run_dir = selected.root / "run"
@@ -615,9 +618,25 @@ def _spawn_windows_cli(selected: ConfigPaths, args: list[str], log_file: Path) -
     argument_list = ", ".join(
         _powershell_literal(item) for item in ["-u", "-m", "apps.devmcp.cli", *args]
     )
+    executable = sys.executable
+    if delay_seconds:
+        # The short-lived launcher exits before the helper restarts our process tree.
+        # Encode the inner script so paths/arguments survive PowerShell's CLI parsing.
+        inner = (
+            f"Start-Sleep -Seconds {delay_seconds}; "
+            f"& {_powershell_literal(sys.executable)} -u -m apps.devmcp.cli "
+            + " ".join(_powershell_literal(item) for item in args)
+            + "; exit $LASTEXITCODE"
+        )
+        encoded = base64.b64encode(inner.encode("utf-16le")).decode("ascii")
+        executable = "powershell.exe"
+        argument_list = ", ".join(
+            _powershell_literal(item)
+            for item in ["-NoProfile", "-NonInteractive", "-EncodedCommand", encoded]
+        )
     command = (
         f"$env:DEVMCP_CONFIG_DIR = {_powershell_literal(selected.root)}; "
-        f"$p = Start-Process -FilePath {_powershell_literal(sys.executable)} "
+        f"$p = Start-Process -FilePath {_powershell_literal(executable)} "
         f"-ArgumentList @({argument_list}) -WindowStyle Hidden "
         f"-RedirectStandardOutput {_powershell_literal(log_file)} "
         f"-RedirectStandardError {_powershell_literal(error_file)} -PassThru; "
