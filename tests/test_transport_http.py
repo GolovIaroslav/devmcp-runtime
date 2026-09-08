@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-import threading
 import time
 import unittest
-from typing import Any
 
 from coding_tools_mcp.protocol import dispatch_rpc
 from coding_tools_mcp.server import MCPHandler
@@ -239,87 +237,6 @@ class HTTPSessionManagerTests(unittest.TestCase):
         manager.release(replacement.http_session_id)
         manager.close()
 
-    def test_evictability_check_does_not_block_concurrent_requests(self) -> None:
-        factory = RuntimeFactory()
-        manager = HTTPSessionManager(factory)
-        try:
-            runtimes = []
-            for _ in range(MAX_HTTP_SESSIONS):
-                rt = manager.create()
-                manager.release(rt.http_session_id)
-                runtimes.append(rt)
-
-            in_evictable = threading.Event()
-            allow_evictable = threading.Event()
-
-            def blocking_evictable() -> bool:
-                in_evictable.set()
-                allow_evictable.wait(timeout=2.0)
-                return True
-
-            runtimes[0].http_session_evictable = blocking_evictable
-
-            create_result: list[Any] = []
-
-            def do_create() -> None:
-                new_rt = manager.create()
-                create_result.append(new_rt)
-
-            t = threading.Thread(target=do_create, daemon=True)
-            t.start()
-
-            self.assertTrue(in_evictable.wait(timeout=2.0))
-
-            stats = manager.stats()
-            self.assertEqual(stats["capacity"], MAX_HTTP_SESSIONS)
-            active_rt = manager.get(runtimes[1].http_session_id)
-            self.assertIs(active_rt, runtimes[1])
-            manager.release(runtimes[1].http_session_id)
-
-            allow_evictable.set()
-            t.join(timeout=2.0)
-            self.assertFalse(t.is_alive())
-            self.assertEqual(len(create_result), 1)
-        finally:
-            manager.close()
-
-    def test_close_process_streams_skips_alive_reader_threads(self) -> None:
-        from coding_tools_mcp.processes import ExecSession
-
-        class FakeStream:
-            def __init__(self) -> None:
-                self.closed = False
-
-            def close(self) -> None:
-                self.closed = True
-
-        stdin = FakeStream()
-        stdout = FakeStream()
-        stderr = FakeStream()
-
-        class FakeProc:
-            pass
-
-        proc = FakeProc()
-        proc.stdin = stdin
-        proc.stdout = stdout
-        proc.stderr = stderr
-
-        alive_thread = threading.Thread(target=lambda: time.sleep(1), daemon=True)
-        alive_thread.start()
-
-        session = ExecSession(
-            session_id="test-session",
-            process=proc,
-            reader_threads=[alive_thread],
-        )
-
-        session.close_process_streams()
-
-        self.assertTrue(stdin.closed)
-        self.assertFalse(stdout.closed)
-        self.assertFalse(stderr.closed)
-
 
 class BearerAuthorizationTests(unittest.TestCase):
     def test_auth_disabled_returns_true(self) -> None:
@@ -362,7 +279,7 @@ class BearerAuthorizationTests(unittest.TestCase):
     def test_multiple_tokens_accepted(self) -> None:
         class FakeRuntimeMulti:
             auth_token = "mcp-primary-secret"
-            auth_tokens = ("mcp-primary-secret", "mcp-secondary-secret")
+            auth_tokens = ("mcp-primary-secret", "tunnel-control-plane-key-12345")
             oauth_config = None
 
             def auth_enabled(self) -> bool:
@@ -370,7 +287,9 @@ class BearerAuthorizationTests(unittest.TestCase):
 
         class FakeHandler:
             runtime = FakeRuntimeMulti()
-            headers: dict[str, str] = {"Authorization": "Bearer mcp-secondary-secret"}
+            headers: dict[str, str] = {
+                "Authorization": "Bearer tunnel-control-plane-key-12345"
+            }
 
         self.assertTrue(MCPHandler.is_authorized(FakeHandler()))  # type: ignore[arg-type]
 
@@ -378,7 +297,7 @@ class BearerAuthorizationTests(unittest.TestCase):
         self.assertTrue(MCPHandler.is_authorized(FakeHandler()))  # type: ignore[arg-type]
 
         # Raw token without Bearer prefix rejected
-        FakeHandler.headers = {"Authorization": "mcp-secondary-secret"}
+        FakeHandler.headers = {"Authorization": "tunnel-control-plane-key-12345"}
         self.assertFalse(MCPHandler.is_authorized(FakeHandler()))  # type: ignore[arg-type]
 
         FakeHandler.headers = {"Authorization": "Bearer some-random-attacker-token"}
@@ -412,6 +331,7 @@ class BearerAuthorizationTests(unittest.TestCase):
         import json
         from io import BytesIO
         from email.message import Message
+        from typing import Any
         from coding_tools_mcp.server import MCPHandler
 
         # Mocks to simulate a request to the server

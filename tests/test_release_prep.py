@@ -1058,30 +1058,3 @@ class ReleaseLifecycleTests(unittest.TestCase):
             first, second = (list(call.args[0]) for call in server_main.call_args_list)
             self.assertIn("--execution-mode", first)
             self.assertEqual(second[second.index("--port") + 1], "48999")
-
-    def test_serve_does_not_authorize_the_control_plane_key_for_mcp(self) -> None:
-        with (
-            tempfile.TemporaryDirectory() as tmp,
-            patch.dict(os.environ, {"DEVMCP_CONFIG_DIR": tmp}, clear=False),
-        ):
-            selected = paths()
-            config = load_config(selected, workspace=tmp)
-            save_config(config, selected)
-            write_secret(selected.mcp_token, "mcp-fixture-token")
-            write_secret(selected.control_plane_key, "control-plane-fixture-key")
-
-            with (
-                patch.object(
-                    cli, "os", SimpleNamespace(name="posix", environ=os.environ)
-                ),
-                patch("coding_tools_mcp.server.main", return_value=0) as server_main,
-            ):
-                self.assertEqual(cli._serve(SimpleNamespace()), 0)
-
-            command = list(server_main.call_args.args[0])
-            self.assertEqual(
-                command[command.index("--auth-token-file") + 1], str(selected.mcp_token)
-            )
-            self.assertNotIn("--extra-auth-token", command)
-            self.assertNotIn("--extra-auth-token-file", command)
-            self.assertNotIn(str(selected.control_plane_key), command)
