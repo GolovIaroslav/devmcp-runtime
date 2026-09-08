@@ -13,6 +13,18 @@ from tests.compliance.fixtures import init_git
 
 
 class PytestCollectionTests(unittest.TestCase):
+    def test_project_discovery_guidance_is_actionable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = Runtime(Path(tmp))
+            try:
+                instructions = runtime.server_instructions()
+                self.assertIn("missing from list_projects", instructions)
+                self.assertIn("operator workspaces configuration", instructions)
+                self.assertIn("preserve existing roots", instructions)
+                self.assertIn("restart DevMCP", instructions)
+            finally:
+                runtime.close()
+
     def test_root_collection_excludes_executable_fixture_projects(self) -> None:
         root = Path(__file__).resolve().parents[1]
         completed = subprocess.run(

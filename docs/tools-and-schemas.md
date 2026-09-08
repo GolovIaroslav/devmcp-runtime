@@ -122,7 +122,14 @@ and then performs the MCP-health-before-tunnel restart sequence.
 
 Operator-configured `workspaces` are passed to the runtime as project discovery
 roots. `list_projects` recursively discovers Git repositories without following
-symlinks. A service-managed last-project file is read only as the initial default
+symlinks. If an explicitly requested local Git repository is absent from
+`list_projects`, inspect the non-secret operator `workspaces` configuration
+instead of treating `select_project` `NOT_FOUND` as proof that the repository is
+unsupported. Preserve existing roots, add only the requested repository root,
+validate the configuration, restart DevMCP with `service_restart`, rerun
+`list_projects`, and select by the returned id, name, or `relative_path`. Do not
+widen discovery to a drive root or broad ancestor solely to make a repository
+visible. A service-managed last-project file is read only as the initial default
 for a new Runtime. Streamable HTTP `select_project` does not rewrite that global
 file. Instead, each HTTP client lifecycle receives an opaque logical
 `context_id`; selected project and default cwd are stored in the server-owned

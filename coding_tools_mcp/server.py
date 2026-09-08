@@ -2210,7 +2210,13 @@ class Runtime:
             "remain scoped to the selected repository until a separate multi-project Git "
             "refactor. When the user names or asks to continue a project, call list_projects, "
             "select the matching repository with select_project, then read the returned "
-            "authority_files before changing that project.\n\n"
+            "authority_files before changing that project. If a requested local Git repository "
+            "is missing from list_projects, do not treat NOT_FOUND as proof that it is unsupported: "
+            "inspect the non-secret operator workspaces configuration. When the user authorized "
+            "work on that repository, preserve existing roots, add only that repository root, "
+            "validate the configuration, restart DevMCP, rerun list_projects, and select by the "
+            "returned id, name, or relative_path. Do not widen discovery to a drive root or broad "
+            "ancestor solely to make the repository visible.\n\n"
             + self.project_context.server_instructions()
         )
 
