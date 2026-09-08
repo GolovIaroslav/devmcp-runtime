@@ -55,7 +55,8 @@ class WindowsPipeDeadlockRegressionTests(unittest.TestCase):
                     runtime._schedule_devmcp_update(
                         Path(tmp), "a" * 40, development_mode=True
                     )
-                    schedule.assert_called_with(
+                    self.assertEqual(
+                        schedule.call_args.args[0],
                         [
                             "service",
                             "update",
@@ -64,8 +65,50 @@ class WindowsPipeDeadlockRegressionTests(unittest.TestCase):
                             "--expected-sha",
                             "a" * 40,
                             "--development-mode",
-                        ]
+                        ],
                     )
+            finally:
+                runtime.close()
+
+    def test_windows_self_update_runs_from_source_environment(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="devmcp update source ") as tmp:
+            source = Path(tmp)
+            runtime = Runtime(source, sandbox_backend="unsafe")
+            try:
+                with (
+                    patch(
+                        "apps.devmcp.cli._uv_executable",
+                        return_value=Path("C:/tools/uv.exe"),
+                    ),
+                    patch.object(
+                        runtime,
+                        "_schedule_windows_service",
+                        return_value={"status": "scheduled"},
+                    ) as schedule,
+                ):
+                    runtime._schedule_devmcp_update(
+                        source,
+                        "a" * 40,
+                        development_mode=True,
+                    )
+
+                runner = schedule.call_args.kwargs["runner"]
+                self.assertEqual(
+                    runner,
+                    [
+                        str(Path("C:/tools/uv.exe")),
+                        "run",
+                        "--directory",
+                        str(source),
+                        "--project",
+                        str(source),
+                        "--frozen",
+                        "python",
+                        "-u",
+                        "-m",
+                        "apps.devmcp.cli",
+                    ],
+                )
             finally:
                 runtime.close()
 

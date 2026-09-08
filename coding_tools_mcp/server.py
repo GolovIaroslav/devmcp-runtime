@@ -7992,7 +7992,9 @@ class Runtime:
     def service_restart(self, args: dict[str, Any]) -> dict[str, Any]:
         return self._schedule_devmcp_restart()
 
-    def _schedule_windows_service(self, args: list[str]) -> dict[str, Any]:
+    def _schedule_windows_service(
+        self, args: list[str], *, runner: list[str] | None = None
+    ) -> dict[str, Any]:
         from apps.devmcp.cli import _config, _spawn_windows_cli
 
         selected, _ = _config()
@@ -8002,6 +8004,7 @@ class Runtime:
                 args,
                 selected.root / "logs" / "service-action.log",
                 delay_seconds=2,
+                runner=runner,
             )
         except OSError as exc:
             raise ToolFailure(
@@ -8101,6 +8104,15 @@ class Runtime:
         self, source: Path, expected_sha: str, *, development_mode: bool = False
     ) -> dict[str, Any]:
         if sys.platform == "win32":
+            from apps.devmcp.cli import _uv_executable
+
+            uv = _uv_executable()
+            if uv is None:
+                raise ToolFailure(
+                    "SERVICE_UNAVAILABLE",
+                    "uv is required for a reliable Windows self-update.",
+                    category="environment",
+                )
             args = [
                 "service",
                 "update",
@@ -8111,8 +8123,21 @@ class Runtime:
             ]
             if development_mode:
                 args.append("--development-mode")
+            runner = [
+                str(uv),
+                "run",
+                "--directory",
+                str(source),
+                "--project",
+                str(source),
+                "--frozen",
+                "python",
+                "-u",
+                "-m",
+                "apps.devmcp.cli",
+            ]
             return {
-                **self._schedule_windows_service(args),
+                **self._schedule_windows_service(args, runner=runner),
                 "source": str(source),
                 "expected_sha": expected_sha,
                 "development_mode": development_mode,

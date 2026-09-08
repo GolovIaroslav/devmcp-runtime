@@ -687,6 +687,7 @@ class ReleaseLifecycleTests(unittest.TestCase):
                 return_value={"service": {"installed_sha": expected_sha}},
             ),
             patch.object(cli, "save_config") as save_config,
+            patch.object(cli, "_windows_service_action", return_value=0),
             patch.object(
                 cli.shutil,
                 "which",
@@ -719,6 +720,78 @@ class ReleaseLifecycleTests(unittest.TestCase):
         self.assertEqual(commands[6][-2:], ["service", "install"])
         self.assertEqual(commands[7][-1], "restart")
 
+    @unittest.skipUnless(os.name == "nt", "Windows self-update locking is Windows-only")
+    def test_cli_service_update_stops_windows_services_before_install(self) -> None:
+        expected_sha = "a" * 40
+        source = Path("C:/devmcp-runtime-source")
+        completed = [
+            subprocess.CompletedProcess([], 0, expected_sha + "\n", ""),
+            subprocess.CompletedProcess([], 0, "feature/update\n", ""),
+            subprocess.CompletedProcess(
+                [], 0, "https://github.com/example/devmcp-runtime.git\n", ""
+            ),
+            subprocess.CompletedProcess([], 0, "", ""),
+            subprocess.CompletedProcess([], 0, "", ""),
+            subprocess.CompletedProcess([], 0, "installed\n", ""),
+            subprocess.CompletedProcess([], 0, "units\n", ""),
+            subprocess.CompletedProcess([], 0, "restarted\n", ""),
+        ]
+        events: list[tuple[str, object]] = []
+
+        def run(
+            command: list[str], **kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
+            events.append(("run", command))
+            return completed.pop(0)
+
+        def service_action(action: str) -> int:
+            events.append(("service", action))
+            return 0
+
+        with (
+            patch.object(cli, "_validated_runtime_source", return_value=source),
+            patch.object(cli, "_config", return_value=(object(), {})),
+            patch.object(
+                cli,
+                "_mcp_runtime_state",
+                return_value={"service": {"installed_sha": expected_sha}},
+            ),
+            patch.object(cli, "save_config"),
+            patch.object(cli, "_windows_service_action", side_effect=service_action),
+            patch.object(
+                cli.shutil,
+                "which",
+                side_effect=lambda name: {
+                    "git": "C:/Git/bin/git.exe",
+                    "uv": "C:/tools/uv.exe",
+                }.get(name),
+            ),
+            patch.object(cli.subprocess, "run", side_effect=run),
+            patch.object(
+                cli,
+                "_uv_tool_launcher",
+                return_value=Path("C:/Users/test/.local/bin/devmcp.exe"),
+            ),
+        ):
+            result = cli._service_update(
+                SimpleNamespace(
+                    source=str(source),
+                    expected_sha=expected_sha,
+                    development_mode=True,
+                )
+            )
+
+        self.assertEqual(result, 0)
+        stop_index = events.index(("service", "stop"))
+        install_index = next(
+            index
+            for index, event in enumerate(events)
+            if event[0] == "run"
+            and isinstance(event[1], list)
+            and event[1][:4] == ["C:/tools/uv.exe", "tool", "install", "--force"]
+        )
+        self.assertLess(stop_index, install_index)
+
     def test_cli_service_update_rejects_mismatched_running_sha(self) -> None:
         expected_sha = "a" * 40
         completed = [
@@ -743,6 +816,7 @@ class ReleaseLifecycleTests(unittest.TestCase):
                 return_value={"service": {"installed_sha": "b" * 40}},
             ),
             patch.object(cli, "save_config"),
+            patch.object(cli, "_windows_service_action", return_value=0),
             patch.object(
                 cli.shutil,
                 "which",

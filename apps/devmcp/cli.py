@@ -608,24 +608,29 @@ def _powershell_literal(value: str | Path) -> str:
 
 
 def _spawn_windows_cli(
-    selected: ConfigPaths, args: list[str], log_file: Path, *, delay_seconds: int = 0
+    selected: ConfigPaths,
+    args: list[str],
+    log_file: Path,
+    *,
+    delay_seconds: int = 0,
+    runner: list[str] | None = None,
 ) -> int:
     log_file.parent.mkdir(parents=True, exist_ok=True)
     error_file = log_file.with_name(f"{log_file.stem}.err{log_file.suffix}")
     run_dir = selected.root / "run"
     run_dir.mkdir(parents=True, exist_ok=True)
     pid_output = run_dir / f".spawn-{os.getpid()}-{time.time_ns()}.pid"
-    argument_list = ", ".join(
-        _powershell_literal(item) for item in ["-u", "-m", "apps.devmcp.cli", *args]
-    )
-    executable = sys.executable
+    runner_argv = runner or [sys.executable, "-u", "-m", "apps.devmcp.cli"]
+    executable = runner_argv[0]
+    process_args = [*runner_argv[1:], *args]
+    argument_list = ", ".join(_powershell_literal(item) for item in process_args)
     if delay_seconds:
         # The short-lived launcher exits before the helper restarts our process tree.
         # Encode the inner script so paths/arguments survive PowerShell's CLI parsing.
         inner = (
             f"Start-Sleep -Seconds {delay_seconds}; "
-            f"& {_powershell_literal(sys.executable)} -u -m apps.devmcp.cli "
-            + " ".join(_powershell_literal(item) for item in args)
+            f"& {_powershell_literal(executable)} "
+            + " ".join(_powershell_literal(item) for item in process_args)
             + "; exit $LASTEXITCODE"
         )
         encoded = base64.b64encode(inner.encode("utf-16le")).decode("ascii")
@@ -1359,6 +1364,11 @@ def _service_update(args: argparse.Namespace) -> int:
     if uv is None:
         print("uv is required to update the installed DevMCP runtime", file=sys.stderr)
         return 1
+
+    if os.name == "nt":
+        stopped = _windows_service_action("stop")
+        if stopped != 0:
+            return stopped
 
     install = subprocess.run(
         [uv, "tool", "install", "--force", str(source)],
