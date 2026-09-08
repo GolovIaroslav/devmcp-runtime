@@ -51,21 +51,40 @@ class HTTPSessionManager:
         with self._lock:
             if self._closed:
                 raise RuntimeError("HTTP session manager is closed")
-            if len(self._sessions) + self._creating >= MAX_HTTP_SESSIONS:
-                idle = [
-                    (session_id, record)
-                    for session_id, record in self._sessions.items()
-                    if (
-                        record.active_requests == 0
-                        and not record.closing
-                        and _runtime_evictable(record.runtime)
-                    )
-                ]
-                if not idle:
-                    raise RuntimeError("maximum HTTP session count reached")
-                session_id, evicted = min(idle, key=lambda item: item[1].last_seen)
-                self._sessions.pop(session_id, None)
-            self._creating += 1
+            need_eviction = len(self._sessions) + self._creating >= MAX_HTTP_SESSIONS
+            if not need_eviction:
+                self._creating += 1
+            else:
+                candidates = sorted(
+                    [
+                        (session_id, record)
+                        for session_id, record in self._sessions.items()
+                        if record.active_requests == 0 and not record.closing
+                    ],
+                    key=lambda item: item[1].last_seen,
+                )
+        if need_eviction:
+            for session_id, record in candidates:
+                if _runtime_evictable(record.runtime):
+                    with self._lock:
+                        if (
+                            not self._closed
+                            and self._sessions.get(session_id) is record
+                            and record.active_requests == 0
+                            and not record.closing
+                        ):
+                            self._sessions.pop(session_id, None)
+                            self._creating += 1
+                            evicted = record
+                            break
+            if evicted is None:
+                with self._lock:
+                    if self._closed:
+                        raise RuntimeError("HTTP session manager is closed")
+                    if len(self._sessions) + self._creating < MAX_HTTP_SESSIONS:
+                        self._creating += 1
+                    else:
+                        raise RuntimeError("maximum HTTP session count reached")
         runtime: Any | None = None
         installed = False
         try:
@@ -133,18 +152,27 @@ class HTTPSessionManager:
     def prune(self) -> None:
         cutoff = time.monotonic() - HTTP_SESSION_TTL_SECONDS
         with self._lock:
-            expired = [
-                session_id
+            candidates = [
+                (session_id, record)
                 for session_id, record in self._sessions.items()
                 if (
                     record.last_seen < cutoff
                     and record.active_requests == 0
                     and not record.closing
-                    and _runtime_evictable(record.runtime)
                 )
             ]
-            records = [self._sessions.pop(session_id) for session_id in expired]
-        for record in records:
+        to_close: list[HTTPSessionRecord] = []
+        for session_id, record in candidates:
+            if _runtime_evictable(record.runtime):
+                with self._lock:
+                    if (
+                        self._sessions.get(session_id) is record
+                        and record.active_requests == 0
+                        and not record.closing
+                    ):
+                        self._sessions.pop(session_id, None)
+                        to_close.append(record)
+        for record in to_close:
             _close_runtime(record.runtime)
 
     def stats(self) -> dict[str, int]:
