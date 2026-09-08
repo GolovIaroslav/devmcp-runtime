@@ -117,6 +117,37 @@ starting a second installer. The updater records the installed SHA/branch in ope
 performs a user-level `uv tool install --force`, refreshes the user systemd units,
 and then performs the MCP-health-before-tunnel restart sequence.
 
+### Known Windows self-update defect
+
+Observed on Windows on 2026-09-08 with DevMCP installed as a `uv tool`: a
+running DevMCP process can keep its own installed `Scripts` directory locked
+while the delayed `service_update` helper reaches `uv tool install --force`.
+The install then fails before the updater has stopped the running MCP service.
+
+Exact observed error:
+
+```text
+error: failed to remove directory `C:\Users\mrgol\AppData\Roaming\uv\tools\devmcp-runtime\Scripts`: Отказано в доступе. (os error 5)
+```
+
+Minimal reproduction:
+
+1. On Windows, run DevMCP from a `uv tool` installation so the live MCP process
+   uses `...\uv\tools\devmcp-runtime\Scripts\python.exe`.
+2. Prepare a clean local `devmcp-runtime` checkout at a different HEAD.
+3. While the MCP service is still running, call `service_update` for that source
+   (for example `source_project="0:."` with `development_mode=true` on a clean
+   feature branch).
+4. The delayed updater invokes `uv tool install --force <source>` while the old
+   runtime still owns files under its installed `Scripts` directory; on the
+   observed system `uv` exits with the access-denied error above and the service
+   remains on the old SHA.
+
+Temporary operator workaround used in the reproduced case: stop the running
+DevMCP service from an external process, wait for it to exit, then perform the
+update from a Python/launcher process outside the locked `uv` tool environment.
+Do not kill unrelated child jobs to force an update.
+
 
 ## Project selection boundary
 
