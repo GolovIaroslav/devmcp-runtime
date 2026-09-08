@@ -747,7 +747,9 @@ def _windows_start_mcp(
         print(f"Failed to start MCP server: {exc}", file=sys.stderr)
         return 1
     mcp_pid_file.write_text(str(pid), encoding="utf-8")
-    if not _wait_for_mcp_health():
+    # Startup reclaims stale linked worktrees before binding HTTP. On Windows,
+    # filesystem/antivirus overhead can exceed the ordinary 30-second budget.
+    if not _wait_for_mcp_health(timeout_seconds=180):
         _windows_kill_process_tree(pid)
         mcp_pid_file.unlink(missing_ok=True)
         print("MCP service failed to become healthy", file=sys.stderr)
@@ -1405,7 +1407,7 @@ def _service_update(args: argparse.Namespace) -> int:
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            timeout=120,
+            timeout=240,
         )
         if completed.returncode != 0:
             sys.stderr.write(completed.stdout)

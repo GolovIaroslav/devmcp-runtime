@@ -33,6 +33,14 @@
 
 ## Validation and limits
 
+- Installation reproduced a separate startup failure after the 100-context test:
+  the Windows launcher killed startup after its 30-second health deadline while
+  `run_http -> recover_managed_worktrees -> cleanup_managed_worktree` was still
+  working. A direct launch with faulthandler completed recovery (54 clean removed,
+  one dirty preserved) and bound HTTP. Increased the bounded Windows startup
+  allowance to 180 seconds and the installer's service-action allowance to 240.
+  This accommodates measured cleanup; it does not prevent logical-context churn.
+
 - Targeted Windows pipe, HTTP transport and release lifecycle tests:
   **54 passed, 2 skipped**. Ruff passes on changed Python files.
 - The blocked-stdin test establishes that a writer holds its lock, verifies it
