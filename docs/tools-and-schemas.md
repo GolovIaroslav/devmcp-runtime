@@ -117,12 +117,12 @@ starting a second installer. The updater records the installed SHA/branch in ope
 performs a user-level `uv tool install --force`, refreshes the user systemd units,
 and then performs the MCP-health-before-tunnel restart sequence.
 
-### Known Windows self-update defect
+### Windows self-update lock regression
 
-Observed on Windows on 2026-09-08 with DevMCP installed as a `uv tool`: a
-running DevMCP process can keep its own installed `Scripts` directory locked
-while the delayed `service_update` helper reaches `uv tool install --force`.
-The install then fails before the updater has stopped the running MCP service.
+Observed on Windows on 2026-09-08 with DevMCP installed as a `uv tool`: the MCP
+`serve` process, tunnel process, and delayed updater could all run from the same
+installed `Scripts` directory that `uv tool install --force` needed to replace.
+The install therefore failed before the old services were stopped.
 
 Exact observed error:
 
@@ -143,10 +143,11 @@ Minimal reproduction:
    observed system `uv` exits with the access-denied error above and the service
    remains on the old SHA.
 
-Temporary operator workaround used in the reproduced case: stop the running
-DevMCP service from an external process, wait for it to exit, then perform the
-update from a Python/launcher process outside the locked `uv` tool environment.
-Do not kill unrelated child jobs to force an update.
+The Windows update path now launches the delayed updater through `uv run` from
+the validated source checkout, outside the installed tool environment, and
+stops the identified DevMCP MCP/tunnel services before replacing the tool with
+`uv tool install --force`. The Linux systemd update path is unchanged. Do not
+kill unrelated child jobs to force an update.
 
 
 ## Project selection boundary
