@@ -332,8 +332,19 @@ class ExecSession:
             return True
 
     def close_process_streams(self) -> None:
+        stdin = getattr(self.process, "stdin", None)
+        if stdin is not None:
+            try:
+                stdin.close()
+            except OSError:
+                pass
+        # Do not close stdout/stderr if reader threads are still running.
+        # On Windows (CRT), closing an anonymous pipe while a worker thread is
+        # blocked inside os.read() deadlocks on the CRT internal file lock (_lock_fhandle).
+        # Reader threads safely close stdout/stderr in their own finally block upon EOF.
+        if any(t.is_alive() for t in self.reader_threads):
+            return
         for stream in (
-            getattr(self.process, "stdin", None),
             getattr(self.process, "stdout", None),
             getattr(self.process, "stderr", None),
         ):

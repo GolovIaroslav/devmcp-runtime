@@ -1831,10 +1831,12 @@ class Runtime:
         is therefore orphaned bookkeeping rather than live work. Reclaim it so a
         stale counter cannot permanently consume one HTTP-session capacity slot.
         """
-        self._prune_sessions()
         with self.sessions_lock:
-            if self.starting_sessions or self.sessions:
+            if self.starting_sessions:
                 return False
+            for session in self.sessions.values():
+                if session.process.poll() is None:
+                    return False
         cleanup = None
         with self.sandbox_lock:
             if self.sandbox_users > 0:
