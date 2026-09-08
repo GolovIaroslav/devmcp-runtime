@@ -236,6 +236,23 @@ def _render_exec(payload: dict[str, Any]) -> str:
     return "\n".join(sections)
 
 
+def _render_job_status(payload: dict[str, Any]) -> str:
+    status = str(payload.get("status", "unknown"))
+    exit_code = payload.get("exit_code")
+    header = f"Status: {status}"
+    if exit_code is not None:
+        header += f"; exit code {exit_code}"
+    preview = payload.get("preview")
+    if not isinstance(preview, str) or not preview:
+        return header
+    suffix = (
+        "\nPreview truncated; use job_output/read_output for full retained output."
+        if payload.get("preview_truncated")
+        else ""
+    )
+    return header + "\n" + preview + suffix
+
+
 def _render_read_output(payload: dict[str, Any]) -> str:
     content = payload.get("content")
     if not isinstance(content, str):
@@ -437,6 +454,7 @@ _RENDERERS = {
     "apply_patch": _render_patch,
     "exec_command": _render_exec,
     "write_stdin": _render_exec,
+    "job_status": _render_job_status,
     "kill_session": _render_kill,
     "read_output": _render_read_output,
     "git_status": _render_git_status,

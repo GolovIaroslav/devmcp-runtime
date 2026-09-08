@@ -1460,14 +1460,23 @@ Maven home: /usr/share/maven
 
     def test_exec_running_model_text_names_the_poll_call(self) -> None:
         with TemporaryDirectory() as tmp:
-            result = Runtime(Path(tmp), permission_mode="trusted").call_tool(
-                "exec_command",
-                {"cmd": "sleep 1", "timeout_ms": 10000, "yield_time_ms": 0},
-            )
-            model_text = self.agent_text(result)
-            self.assertIn("Status: running", model_text)
-            self.assertIn('job_status(session_id="', model_text)
-            self.assertIn("wait_ms=60000", model_text)
+            runtime = Runtime(Path(tmp), permission_mode="trusted")
+            try:
+                result = runtime.call_tool(
+                    "exec_command",
+                    {"cmd": "sleep 1", "timeout_ms": 10000, "yield_time_ms": 0},
+                )
+                model_text = self.agent_text(result)
+                self.assertIn("Status: running", model_text)
+                self.assertIn('job_status(session_id="', model_text)
+                self.assertIn("wait_ms=60000", model_text)
+                self.assertTrue(
+                    result["structuredContent"]["next_action"]["arguments"][
+                        "include_output"
+                    ]
+                )
+            finally:
+                runtime.close()
 
     def test_read_file_truncation_is_visible_with_continuation(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -1996,6 +2005,57 @@ Maven home: /usr/share/maven
             finally:
                 runtime.close()
 
+    def test_job_status_preview_does_not_consume_full_output(self) -> None:
+        with TemporaryDirectory() as tmp:
+            runtime = Runtime(
+                Path(tmp), permission_mode="trusted", sandbox_backend="unsafe"
+            )
+            try:
+                started = runtime.exec_argv(
+                    {
+                        "argv": [
+                            sys.executable,
+                            "-c",
+                            (
+                                "import sys,time; print('stdout-line' + 'x' * 200, flush=True); "
+                                "print('stderr-line', file=sys.stderr, flush=True); "
+                                "time.sleep(0.15)"
+                            ),
+                        ],
+                        "yield_time_ms": 0,
+                        "timeout_ms": 2_000,
+                    }
+                )
+                status_result = runtime.call_tool(
+                    "job_status",
+                    {
+                        "session_id": started["session_id"],
+                        "wait_ms": 2_000,
+                        "include_output": True,
+                        "preview_bytes": 128,
+                    },
+                )
+                status = status_result["structuredContent"]
+                self.assertEqual(status["status"], "success", status)
+                self.assertEqual(status["exit_code"], 0)
+                self.assertIn("stdout-line", status["preview"])
+                self.assertIn("stderr-line", status["preview"])
+                self.assertIn("stdout-line", status_result["content"][0]["text"])
+                self.assertLessEqual(len(status["preview"].encode()), 128)
+                self.assertTrue(status["preview_truncated"])
+                self.assertTrue(status["full_output_available"])
+                self.assertNotIn("stdout", status)
+                self.assertNotIn("stderr", status)
+
+                stdout = runtime.job_output({"session_id": started["session_id"]})
+                stderr = runtime.read_output(
+                    {"output_ref": status["output_refs"]["stderr"]}
+                )
+                self.assertIn("stdout-line", stdout["content"])
+                self.assertIn("stderr-line", stderr["content"])
+            finally:
+                runtime.close()
+
     def test_http_write_stdin_caps_wait_without_breaking_input(self) -> None:
         with TemporaryDirectory() as tmp:
             runtime = Runtime(Path(tmp), permission_mode="trusted", transport="http")
@@ -2028,12 +2088,16 @@ Maven home: /usr/share/maven
                 runtime.close()
 
     def test_job_status_schema_bounds_wait(self) -> None:
-        wait_schema = server_module.input_schemas()["job_status"]["properties"][
-            "wait_ms"
-        ]
+        schema = server_module.input_schemas()["job_status"]["properties"]
+        wait_schema = schema["wait_ms"]
         self.assertEqual(wait_schema["minimum"], 0)
         self.assertEqual(wait_schema["maximum"], 60000)
         self.assertEqual(wait_schema["default"], 0)
+        self.assertEqual(schema["include_output"]["default"], False)
+        self.assertEqual(
+            schema["preview_bytes"]["maximum"],
+            server_module.JOB_STATUS_PREVIEW_MAX_BYTES,
+        )
 
     def test_job_status_wait_limit_caps_only_windows_http(self) -> None:
         self.assertEqual(

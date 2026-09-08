@@ -14,7 +14,11 @@ If an older client or server reports `SANDBOX_UNAVAILABLE` as an error, upgrade 
 
 ## Command Hangs Or Times Out
 
-If the result returns `status: "running"`, poll with `write_stdin` using empty `chars`, or terminate with `kill_session`. Session deadlines still apply when the client stops polling.
+If a non-interactive result returns `status: "running"`, follow its
+`next_action` and poll with `job_status`; use `include_output=true` on the
+terminal poll for a bounded preview. Use `write_stdin` with empty `chars` only
+for interactive/TTY sessions, or terminate with `kill_session`. Session
+deadlines still apply when the client stops polling.
 
 ## BUILD authority
 

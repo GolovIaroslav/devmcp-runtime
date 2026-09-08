@@ -694,6 +694,72 @@ class HTTPSessionStateTests(unittest.TestCase):
                 )
                 self.assertFalse((repo_b / "job-started").exists())
 
+    def test_http_job_status_preview_keeps_full_output_available(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            projects = root / "projects"
+            repo = self._repo(projects, "a")
+            with self._server(repo, projects) as client:
+                context_id = structured(client.call_tool("current_project", {}))[
+                    "context_id"
+                ]
+                started = structured(
+                    client.call_tool(
+                        "exec_argv",
+                        {
+                            "argv": [
+                                sys.executable,
+                                "-c",
+                                (
+                                    "import sys,time; print('http-stdout', flush=True); "
+                                    "print('http-stderr', file=sys.stderr, flush=True); "
+                                    "time.sleep(0.2)"
+                                ),
+                            ],
+                            "yield_time_ms": 0,
+                            "timeout_ms": 10_000,
+                            "context_id": context_id,
+                        },
+                    )
+                )
+                status = structured(
+                    client.call_tool(
+                        "job_status",
+                        {
+                            "session_id": started["session_id"],
+                            "wait_ms": 10_000,
+                            "include_output": True,
+                            "preview_bytes": 128,
+                            "context_id": context_id,
+                        },
+                    )
+                )
+                self.assertEqual(status["status"], "success", status)
+                self.assertIn("http-stdout", status["preview"])
+                self.assertIn("http-stderr", status["preview"])
+                self.assertTrue(status["full_output_available"])
+
+                full_stdout = structured(
+                    client.call_tool(
+                        "job_output",
+                        {
+                            "session_id": started["session_id"],
+                            "context_id": context_id,
+                        },
+                    )
+                )
+                full_stderr = structured(
+                    client.call_tool(
+                        "read_output",
+                        {
+                            "output_ref": status["output_refs"]["stderr"],
+                            "context_id": context_id,
+                        },
+                    )
+                )
+                self.assertIn("http-stdout", full_stdout["content"])
+                self.assertIn("http-stderr", full_stderr["content"])
+
     def test_context_expiration_is_explicit_and_active_transport_rolls_context(
         self,
     ) -> None:

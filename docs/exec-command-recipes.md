@@ -4,34 +4,44 @@ These recipes intentionally use explicit `exec_command` commands. The MCP server
 
 ## Foreground and background results
 
-The server always exposes the same four process tools: `exec_command`,
-`write_stdin`, `read_output`, and `kill_session`. It does not dynamically add a
-tool after a command starts.
+The server always exposes the process tools: `exec_command`, `exec_argv`,
+`job_status`, `job_output`, `write_stdin`, `read_output`, and `kill_session`. It
+does not dynamically add a tool after a command starts.
 
 `exec_command` waits up to 10 seconds by default. If the command exits in that
-window, the result is complete and no polling call is needed. If it is still
-running, the result contains a `session_id` and an exact `next_action`, for
-example:
+window, the result is complete and no polling call is needed. If a non-
+interactive command is still running, the result contains a `session_id` and an
+exact `next_action` for `job_status`, for example:
 
 ```json
 {
   "status": "running",
   "session_id": "sess_123",
   "next_action": {
-    "tool": "write_stdin",
+    "tool": "job_status",
     "arguments": {
       "session_id": "sess_123",
-      "chars": "",
-      "yield_time_ms": 10000
+      "wait_ms": 10000,
+      "include_output": true,
+      "preview_bytes": 2048
     }
   }
 }
 ```
 
-Calling `write_stdin` with empty `chars` means “wait/poll”; non-empty `chars`
-interacts with the process. `read_output` is for paging retained stdout/stderr
-when a result explicitly says output was truncated (or when compact verbosity
-was requested). It is not an extra step for every command.
+For a non-interactive job, follow `next_action` with `job_status`. Its
+`wait_ms` is bounded long polling, not CPU work; keep the server-provided value
+unless measurement shows a different interval is safe. With
+`include_output=true`, a terminal status includes a bounded `preview` without
+consuming retained output. Use `job_output`, or `read_output` with `output_refs`,
+when the full stdout/stderr is needed. `write_stdin` is for interactive input
+and TTY sessions; empty `chars` waits for those sessions.
+
+For one project, call `select_project` once and reuse its `context_id` across
+HTTP reconnects. Batch independent reads with `read_files` and independent
+checks with `run_checks_for_diff`. Run a formatter that must update the
+selected repository with `state_effect="selected_repo"`; leave long checks and
+tests at `state_effect="none"`.
 
 Use the external runtime `HOME`, `TMPDIR`, or `cache_dir` reported by `server_info` when you want dependency caches without adding files to the Git worktree. These shell examples assume trusted mode because they use environment expansion:
 

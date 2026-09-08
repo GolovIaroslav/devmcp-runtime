@@ -316,8 +316,11 @@ return `status: "success"` for exit code 0 or `status: "failed"` for non-zero
 exit. `command_success` is explicit (`true`/`false`, or `null` while running), so
 `ok: true` cannot be mistaken for a passing check. A still-running HTTP command
 returns an opaque `job_...` handle and a machine-readable `next_action` for
-`write_stdin` with empty `chars`; the action includes its owning `context_id` so
-it remains usable after a connector creates a fresh MCP transport session.
+`job_status`; the action includes its owning `context_id` so it remains usable
+after a connector creates a fresh MCP transport session. For a terminal poll,
+include `include_output=true` to receive a bounded `preview`; retained full
+output remains available through `job_output`/`read_output` and the preview does
+not consume it. Use `write_stdin` for interactive sessions.
 
 Only truncated terminal output returns a `read_output` next action by default.
 `output_ref` values are `session:<id>:stdout` or `session:<id>:stderr`; offsets

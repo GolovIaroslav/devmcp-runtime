@@ -196,6 +196,8 @@ DESTRUCTIVE_RE = re.compile(
 )
 MAX_HTTP_REQUEST_BYTES = 1_048_576
 EXEC_PREVIEW_BYTES = 4096
+JOB_STATUS_PREVIEW_BYTES = 2048
+JOB_STATUS_PREVIEW_MAX_BYTES = 4096
 HTTP_INITIAL_EXEC_MAX_WAIT_MS = 10_000
 HTTP_SAFE_BLOCKING_WAIT_MAX_MS = 60_000
 HTTP_WRITE_STDIN_MAX_WAIT_MS = HTTP_SAFE_BLOCKING_WAIT_MAX_MS
@@ -867,7 +869,11 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     ),
     "job_status": ToolSpec(
         title="Job status",
-        description="Check a job without consuming output; wait_ms may wait for process completion and ignores intermediate stdout/stderr.",
+        description=(
+            "Poll a non-interactive job without consuming output; wait_ms may wait "
+            "for completion. Set include_output=true for a bounded terminal preview; "
+            "use job_output or read_output for the retained full output."
+        ),
         read_only=True,
         idempotent=True,
     ),
@@ -883,7 +889,10 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         title="Kill session", description="Kill session.", destructive=True
     ),
     "job_output": ToolSpec(
-        title="Job output", description="Job output.", read_only=True, idempotent=True
+        title="Job output",
+        description="Read retained stdout from a job; use read_output with output_refs for paged stdout/stderr.",
+        read_only=True,
+        idempotent=True,
     ),
     "job_input": ToolSpec(
         title="Job input", description="Job input.", destructive=True
@@ -2217,6 +2226,13 @@ class Runtime:
             "validate the configuration, restart DevMCP, rerun list_projects, and select by the "
             "returned id, name, or relative_path. Do not widen discovery to a drive root or broad "
             "ancestor solely to make the repository visible.\n\n"
+            "For one project, select it once and reuse the returned context_id on HTTP reconnects. "
+            "Batch independent reads/checks (for example with read_files or run_checks_for_diff). "
+            "For non-interactive commands, follow next_action with job_status; request "
+            "include_output=true there for a bounded terminal preview, and use job_output/read_output "
+            "only when the full retained output is needed. Use write_stdin only for interactive or "
+            "TTY sessions. Use state_effect=selected_repo for a bounded formatter or other mutation "
+            "that must advance the repository checkpoint; keep long checks/tests at state_effect=none.\n\n"
             + self.project_context.server_instructions()
         )
 
@@ -5724,6 +5740,8 @@ class Runtime:
                 next_arguments: dict[str, Any] = {
                     "session_id": session.session_id,
                     "wait_ms": job_status_wait_limit_ms(self.transport),
+                    "include_output": True,
+                    "preview_bytes": JOB_STATUS_PREVIEW_BYTES,
                 }
                 next_tool = "job_status"
             else:
@@ -8595,10 +8613,34 @@ class Runtime:
             "exit_code": poll,
             "command_success": None if poll is None else poll == 0,
         }
+        if poll is not None and bool(args.get("include_output", False)):
+            preview_limit = max(
+                1,
+                min(
+                    int(args.get("preview_bytes", JOB_STATUS_PREVIEW_BYTES)),
+                    JOB_STATUS_PREVIEW_MAX_BYTES,
+                ),
+            )
+            preview, preview_truncated = truncate_bytes(
+                session.retained_output_bytes(), preview_limit
+            )
+            result.update(
+                {
+                    "preview": preview,
+                    "preview_truncated": preview_truncated,
+                    "output_refs": {
+                        "stdout": f"session:{session.session_id}:stdout",
+                        "stderr": f"session:{session.session_id}:stderr",
+                    },
+                    "full_output_available": True,
+                }
+            )
         if poll is None:
             next_arguments: dict[str, Any] = {
                 "session_id": session_id,
                 "wait_ms": job_status_wait_limit_ms(self.transport),
+                "include_output": True,
+                "preview_bytes": JOB_STATUS_PREVIEW_BYTES,
             }
             if context_id := self._active_context_id():
                 next_arguments["context_id"] = context_id
@@ -10441,6 +10483,20 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                     "minimum": 0,
                     "maximum": JOB_STATUS_MAX_WAIT_MS,
                     "default": 0,
+                },
+                "include_output": {
+                    **boolean,
+                    "default": False,
+                    "description": (
+                        "On terminal status, include a bounded preview without consuming "
+                        "retained output."
+                    ),
+                },
+                "preview_bytes": {
+                    **integer,
+                    "minimum": 1,
+                    "maximum": JOB_STATUS_PREVIEW_MAX_BYTES,
+                    "default": JOB_STATUS_PREVIEW_BYTES,
                 },
             },
             ["session_id"],

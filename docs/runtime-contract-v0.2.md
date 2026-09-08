@@ -175,17 +175,29 @@ A running command returns:
   "status": "running",
   "session_id": "...",
   "next_action": {
-    "tool": "write_stdin",
-    "arguments": {"session_id": "...", "chars": "", "yield_time_ms": 10000}
+    "tool": "job_status",
+    "arguments": {"session_id": "...", "wait_ms": 10000, "include_output": true, "preview_bytes": 2048}
   }
 }
 ```
 
-Call `write_stdin` with empty `chars` to poll. `read_output` is needed only when
-output is truncated or a caller explicitly requested compact retained output.
-Its offsets are absolute and independent for stdout and stderr. A single
-truncated stream is selected by `next_action`; when both streams are truncated,
-`next_actions` contains one executable `read_output` call for each stream.
+Call `job_status` to poll a non-interactive command. A terminal poll may request
+`include_output=true` for a bounded `preview`; this does not consume retained
+output. `job_output` and `read_output` remain available for the full retained
+stdout/stderr, whose offsets are absolute and independent. Call `write_stdin`
+with empty `chars` only to poll an interactive/TTY session, or with non-empty
+`chars` to provide input.
+
+### job_status
+
+Inputs: `"session_id"`, `"wait_ms"`, `"include_output"`, `"preview_bytes"`.
+
+Annotations: `{"title":"Job status","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}`.
+
+Returns status and exit code without consuming output. With
+`include_output=true` on a completed job, `preview` is bounded by
+`preview_bytes` (maximum 4096 bytes) and `output_refs` keeps access to the full
+retained streams. The default is `include_output=false` for compatibility.
 
 Active processes, completed-output sessions, per-session bytes, and total
 runtime bytes are bounded. Completed sessions have a TTL. POSIX `tty=true` uses

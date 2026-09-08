@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import inspect
 import re
+import sys
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -135,7 +136,7 @@ class SchemaDriftTests(unittest.TestCase):
                 Path(tmp), permission_mode="trusted", sandbox_backend="unsafe"
             ).exec_command(
                 {
-                    "cmd": "true",
+                    "argv": [sys.executable, "-c", "pass"],
                     "verbosity": 0,
                     "timeout_ms": 5_000,
                     "yield_time_ms": 5_000,
