@@ -20,6 +20,12 @@
   future `devmcp-runtime` trusted-publisher rollout requires an explicit
   maintainer change.
 
+### Fixed
+
+- Windows self-update no longer tries to replace the running `uv tool`
+  environment from inside that same environment; the updater runs from the
+  validated source checkout and stops DevMCP services before reinstalling.
+
 ## 0.2.2 - 2026-07-28
 
 ### Fixed
