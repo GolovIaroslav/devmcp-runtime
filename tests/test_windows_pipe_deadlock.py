@@ -11,7 +11,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from apps.devmcp.cli import _spawn_windows_cli
+from apps.devmcp.cli import _is_pid_running, _spawn_windows_cli
 
 from coding_tools_mcp.processes import ExecSession, start_reader_threads
 from coding_tools_mcp.server import Runtime
@@ -37,6 +37,9 @@ class WindowsPipeDeadlockRegressionTests(unittest.TestCase):
                 time.sleep(0.1)
             else:
                 self.fail("delayed CLI did not complete config validation")
+            while _is_pid_running(pid) and time.monotonic() < deadline:
+                time.sleep(0.05)
+            self.assertFalse(_is_pid_running(pid), "helper still owns its log files")
 
     def test_windows_service_actions_do_not_use_systemd(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
