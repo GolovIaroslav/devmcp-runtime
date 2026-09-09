@@ -98,3 +98,19 @@ during the accompanying performance preview check. The installed HTTP service
 accepted the new preview fields, but the gateway dropped them. Refresh Actions
 after deployment to publish the current schema before treating plugin preview
 as verified; the direct HTTP preview and full-output preservation checks passed.
+
+### Follow-up installation result
+
+The pre-fix installed `f8c3a8d` launcher reproduced the access-denied failure
+once, so it was not retried. A host-Python source invocation bootstrapped the
+fix to `0b8eabfe141236e6e3d84595591256f499a9f648`. The installed `devmcp.exe`
+was then invoked from `C:\\Windows\\Temp` with that source and SHA. It returned
+the expected scheduled-source-runner message; the updater log ended with
+`Updated DevMCP runtime from C:\\other\\projects\\devmcp-runtime`.
+
+After the scheduled update, `devmcp status` and source `HEAD` both reported
+`0b8eabfe141236e6e3d84595591256f499a9f648`; MCP health was OK, tunnel ready
+was yes, and `/healthz` reported `shared_jobs.running: 0`. The old-SHA command
+in `.local-recovery/windows-agent-install-plan.json` is labelled **rollback
+only**; it intentionally targets `5ae1ed51dc609794e1a44a20d23ace72cf1dd37d`
+and is not an update command for this result.
