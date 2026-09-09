@@ -7230,15 +7230,30 @@ class Runtime:
     def _antigravity_guarded_argv(argv: list[str], expected_cwd: Path) -> list[str]:
         """Fail before exec if the delegated child did not enter expected_cwd."""
 
-        guard = (
-            "import os,pathlib,sys;"
-            "expected=pathlib.Path(sys.argv[1]).resolve(strict=True);"
-            "actual=pathlib.Path.cwd().resolve(strict=True);"
-            "ok=(actual==expected);"
-            "sys.stderr.write('DEVMCP_AGY_CWD_MISMATCH expected=%s actual=%s\\n' % (expected,actual)) if not ok else None;"
-            "sys.exit(125) if not ok else None;"
-            "os.execv(sys.argv[2],sys.argv[2:])"
-        )
+        if os.name == "nt":
+            # os.execv() on Windows rebuilds a command line using CRT quoting rules
+            # that are incompatible with AGY's Go flag parser for multi-word prompt
+            # values. Launch the child through subprocess instead so Python performs
+            # the correct Windows argument quoting and preserves each argv element.
+            guard = (
+                "import pathlib,subprocess,sys;"
+                "expected=pathlib.Path(sys.argv[1]).resolve(strict=True);"
+                "actual=pathlib.Path.cwd().resolve(strict=True);"
+                "ok=(actual==expected);"
+                "sys.stderr.write('DEVMCP_AGY_CWD_MISMATCH expected=%s actual=%s\\n' % (expected,actual)) if not ok else None;"
+                "sys.exit(125) if not ok else None;"
+                "sys.exit(subprocess.run(sys.argv[2:]).returncode)"
+            )
+        else:
+            guard = (
+                "import os,pathlib,sys;"
+                "expected=pathlib.Path(sys.argv[1]).resolve(strict=True);"
+                "actual=pathlib.Path.cwd().resolve(strict=True);"
+                "ok=(actual==expected);"
+                "sys.stderr.write('DEVMCP_AGY_CWD_MISMATCH expected=%s actual=%s\\n' % (expected,actual)) if not ok else None;"
+                "sys.exit(125) if not ok else None;"
+                "os.execv(sys.argv[2],sys.argv[2:])"
+            )
         return [sys.executable, "-c", guard, str(expected_cwd), *argv]
 
     @staticmethod

@@ -2970,6 +2970,24 @@ Maven home: /usr/share/maven
             self.assertIn("DEVMCP_AGY_CWD_MISMATCH", result.stderr)
             self.assertFalse(marker.exists())
 
+    def test_antigravity_cwd_guard_preserves_multiword_arguments(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            capture = root / "capture.txt"
+            child = [
+                sys.executable,
+                "-c",
+                "import pathlib,sys;pathlib.Path(sys.argv[1]).write_text(sys.argv[2], encoding='utf-8')",
+                str(capture),
+                "two words stay one argument",
+            ]
+            guarded = Runtime._antigravity_guarded_argv(child, root)
+            result = processes_module.run_bounded_process(
+                guarded, cwd=str(root), timeout=5
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(capture.read_text(encoding="utf-8"), "two words stay one argument")
+
     def test_antigravity_env_replaces_stale_workspace_and_state_hints(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
