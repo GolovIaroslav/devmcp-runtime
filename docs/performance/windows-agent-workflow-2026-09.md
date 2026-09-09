@@ -43,3 +43,31 @@ service. Process startup and filesystem scheduling dominate several timings.
 The result supports one fewer server call and a smaller response for this
 workflow; it does not establish a general plugin speedup or a Codex-equivalent
 wall time. Linux compatibility was not executed in this Windows environment.
+
+## Installed runtime verification
+
+On 2026-09-09 the target commit was installed from the permanent checkout
+with the normal `service update` workflow. The first launcher invocation hit a
+Windows `uv` access-denied error while replacing the old tool environment; the
+previous SHA was restored successfully with the host Python entry point, and
+the target installation then completed successfully. The installed SHA and
+source HEAD both reported
+`8145c9d8da02e4ac2955298cf09d5674c02f7a19`.
+
+`devmcp status` reported MCP health OK and tunnel ready. A real authenticated
+loopback MCP session called `health` and `exec_argv`; the latter returned
+`success`, exit code 0, and the expected output. The preview contract was
+also exercised against the installed service with one reused context and three
+alternating pairs:
+
+| Installed MCP workflow | Calls | Median time | Median result JSON | Errors |
+| --- | ---: | ---: | ---: | ---: |
+| `job_status` preview off + `job_output` | 3 | 220.08 ms* | 2,969 bytes | 0 |
+| `job_status` preview on | 2 | 195.59 ms | 2,267 bytes | 0 |
+
+Both modes returned exit code 0. A separate preservation check retrieved full
+stdout and stderr after the preview and found both markers intact; the preview
+reported `full_output_available=true`. The medians use only three local MCP
+runs; the first preview-off run was cold at 1,357.5 ms. This is authenticated
+loopback MCP E2E, not ChatGPT/plugin or gateway E2E, and cannot establish the
+agent's total wall time. Linux remains unverified.
