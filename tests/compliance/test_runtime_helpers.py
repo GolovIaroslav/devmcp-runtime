@@ -3000,6 +3000,7 @@ Maven home: /usr/share/maven
                     {
                         "PATH": os.environ.get("PATH", os.defpath),
                         "HOME": str(root / "home"),
+                        "USERPROFILE": str(root / "profile"),
                         "PWD": "/home/jar/Documents/projects/TicketWise",
                         "OLDPWD": "/home/jar/Documents/projects/TicketWise-old",
                         "XDG_CONFIG_HOME": str(root / "config"),
@@ -3013,6 +3014,8 @@ Maven home: /usr/share/maven
                 self.assertEqual(env["PWD"], str(repo.resolve()))
                 self.assertEqual(env["OLDPWD"], str(repo.resolve()))
                 self.assertEqual(env["HOME"], str(root / "home"))
+                if os.name == "nt":
+                    self.assertEqual(env["USERPROFILE"], str(root / "profile"))
                 self.assertEqual(env["XDG_CONFIG_HOME"], str(root / "config"))
                 self.assertNotEqual(env["XDG_CACHE_HOME"], str(root / "ambient-cache"))
                 self.assertNotEqual(env["XDG_STATE_HOME"], str(root / "ambient-state"))

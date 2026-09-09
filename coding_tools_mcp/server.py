@@ -7158,6 +7158,10 @@ class Runtime:
         home = os.environ.get("HOME")
         if home and not is_filtered_env_var("HOME", home):
             env["HOME"] = home
+        if os.name == "nt":
+            userprofile = os.environ.get("USERPROFILE")
+            if userprofile and not is_filtered_env_var("USERPROFILE", userprofile):
+                env["USERPROFILE"] = userprofile
         xdg_config = os.environ.get("XDG_CONFIG_HOME")
         if xdg_config and not is_filtered_env_var("XDG_CONFIG_HOME", xdg_config):
             env["XDG_CONFIG_HOME"] = xdg_config
