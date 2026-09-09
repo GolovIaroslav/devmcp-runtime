@@ -71,3 +71,30 @@ reported `full_output_available=true`. The medians use only three local MCP
 runs; the first preview-off run was cold at 1,357.5 ms. This is authenticated
 loopback MCP E2E, not ChatGPT/plugin or gateway E2E, and cannot establish the
 agent's total wall time. Linux remains unverified.
+
+## Windows direct-launcher self-update follow-up
+
+The earlier Windows fix covered the updater scheduled by the MCP runtime, but
+did not cover a user invoking `devmcp service update` directly. On 2026-09-09,
+the installed `devmcp.exe` launcher was found to run
+`...\\uv\\tools\\devmcp-runtime\\Scripts\\python.exe`. Consequently, even after
+the MCP and tunnel processes stopped, that foreground CLI still held the
+replaceable `uv tool` environment open while it ran `uv tool install --force`.
+Two direct-launcher attempts failed with the same Windows access-denied (`os
+error 5`) removal of the tool `Scripts` directory. Running the module through
+the host Python succeeded because its interpreter was outside that directory.
+
+The corrective Windows path detects when the direct CLI interpreter belongs to
+`uv tool dir`, validates the requested source as usual, and schedules one
+source-checkout `uv run --frozen` updater before returning. The direct command
+therefore confirms scheduling; its log and `devmcp status` confirm the eventual
+installation. After the original launcher exits, the source-runner (whose
+interpreter is outside `uv tool dir`) stops the identified DevMCP MCP/tunnel
+services and performs the existing install/restart/SHA verification sequence.
+The Linux path is unchanged and was not executed here.
+
+The plugin/gateway action metadata remained on the older `job_status` schema
+during the accompanying performance preview check. The installed HTTP service
+accepted the new preview fields, but the gateway dropped them. Refresh Actions
+after deployment to publish the current schema before treating plugin preview
+as verified; the direct HTTP preview and full-output preservation checks passed.

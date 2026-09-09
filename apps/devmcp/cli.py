@@ -1177,6 +1177,84 @@ def _uv_tool_launcher(uv: str, command: str) -> Path | None:
     return launcher if launcher.is_file() else None
 
 
+def _uv_tool_directory(uv: str) -> Path | None:
+    result = subprocess.run(
+        [uv, "tool", "dir"],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=30,
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        return None
+    try:
+        return Path(result.stdout.strip()).resolve(strict=True)
+    except OSError:
+        return None
+
+
+def _running_from_uv_tool_environment(uv: str) -> bool:
+    """Return whether this CLI interpreter is inside uv's replaceable tool tree."""
+
+    tool_dir = _uv_tool_directory(uv)
+    if tool_dir is None:
+        return False
+    try:
+        Path(sys.executable).resolve().relative_to(tool_dir)
+    except ValueError:
+        return False
+    except OSError:
+        return False
+    return True
+
+
+def _schedule_windows_source_update(
+    source: Path, expected_sha: str, development_mode: bool, uv: str
+) -> int:
+    """Exit a uv-tool CLI before a source-runner replaces that tool environment."""
+
+    selected, _ = _config()
+    args = [
+        "service",
+        "update",
+        "--source",
+        str(source),
+        "--expected-sha",
+        expected_sha,
+    ]
+    if development_mode:
+        args.append("--development-mode")
+    runner = [
+        uv,
+        "run",
+        "--directory",
+        str(source),
+        "--project",
+        str(source),
+        "--frozen",
+        "python",
+        "-u",
+        "-m",
+        "apps.devmcp.cli",
+    ]
+    try:
+        pid = _spawn_windows_cli(
+            selected,
+            args,
+            selected.root / "logs" / "windows-cli-update.log",
+            delay_seconds=2,
+            runner=runner,
+        )
+    except OSError as exc:
+        print(f"Failed to schedule Windows source update: {exc}", file=sys.stderr)
+        return 1
+    print(
+        "Scheduled Windows DevMCP update from the validated source runner "
+        f"(PID {pid}); follow {selected.root / 'logs' / 'windows-cli-update.log'}"
+    )
+    return 0
+
+
 def _windows_devmcp_launcher() -> Path | None:
     invoked = Path(sys.argv[0]).expanduser()
     if invoked.name.lower() in {"devmcp", "devmcp.exe"} and invoked.is_file():
@@ -1366,6 +1444,10 @@ def _service_update(args: argparse.Namespace) -> int:
         return 1
 
     if os.name == "nt":
+        if _running_from_uv_tool_environment(uv):
+            return _schedule_windows_source_update(
+                source, expected_sha, development_mode, uv
+            )
         stopped = _windows_service_action("stop")
         if stopped != 0:
             return stopped

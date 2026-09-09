@@ -696,6 +696,7 @@ class ReleaseLifecycleTests(unittest.TestCase):
                     "uv": "/usr/bin/uv",
                 }.get(name),
             ),
+            patch.object(cli, "_running_from_uv_tool_environment", return_value=False),
             patch.object(cli.subprocess, "run", side_effect=completed) as run,
             patch.object(
                 cli,
@@ -766,6 +767,7 @@ class ReleaseLifecycleTests(unittest.TestCase):
                     "uv": "C:/tools/uv.exe",
                 }.get(name),
             ),
+            patch.object(cli, "_running_from_uv_tool_environment", return_value=False),
             patch.object(cli.subprocess, "run", side_effect=run),
             patch.object(
                 cli,
@@ -791,6 +793,92 @@ class ReleaseLifecycleTests(unittest.TestCase):
             and event[1][:4] == ["C:/tools/uv.exe", "tool", "install", "--force"]
         )
         self.assertLess(stop_index, install_index)
+
+    def test_cli_service_update_from_windows_uv_tool_schedules_source_runner(self) -> None:
+        expected_sha = "a" * 40
+        source = Path("C:/devmcp-runtime-source")
+        completed = [
+            subprocess.CompletedProcess([], 0, expected_sha + "\n", ""),
+            subprocess.CompletedProcess([], 0, "feature/update\n", ""),
+            subprocess.CompletedProcess(
+                [], 0, "https://github.com/example/devmcp-runtime.git\n", ""
+            ),
+            subprocess.CompletedProcess([], 0, "", ""),
+            subprocess.CompletedProcess([], 0, "", ""),
+        ]
+        with (
+            patch.object(cli, "_validated_runtime_source", return_value=source),
+            patch.object(cli.os, "name", "nt"),
+            patch.object(
+                cli.shutil,
+                "which",
+                side_effect=lambda name: {
+                    "git": "C:/Git/bin/git.exe",
+                    "uv": "C:/tools/uv.exe",
+                }.get(name),
+            ),
+            patch.object(cli, "_running_from_uv_tool_environment", return_value=True),
+            patch.object(cli.subprocess, "run", side_effect=completed),
+            patch.object(cli, "_schedule_windows_source_update", return_value=0) as schedule,
+            patch.object(cli, "_windows_service_action") as service_action,
+        ):
+            result = cli._service_update(
+                SimpleNamespace(
+                    source=str(source),
+                    expected_sha=expected_sha,
+                    development_mode=True,
+                )
+            )
+
+        self.assertEqual(result, 0)
+        schedule.assert_called_once_with(source, expected_sha, True, "C:/tools/uv.exe")
+        service_action.assert_not_called()
+
+    def test_windows_source_update_runner_uses_source_environment_and_exits_first(self) -> None:
+        source = Path("C:/devmcp-runtime-source")
+        selected = SimpleNamespace(root=Path("C:/devmcp-config"))
+        with (
+            patch.object(cli, "_config", return_value=(selected, {})),
+            patch.object(cli, "_spawn_windows_cli", return_value=4242) as spawn,
+        ):
+            result = cli._schedule_windows_source_update(
+                source, "a" * 40, True, "C:/tools/uv.exe"
+            )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(
+            spawn.call_args.args,
+            (
+                selected,
+                [
+                    "service",
+                    "update",
+                    "--source",
+                    str(source),
+                    "--expected-sha",
+                    "a" * 40,
+                    "--development-mode",
+                ],
+                selected.root / "logs" / "windows-cli-update.log",
+            ),
+        )
+        self.assertEqual(spawn.call_args.kwargs["delay_seconds"], 2)
+        self.assertEqual(
+            spawn.call_args.kwargs["runner"],
+            [
+                "C:/tools/uv.exe",
+                "run",
+                "--directory",
+                str(source),
+                "--project",
+                str(source),
+                "--frozen",
+                "python",
+                "-u",
+                "-m",
+                "apps.devmcp.cli",
+            ],
+        )
 
     def test_cli_service_update_rejects_mismatched_running_sha(self) -> None:
         expected_sha = "a" * 40
