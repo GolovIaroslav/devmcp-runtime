@@ -145,7 +145,10 @@ class StateManagementTests(TestCase):
                 first, _first_context = new_context_runtime(repo, registry)
                 second, second_context = new_context_runtime(repo, registry)
                 try:
-                    first_claim = first.call_tool("exec_argv", {"argv": ["true"]})
+                    first_claim = first.call_tool(
+                        "exec_argv",
+                        {"argv": [sys.executable, "-c", "pass"]},
+                    )
                     self.assertFalse(first_claim.get("isError", False), first_claim)
 
                     canonical_file = repo / "tracked.txt"

@@ -62,6 +62,22 @@ class SessionStateRegistryTests(unittest.TestCase):
             self.assertTrue(registry.claim_mutation_workspace(second))
             self.assertTrue(second.mutation_workspace_claimed)
 
+    def test_mutation_claims_are_independent_across_repositories(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo_a = root / "repo-a"
+            repo_b = root / "repo-b"
+            repo_a.mkdir()
+            repo_b.mkdir()
+            registry = LogicalContextRegistry()
+            first = registry.create(repo_a, repo_a, repo_a)
+            second = registry.create(repo_b, repo_b, repo_b)
+
+            self.assertFalse(registry.claim_mutation_workspace(first))
+            self.assertFalse(registry.claim_mutation_workspace(second))
+            self.assertEqual(first.effective_workspace_root, repo_a.resolve())
+            self.assertEqual(second.effective_workspace_root, repo_b.resolve())
+
     def test_mutation_claim_is_reused_after_context_workspace_isolated(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)

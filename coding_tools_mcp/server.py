@@ -2053,6 +2053,7 @@ class Runtime:
                     self.canonical_project_root,
                     self.effective_workspace_root,
                     self.default_cwd,
+                    explicit=self.transport != "http",
                 )
             except RuntimeError as exc:
                 raise ToolFailure(
@@ -2532,6 +2533,8 @@ class Runtime:
                 if requested_context:
                     context_id = requested_context
                     context_state = registry.retain(context_id)
+                    if context_state is not None:
+                        context_state.explicit = True
                 else:
                     context_id = self._ensure_logical_context()
                     assert context_id is not None
@@ -2542,6 +2545,7 @@ class Runtime:
                                 self.canonical_project_root,
                                 self.effective_workspace_root,
                                 self.default_cwd,
+                                explicit=self.transport != "http",
                             )
                         except RuntimeError as exc:
                             raise ToolFailure(
