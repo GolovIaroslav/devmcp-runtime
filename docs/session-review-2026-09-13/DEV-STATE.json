@@ -1,0 +1,75 @@
+{
+  "schema": 2,
+  "updated_at": "2026-09-22T21:48:00+02:00",
+  "scope": "DevMCP/Cavendish infrastructure continuation",
+  "status": "packet_complete_backlog_reconciliation_pending",
+  "current_task": null,
+  "current_task_reason": "The accepted D01-D05 packet is complete. No surviving evidence selects a specific post-D05 DevMCP implementation item, and the preserved plan explicitly says optional operation_key, production memory/graph, and the broader backlog are not auto-started.",
+  "completed_items": [
+    "D01",
+    "D02",
+    "D03",
+    "D04",
+    "D05",
+    "PR #62 repository-scoped writer isolation"
+  ],
+  "source_identity": {
+    "project": "/home/jar/Documents/projects/chatgpt-dev-runtime",
+    "branch": "fix/antigravity-windows-argv",
+    "runtime_code_head": "c3727526be5e2b8466d280653dada9341ebcea29",
+    "head_at_reconciliation_start": "c3727526be5e2b8466d280653dada9341ebcea29",
+    "continuation_commit_is_docs_only": true
+  },
+  "installed_identity": {
+    "head": "c3727526be5e2b8466d280653dada9341ebcea29",
+    "matches_source": true,
+    "mcp_health": "ok",
+    "tunnel_ready": true
+  },
+  "cavendish_identity": {
+    "canonical_source": "b1965984a645075ab7950cb62cf669bb81831296"
+  },
+  "factory_boundary": {
+    "project": "/home/jar/Documents/projects/software-factory",
+    "status": "separate",
+    "completed_through": "S01",
+    "next_task": "S02",
+    "execute_from_this_track": false
+  },
+  "next_unfinished_step": {
+    "kind": "backlog_reconciliation",
+    "implementation_allowed_in_same_segment": false,
+    "action": "Perform one bounded read-only reconciliation of the surviving broader DevMCP backlog against current source and accepted evidence. Select a concrete current_task only if it is demonstrably unfinished and not superseded; otherwise keep current_task null and record the unresolved selection."
+  },
+  "do_not_repeat": [
+    "D01-D05 infrastructure/Cavendish packet",
+    "PR #62 repository-scoped writer isolation",
+    "historical WAIT_EXTERNAL routing",
+    "Factory S01",
+    "old D01/D02 durable checkpoint work"
+  ],
+  "backlog_reconciliation_sources": [
+    "ROADMAP.md",
+    "TASKS.md",
+    "docs/AGENT_AUTONOMY.md",
+    "/home/jar/.local/state/devmcp-linux-preupdate-untracked-20260922/session-review-2026-09-13/backlog.md",
+    "/home/jar/.local/state/devmcp-linux-preupdate-untracked-20260922/session-review-2026-09-13/decision-plan.md",
+    "/home/jar/.local/state/devmcp-linux-preupdate-untracked-20260922/session-review-2026-09-13/DEV-NEXT.md",
+    "/home/jar/.local/state/software-factory/coordination/devmcp.md"
+  ],
+  "recovery": {
+    "preupdate_continuation_tree": "/home/jar/.local/state/devmcp-linux-preupdate-untracked-20260922/session-review-2026-09-13/",
+    "linux_sync_status": "/home/jar/.local/state/linux-sync-20260922/devmcp-status.txt",
+    "linux_sync_patch": "/home/jar/.local/state/linux-sync-20260922/devmcp-tracked-wip.patch",
+    "durable_checkpoint_root": "/home/jar/.config/devmcp-runtime/continuation-checkpoints",
+    "historical_current_project_checkpoint_dir": "/home/jar/.config/devmcp-runtime/continuation-checkpoints/9d723ec08eaf11eaaea24e5500512b2aa2986a3c102ece19e17231321500778f"
+  },
+  "preexisting_dirty_paths": [
+    "antigravity-image-test/",
+    "results/"
+  ],
+  "automation_enabled": false,
+  "decisions_needed": [
+    "Select the next broader DevMCP backlog item during the dedicated backlog-reconciliation segment."
+  ]
+}
