@@ -502,6 +502,21 @@ def _wait_for_mcp_health(timeout_seconds: float = 30.0) -> bool:
     return False
 
 
+def _wait_for_mcp_endpoint(
+    config: dict[str, Any],
+    selected: ConfigPaths,
+    timeout_seconds: float = 30.0,
+) -> bool:
+    """Wait until the configured MCP HTTP endpoint accepts a health round trip."""
+
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        if _mcp_health(config, selected):
+            return True
+        time.sleep(0.25)
+    return False
+
+
 def _tunnel_status(selected: ConfigPaths) -> dict[str, Any]:
     """Probe the foreground ``tunnel-client run`` daemon, not native runtimes."""
 
@@ -1104,6 +1119,17 @@ def _tunnel_command(args: argparse.Namespace) -> int:
         except ValueError as exc:
             print(str(exc), file=sys.stderr)
             return 2
+        # systemd's After= ordering only guarantees that the MCP service has
+        # been started before this unit. Type=simple does not mean that the
+        # HTTP listener is already accepting connections. tunnel-client
+        # snapshots its initial MCP probe into readiness, so starting during
+        # that short window can leave /readyz latched at 503 after recovery.
+        if not _wait_for_mcp_endpoint(config, selected):
+            print(
+                "MCP server did not become healthy before tunnel startup",
+                file=sys.stderr,
+            )
+            return 1
         command = [
             str(TUNNEL_BIN),
             "run",

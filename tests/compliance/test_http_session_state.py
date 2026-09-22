@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import threading
+
 import os
 import shlex
 import subprocess
@@ -830,6 +832,180 @@ class HTTPSessionStateTests(unittest.TestCase):
                         )
                     )
                     self.assertEqual(current["relative_path"], "a")
+
+
+    def test_stateless_http_patches_apply_directly_to_canonical_workspace(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            projects = root / "projects"
+            repo = self._repo(projects, "a")
+            (repo / "file.txt").write_text("initial\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(repo), "add", "file.txt"], check=True)
+            subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "add file.txt"], check=True)
+            config_root = root / "config"
+            with patch.dict(
+                os.environ, {"DEVMCP_CONFIG_DIR": str(config_root)}, clear=False
+            ):
+                with self._server(repo, projects) as client_1:
+                    patch1 = (
+                        "*** Begin Patch\n"
+                        "*** Update File: file.txt\n"
+                        "@@ -1,1 +1,1 @@\n"
+                        "-initial\n"
+                        "+modified_step1\n"
+                        "*** End Patch\n"
+                    )
+                    res1 = structured(client_1.call_tool("apply_patch", {"patch": patch1}))
+                    self.assertEqual(res1["workspace"], str(repo.resolve()))
+                    self.assertEqual((repo / "file.txt").read_text(), "modified_step1\n")
+
+                    # Second tool call arrives via new stateless HTTP session (simulating ChatGPT)
+                    with MCPClient(repo, url=client_1.url) as client_2:
+                        patch2 = (
+                            "*** Begin Patch\n"
+                            "*** Update File: file.txt\n"
+                            "@@ -1,1 +1,1 @@\n"
+                            "-modified_step1\n"
+                            "+modified_step2\n"
+                            "*** End Patch\n"
+                        )
+                        res2 = structured(client_2.call_tool("apply_patch", {"patch": patch2}))
+                        self.assertEqual(res2["workspace"], str(repo.resolve()))
+                        self.assertEqual((repo / "file.txt").read_text(), "modified_step2\n")
+
+                    # Third tool call (read_file / git_status) arrives via fresh stateless session
+                    with MCPClient(repo, url=client_1.url) as client_3:
+                        read_res = structured(client_3.call_tool("read_file", {"path": "file.txt"}))
+                        self.assertEqual(read_res["workspace"], str(repo.resolve()))
+                        self.assertEqual(read_res["content"], "modified_step2\n")
+
+                        status_res = structured(client_3.call_tool("git_status", {}))
+                        self.assertEqual(status_res["workspace"], str(repo.resolve()))
+                        self.assertFalse(status_res.get("clean", True))
+                        paths = [e["path"] for e in status_res.get("entries", [])]
+                        self.assertIn("file.txt", paths)
+
+
+    def test_concurrent_stateless_http_patches_isolate_parallel_writers(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            projects = root / "projects"
+            repo = self._repo(projects, "a")
+            (repo / "file.txt").write_text("initial\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(repo), "add", "file.txt"], check=True)
+            subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "add file.txt"], check=True)
+            config_root = root / "config"
+            with patch.dict(
+                os.environ, {"DEVMCP_CONFIG_DIR": str(config_root)}, clear=False
+            ):
+                with self._server(repo, projects) as client_1:
+                    t1_res: dict[str, Any] = {}
+                    t2_res: dict[str, Any] = {}
+                    started = threading.Event()
+
+                    def run_t1():
+                        with MCPClient(repo, url=client_1.url) as c1:
+                            started.set()
+                            cmd = "python3 -c \"import time; time.sleep(1.0); open('t1.txt', 'w').write('done')\""
+                            res = structured(c1.call_tool("exec_command", {"cmd": cmd, "yield_time_ms": 3000}))
+                            t1_res.update(res)
+
+                    def run_t2():
+                        started.wait(timeout=5)
+                        time.sleep(0.2)
+                        with MCPClient(repo, url=client_1.url) as c2:
+                            patch2 = (
+                                "*** Begin Patch\n"
+                                "*** Update File: file.txt\n"
+                                "@@ -1,1 +1,1 @@\n"
+                                "-initial\n"
+                                "+parallel_writer2\n"
+                                "*** End Patch\n"
+                            )
+                            res = structured(c2.call_tool("apply_patch", {"patch": patch2}))
+                            t2_res.update(res)
+
+                    th1 = threading.Thread(target=run_t1)
+                    th2 = threading.Thread(target=run_t2)
+                    th1.start()
+                    th2.start()
+                    th1.join()
+                    th2.join()
+
+                    self.assertEqual(t1_res.get("workspace"), str(repo.resolve()))
+                    self.assertNotEqual(t2_res.get("workspace"), str(repo.resolve()))
+                    self.assertIn("worktrees", str(t2_res.get("workspace", "")))
+                    self.assertTrue((repo / "t1.txt").is_file())
+                    self.assertEqual((repo / "file.txt").read_text(), "initial\n")
+
+    def test_explicit_context_http_patches_and_isolation(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            projects = root / "projects"
+            repo = self._repo(projects, "a")
+            (repo / "file.txt").write_text("initial\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(repo), "add", "file.txt"], check=True)
+            subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "add file.txt"], check=True)
+            config_root = root / "config"
+            with patch.dict(
+                os.environ, {"DEVMCP_CONFIG_DIR": str(config_root)}, clear=False
+            ):
+                with self._server(repo, projects) as client_1:
+                    info1 = structured(client_1.call_tool("server_info", {}))
+                    ctx_1 = info1["context_id"]
+
+                    patch_text = (
+                        "*** Begin Patch\n"
+                        "*** Update File: file.txt\n"
+                        "@@ -1,1 +1,1 @@\n"
+                        "-initial\n"
+                        "+explicit_client1\n"
+                        "*** End Patch\n"
+                    )
+                    preview = structured(client_1.call_tool("preview_patch", {
+                        "patch": patch_text,
+                        "context_id": ctx_1,
+                    }))
+                    self.assertTrue(preview.get("clean"))
+
+                    res1 = structured(client_1.call_tool("apply_patch", {
+                        "patch": patch_text,
+                        "context_id": ctx_1,
+                    }))
+                    self.assertEqual(res1["workspace"], str(repo.resolve()))
+                    self.assertEqual((repo / "file.txt").read_text(), "explicit_client1\n")
+
+                    read_back = structured(client_1.call_tool("read_file", {
+                        "path": "file.txt",
+                        "context_id": ctx_1,
+                    }))
+                    self.assertEqual(read_back["content"], "explicit_client1\n")
+
+                    # Second client connects with fresh context
+                    with MCPClient(repo, url=client_1.url) as client_2:
+                        info2 = structured(client_2.call_tool("server_info", {}))
+                        ctx_2 = info2["context_id"]
+                        self.assertNotEqual(ctx_1, ctx_2)
+
+                        patch_text2 = (
+                            "*** Begin Patch\n"
+                            "*** Update File: file.txt\n"
+                            "@@ -1,1 +1,1 @@\n"
+                            "-explicit_client1\n"
+                            "+explicit_client2\n"
+                            "*** End Patch\n"
+                        )
+                        res2 = structured(client_2.call_tool("apply_patch", {
+                            "patch": patch_text2,
+                            "context_id": ctx_2,
+                        }))
+                        self.assertNotEqual(res2["workspace"], str(repo.resolve()))
+                        self.assertIn("worktrees", str(res2.get("workspace", "")))
+                        self.assertEqual((repo / "file.txt").read_text(), "explicit_client1\n")
 
 
 if __name__ == "__main__":

@@ -29,6 +29,7 @@ class LogicalContextState:
     leases: int = 0
     mutation_workspace_claimed: bool = False
     lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
+    explicit: bool = False
 
 
 class LogicalContextRegistry:
@@ -65,6 +66,8 @@ class LogicalContextRegistry:
         canonical_project_root: Path,
         effective_workspace_root: Path,
         default_cwd: Path,
+        *,
+        explicit: bool = True,
     ) -> LogicalContextState:
         self.prune()
         evicted: LogicalContextState | None = None
@@ -79,7 +82,7 @@ class LogicalContextRegistry:
                     raise RuntimeError("maximum leased logical-context count reached")
                 oldest_id = min(
                     evictable,
-                    key=lambda item: self._contexts[item].last_seen,
+                    key=lambda item: (self._contexts[item].explicit, self._contexts[item].last_seen),
                 )
                 evicted = self._contexts.pop(oldest_id, None)
             context_id = "ctx_" + secrets.token_urlsafe(24)
@@ -88,6 +91,7 @@ class LogicalContextRegistry:
                 canonical_project_root=canonical_project_root.resolve(strict=True),
                 effective_workspace_root=effective_workspace_root.resolve(strict=True),
                 default_cwd=default_cwd.resolve(strict=True),
+                explicit=explicit,
             )
             self._contexts[context_id] = state
         if evicted is not None:
@@ -148,7 +152,8 @@ class LogicalContextRegistry:
             contended = any(
                 other is not state
                 and other.mutation_workspace_claimed
-                and other.canonical_project_root == state.canonical_project_root
+                and other.effective_workspace_root == state.canonical_project_root
+                and (other.explicit or other.leases > 0)
                 for other in self._contexts.values()
             )
             state.mutation_workspace_claimed = True

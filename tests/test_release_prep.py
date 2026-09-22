@@ -1056,6 +1056,7 @@ class ReleaseLifecycleTests(unittest.TestCase):
             fake_client.touch()
             with (
                 patch.object(cli, "TUNNEL_BIN", fake_client),
+                patch.object(cli, "_wait_for_mcp_endpoint", return_value=True),
                 patch.object(
                     cli.subprocess,
                     "run",
@@ -1089,6 +1090,7 @@ class ReleaseLifecycleTests(unittest.TestCase):
             fake_client.touch()
             with (
                 patch.object(cli, "TUNNEL_BIN", fake_client),
+                patch.object(cli, "_wait_for_mcp_endpoint", return_value=True),
                 patch.object(
                     cli.subprocess,
                     "run",
@@ -1117,6 +1119,32 @@ class ReleaseLifecycleTests(unittest.TestCase):
                 self.assertEqual(
                     selected.mcp_authorization_header.stat().st_mode & 0o777, 0o600
                 )
+
+    def test_foreground_tunnel_run_waits_for_mcp_health_before_starting_client(
+        self,
+    ) -> None:
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.dict(os.environ, {"DEVMCP_CONFIG_DIR": tmp}, clear=False),
+        ):
+            selected = paths()
+            config = load_config(selected, workspace=tmp)
+            config["tunnel_id"] = "tunnel-fixture"
+            save_config(config, selected)
+            write_secret(selected.mcp_token, "fixture-token")
+            write_secret(selected.control_plane_key, "fixture-key")
+            fake_client = Path(tmp) / "tunnel-client"
+            fake_client.touch()
+            with (
+                patch.object(cli, "TUNNEL_BIN", fake_client),
+                patch.object(cli, "_wait_for_mcp_endpoint", return_value=False) as wait,
+                patch.object(cli.subprocess, "run") as run,
+            ):
+                self.assertEqual(
+                    cli._tunnel_command(SimpleNamespace(tunnel_action="run")), 1
+                )
+            wait.assert_called_once_with(config, selected)
+            run.assert_not_called()
 
     def test_status_accepts_tunnel_health_endpoint_shape(self) -> None:
         healthy, ready = cli._tunnel_health_flags(
